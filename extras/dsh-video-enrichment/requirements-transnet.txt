@@ -1,0 +1,6 @@
+-r requirements.txt
+tensorflow>=2.10,<2.16
+ffmpeg-python>=0.2.0
+Pillow>=10.0.0
+# Install TransNet V2 inference code separately; set TRANSNET_WEIGHTS to the weights dir.
+# See https://github.com/soCzech/TransNetV2

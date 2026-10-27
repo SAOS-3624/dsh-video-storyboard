@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { analyzeAudio, detectOnsets, detectSilence, measureLoudness } from '../src/audio.js';
+import {
+  analyzeAudio, detectOnsets, detectSilence, measureLoudness, parseSilenceLog,
+} from '../src/audio.js';
 import { alignCells, parseSrt, speechCurve } from '../src/asr.js';
 import { DEFAULT_FFMPEG } from '../src/probe.js';
 import { addAudioStrip, composeSheet, layoutCanvas, STRIP_BAR, STRIP_SEP } from '../src/sheet.js';
@@ -153,6 +155,25 @@ function fakeLoudness() {
   }
   return { series, step: 0.1 };
 }
+
+test('parseSilenceLog: 缺 silence_end 时不把 start 加两遍', () => {
+  const log = 'silence_start: 1.20\nsilence_end: 2.50\nsilence_start: 4.00\n';
+  const full = parseSilenceLog(log, { start: 600, end: 650, minDur: 0.6 });
+  assert.equal(full.length, 2);
+  assert.deepEqual(full[0], { from: 601.2, to: 602.5 });
+  // 缺 end：截到窗口终点，而不是 2*start + …
+  assert.deepEqual(full[1], { from: 604, to: 650 });
+
+  // from = 1 + 100 = 101；缺 end → from + minDur = 101.6（绝不是 201.6）
+  const noWindow = parseSilenceLog('silence_start: 1.00\n', { start: 100, minDur: 0.6 });
+  assert.deepEqual(noWindow, [{ from: 101, to: 101.6 }]);
+});
+
+test('detectOnsets: offset 平移成绝对时间', () => {
+  const ev = detectOnsets(fakeLoudness(), { offset: 600 });
+  const rise = ev.find((e) => e.kind === 'rise');
+  assert.ok(rise && Math.abs(rise.t - 602) < 0.7, `rise 应在 602 附近，实得 ${rise?.t}`);
+});
 
 test('detectOnsets: 抓到突然变响与突然安静', () => {
   const ev = detectOnsets(fakeLoudness());

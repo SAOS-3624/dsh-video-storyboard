@@ -75,6 +75,13 @@ export function storyboardToolSpec() {
         enum: ['auto', 'off'],
         description: 'Default "auto": use the embedded subtitle track if present, otherwise ASR when configured. "off" skips speech entirely.',
       },
+      enrichment: {
+        type: 'string',
+        enum: ['auto', 'off'],
+        description: 'Optional DSH enrichment sidecar (~/.dsh/video.json): remote shot detector (TransNet-class), ' +
+          'speaker diarization, emotion/events. Default "auto" uses the sidecar only when configured; ' +
+          '"off" keeps the built-in HSV+loudness path. Failures never break the storyboard.',
+      },
       detail: {
         type: 'string',
         enum: ['low', 'med', 'high'],
@@ -168,6 +175,13 @@ export function zoomToolSpec() {
         description: 'Minimum spacing between cells in seconds (default 1.2). Lower it to 0.3-0.5 ' +
           'when re-reading a fast-cut montage so short shots get their own cell instead of being merged.',
       },
+      mode: {
+        type: 'string',
+        enum: ['temporal', 'spatial'],
+        description: 'temporal (default): denser time samples for action order. ' +
+          'spatial: fewer larger cells to read faces/UI. Reuses prior storyboard analysis when the ' +
+          'window is covered — no re-scan / re-ASR.',
+      },
     },
     output: {
       schema: {
@@ -246,6 +260,9 @@ export function validateToolArgs(args) {
   if (args.transcript !== undefined && !['auto', 'off'].includes(args.transcript)) {
     problems.push("transcript must be 'auto' or 'off'");
   }
+  if (args.enrichment !== undefined && !['auto', 'off'].includes(args.enrichment)) {
+    problems.push("enrichment must be 'auto' or 'off'");
+  }
   if (args.cellRange !== undefined) {
     const r = args.cellRange;
     if (!Array.isArray(r) || r.length !== 2 || r.some((v) => !Number.isInteger(v))) {
@@ -276,5 +293,8 @@ export function validateZoomArgs(args) {
     problems.push('cells must be an integer 1..9');
   }
   if (args.minGap !== undefined && !(args.minGap >= 0)) problems.push('minGap must be >= 0');
+  if (args.mode !== undefined && !['temporal', 'spatial'].includes(args.mode)) {
+    problems.push("mode must be 'temporal' or 'spatial'");
+  }
   return problems;
 }

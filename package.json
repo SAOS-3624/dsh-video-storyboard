@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-storyboard",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Scene-aware storyboard for DeepSeek Harness: one addressable grid per video (numbered cells, timestamps, transcript, audio envelope) so a text-only agent can look at the video itself instead of being told a summary.",
   "keywords": [
     "dsh",
@@ -33,7 +33,13 @@
     "./probe": "./src/probe.js",
     "./sheet": "./src/sheet.js",
     "./pipeline": "./src/pipeline.js",
-    "./tool-spec": "./src/tool-spec.js"
+    "./analyze": "./src/analyze.js",
+    "./plan-storyboard": "./src/plan-storyboard.js",
+    "./render": "./src/render.js",
+    "./candidates": "./src/candidates.js",
+    "./memory-adapter": "./src/memory-adapter.js",
+    "./tool-spec": "./src/tool-spec.js",
+    "./enrichment": "./src/enrichment/index.js"
   },
   "bin": {
     "dsh-video-scan": "./bin/scan-video.mjs",
@@ -44,6 +50,7 @@
     "bin",
     "scripts",
     "docs",
+    "extras",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md",
@@ -59,7 +66,7 @@
   "scripts": {
     "test": "node --test",
     "prepublishOnly": "npm test",
-    "check": "for f in src/*.js bin/*.mjs scripts/*.mjs; do node --check \"$f\" || exit 1; done"
+    "check": "node scripts/syntax-check.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.7"

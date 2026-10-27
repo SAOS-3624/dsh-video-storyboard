@@ -65,11 +65,21 @@ function mergeShorterThan(out, minGap) {
 }
 
 /** 段长中位数：用来判断"这条片子能给到的最细粒度是多少" */
-function medianDuration(segs) {
+export function medianDuration(segs) {
   const d = segs.map(segDur).sort((a, b) => a - b);
   if (d.length === 0) return 0;
   const mid = Math.floor(d.length / 2);
   return d.length % 2 ? d[mid] : (d[mid - 1] + d[mid]) / 2;
+}
+
+/**
+ * 请求的 minGap 被素材粒度钳制后的有效值（与 fitSegments / planCellRanges 同口径）。
+ */
+export function resolveEffectiveMinGap(segs, minGap, { cells = 0, duration = 0 } = {}) {
+  if (!(minGap > 0)) return 0;
+  let gap = Math.min(minGap, Math.max(0.2, medianDuration(segs) * 0.9));
+  if (cells > 0 && duration > 0) gap = Math.min(gap, duration / cells);
+  return +gap.toFixed(4);
 }
 
 /**
@@ -83,7 +93,7 @@ export function fitSegments(segs, k, { minGap = 0 } = {}) {
   let out = segs.map((s) => [Number(s[0]), Number(s[1])]);
   // minGap 是"偏好"，不能超过素材本身能提供的粒度：
   // 一条全是 1s 短镜头的片子，硬按 1.2s 合并会把 6 段并成 3 段，反而凑不够格数。
-  const gap = minGap > 0 ? Math.min(minGap, Math.max(0.2, medianDuration(out) * 0.9)) : 0;
+  const gap = resolveEffectiveMinGap(out, minGap);
 
   out = mergeShorterThan(out, gap);
 

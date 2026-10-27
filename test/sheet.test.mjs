@@ -9,8 +9,8 @@ import { promisify } from 'node:util';
 import {
   BACKGROUND, BADGE_FG, DIGITS, DIGIT_H, DIGIT_W, PAD_FILL,
   badgeScale, composeSheet, drawBadge, drawGlyphs, encodeRaw, extractFrameRaw,
-  extractSharpest, fillRect, layoutCanvas, sharpness,
-  STRIP_BAR, addAudioStrip,
+  extractSharpest, fillRect, formatBadgeTime, layoutCanvas, sharpness,
+  sharpSearchWindow, thinCutTicks,
 } from '../src/sheet.js';
 import { DEFAULT_FFMPEG, probeVideo } from '../src/probe.js';
 
@@ -109,6 +109,54 @@ test('drawBadge: 左上角出现深色底 + 黄色字形', () => {
   }
   assert.ok(yellow > 10, `应有黄色字形像素，实得 ${yellow}`);
   assert.ok(dark > 100, `应有黑底像素，实得 ${dark}`);
+});
+
+test('formatBadgeTime: m:ss 整数秒', () => {
+  assert.equal(formatBadgeTime(0), '0:00');
+  assert.equal(formatBadgeTime(77.2), '1:17');
+  assert.equal(formatBadgeTime(3661), '61:01');
+});
+
+test('drawGlyphs: 冒号是上下两点', () => {
+  const w = 40;
+  const h = 30;
+  const buf = Buffer.alloc(w * h * 3);
+  drawGlyphs(buf, w, h, ':', 2, 2, 3, [255, 255, 255]);
+  const lit = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (px(buf, w, x, y).some((v) => v > 0)) lit.push(y);
+    }
+  }
+  const uniq = [...new Set(lit)].sort((a, b) => a - b);
+  assert.ok(uniq.length >= 2, `冒号应至少两行有像素，实得 ${uniq}`);
+  assert.ok(uniq.at(-1) - uniq[0] >= 3, '上下两点应有间距');
+});
+
+test('composeSheet: burn=index+time 比 index 多一行徽标', () => {
+  const { cellW, cellH } = layoutCanvas(1, 1, 16 / 9, 80_000);
+  const solid = Buffer.alloc(cellW * cellH * 3, 180);
+  const frames = [{ buffer: solid, index: 1, t: 77.2 }];
+  const only = composeSheet({
+    frames, cols: 1, rows: 1, cellAspect: 16 / 9, budget: 80_000, burn: 'index',
+  });
+  const both = composeSheet({
+    frames, cols: 1, rows: 1, cellAspect: 16 / 9, budget: 80_000, burn: 'index+time',
+  });
+  const countDark = (buf, width) => {
+    let n = 0;
+    for (let y = 0; y < Math.min(80, Math.floor(width / 4)); y++) {
+      for (let x = 0; x < Math.min(120, Math.floor(width / 3)); x++) {
+        const [r, g, b] = px(buf, width, x, y);
+        if (r < 40 && g < 40 && b < 40) n++;
+      }
+    }
+    return n;
+  };
+  assert.ok(
+    countDark(both.buffer, both.width) > countDark(only.buffer, only.width) * 1.3,
+    '带时间码的徽标底应明显更高',
+  );
 });
 
 /* ---------------------------------------------------------------- 锐度 */
@@ -310,30 +358,23 @@ test('e2e: thumb 模式返回段内的真实时刻，而不是段起点', async 
   assert.ok(frame.t >= 0.6 && frame.t <= 1.0, `thumb 时刻应在段内，实得 ${frame.t}`);
 });
 
-/* ---------------------------------------------------------------- 音频条带 */
-
-test('addAudioStrip: 柱子画在灰块之上（灰块只在柱子上方露出）', () => {
-  const width = 100;
-  const height = 40;
-  const stripH = 10;
-  const sheet = { buffer: Buffer.alloc(width * height * 3), width, height };
-  // 恒定 -20 dB：归一化后柱子占条带约 60%，上方留出灰色，正好能验证层级
-  const series = Array(200).fill(-20);
-  const out = addAudioStrip(sheet, {
-    loudness: { series, step: 0.1 },
-    silences: [{ from: 2, to: 4 }],          // 10 秒里 2–4 秒静音
-    cuts: [],
-    window: { from: 0, to: 10 },
-    stripH,
-  });
-  const buf = out.buffer;
-  const x = 30;                              // 3.0s，落在静音里
-  const row = (y) => ((height + y) * width + x) * 3;
-  const isGrey = (i) => buf[i] === 42 && buf[i + 1] === 42 && buf[i + 2] === 46;
-  const isBar = (i) => buf[i] === STRIP_BAR[0] && buf[i + 1] === STRIP_BAR[1] && buf[i + 2] === STRIP_BAR[2];
-
-  // 第 0 行是分隔线（60,60,66），从第 1 行开始才是条带
-  assert.ok(isGrey(row(1)), '静音列顶部应露出灰色 (42,42,46)');
-  assert.ok(isBar(row(stripH - 1)), '柱子应压在灰块之上（最底行是青色）');
+test('thinCutTicks: 过密切点被抽稀且保序', () => {
+  const cuts = Array.from({ length: 200 }, (_, i) => i * 0.1);
+  const thinned = thinCutTicks(cuts, { from: 0, to: 20, maxTicks: 20 });
+  assert.ok(thinned.length <= 20);
+  assert.equal(thinned[0], 0);
+  assert.ok(thinned.at(-1) <= 20);
+  for (let i = 1; i < thinned.length; i++) assert.ok(thinned[i] >= thinned[i - 1]);
 });
 
+test('sharpSearchWindow: focusAt 收窄搜索并保留代表点', () => {
+  const w = sharpSearchWindow({
+    at: 10, dur: 20, focusAt: 18, candidates: 3, margin: 0.25,
+  });
+  assert.ok(w.at >= 10);
+  assert.ok(w.at + w.dur <= 30.001);
+  assert.ok(w.seedTimes.every((t) => t >= w.at - 0.001 && t <= w.at + w.dur + 0.001));
+  assert.ok(w.seedTimes.some((t) => Math.abs(t - 18) < 0.05), `应含 focus: ${w.seedTimes}`);
+  // 搜索窗应明显小于整段 20s
+  assert.ok(w.dur < 10, `focus 窗应收窄，实得 ${w.dur}`);
+});

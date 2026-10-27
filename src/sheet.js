@@ -40,6 +40,14 @@ export const DIGITS = {
 export const DIGIT_W = 5;
 export const DIGIT_H = 7;
 
+/** 徽标时间码：`m:ss`（整数秒）。小格子上小数位读不清，不如省像素。 */
+export function formatBadgeTime(t) {
+  const sec = Math.max(0, Number(t) || 0);
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 /**
  * 画布尺寸：整图面积 <= budget，格宽高按剩余空间均分。
  * @returns {{width:number,height:number,cellW:number,cellH:number}}
@@ -82,14 +90,29 @@ export function fillRect(buf, width, height, x, y, w, h, color, alpha = 1) {
   }
 }
 
-/** 用点阵字形画一个字符串（只支持 0-9 与 "-"），返回实际占用尺寸 */
+/** 单字符步进宽度（含字间距）；冒号比数字窄一截，省横向像素。 */
+function glyphAdvance(ch, scale) {
+  if (ch === ':') return Math.max(2, Math.round(DIGIT_W * scale * 0.45)) + scale;
+  return (DIGIT_W + 1) * scale;
+}
+
+/** 用点阵字形画一个字符串（支持 0-9、"-"、":"），返回实际占用尺寸 */
 export function drawGlyphs(buf, width, height, text, x, y, scale, color) {
   let cursor = x;
   for (const ch of String(text)) {
     if (ch === '-') {
       fillRect(buf, width, height, cursor, y + Math.floor(DIGIT_H * scale * 0.6),
         DIGIT_W * scale, Math.max(1, scale), color);
-      cursor += (DIGIT_W + 1) * scale;
+      cursor += glyphAdvance(ch, scale);
+      continue;
+    }
+    if (ch === ':') {
+      const cx = cursor + Math.floor(glyphAdvance(ch, scale) / 2) - Math.ceil(scale / 2);
+      const top = y + Math.floor(DIGIT_H * scale * 0.25);
+      const bot = y + Math.floor(DIGIT_H * scale * 0.65);
+      fillRect(buf, width, height, cx, top, scale, scale, color);
+      fillRect(buf, width, height, cx, bot, scale, scale, color);
+      cursor += glyphAdvance(ch, scale);
       continue;
     }
     const glyph = DIGITS[ch];
@@ -101,7 +124,7 @@ export function drawGlyphs(buf, width, height, text, x, y, scale, color) {
         }
       }
     }
-    cursor += (DIGIT_W + 1) * scale;
+    cursor += glyphAdvance(ch, scale);
   }
   return { width: cursor - x, height: DIGIT_H * scale };
 }
@@ -118,18 +141,34 @@ export function badgeScale(cellH, cellW = Infinity, digits = 1, ratio = 0.18) {
   return Math.max(2, Math.min(byHeight, byWidth));
 }
 
+/** 量一行徽标文字的像素宽（与 drawGlyphs 步进一致） */
+function measureGlyphWidth(text, scale) {
+  let w = 0;
+  for (const ch of String(text)) {
+    if (ch === '-' || ch === ':' || DIGITS[ch]) w += glyphAdvance(ch, scale);
+  }
+  return Math.max(0, w - scale);
+}
+
 /**
  * 在一格里画编号徽标（黑底 + 黄字，左上角固定位置）。
  * 不透明优先：半透明底块在白板/雪景上会直接消失（实测见设计方案 §3.5）。
+ * `label` 可含 `\n` 画多行（`index+time`：编号 + 时间码）。
  */
 export function drawBadge(buf, width, height, x, y, cellW, cellH, label, ratio = 0.18) {
-  const digits = String(label).length;
-  const scale = badgeScale(cellH, cellW, digits, ratio);
+  const lines = String(label).split('\n').filter((s) => s.length > 0);
+  const longest = lines.reduce((n, line) => Math.max(n, line.length), 1);
+  const scale = badgeScale(cellH, cellW, longest, ratio);
   const pad = Math.max(2, Math.round(cellH * 0.025));
-  const textW = digits * (DIGIT_W + 1) * scale - scale;
-  const textH = DIGIT_H * scale;
+  const lineGap = Math.max(1, Math.round(scale * 0.5));
+  const textW = Math.max(...lines.map((line) => measureGlyphWidth(line, scale)));
+  const textH = lines.length * DIGIT_H * scale + (lines.length - 1) * lineGap;
   fillRect(buf, width, height, x, y, textW + pad * 2, textH + pad * 2, BADGE_BG, BADGE_ALPHA);
-  drawGlyphs(buf, width, height, label, x + pad, y + pad, scale, BADGE_FG);
+  let cy = y + pad;
+  for (const line of lines) {
+    drawGlyphs(buf, width, height, line, x + pad, cy, scale, BADGE_FG);
+    cy += DIGIT_H * scale + lineGap;
+  }
   return { w: textW + pad * 2, h: textH + pad * 2 };
 }
 
@@ -174,7 +213,11 @@ export function composeSheet(opts) {
       continue;
     }
     blit(buf, width, height, x, y, cellW, cellH, frame.buffer);
-    if (burn !== 'none') drawBadge(buf, width, height, x + 2, y + 2, cellW, cellH, frame.index, badgeRatio);
+    if (burn === 'none') continue;
+    const label = burn === 'index+time' && Number.isFinite(frame.t)
+      ? `${frame.index}\n${formatBadgeTime(frame.t)}`
+      : frame.index;
+    drawBadge(buf, width, height, x + 2, y + 2, cellW, cellH, label, badgeRatio);
   }
   return { buffer: buf, width, height, cellW, cellH };
 }
@@ -227,9 +270,7 @@ export function addAudioStrip(sheet, opts) {
   const span = Math.max(0.001, win.to - win.from);
   const t2x = (t) => Math.round(((t - win.from) / span) * (width - 1));
 
-  // 静音块：整段压暗（铺底），响度柱**画在它上面**。
-  // 早先试过"静音列不画柱子"，图更纯净但很难看——灰块变成一根根实心竖条，
-  // 把波形切断。柱子压上去之后，灰块只在柱子上方露出来，读起来是"波形 + 底色"。
+  // 静音块：整段压暗，先铺底
   for (const s of silences) {
     const x0 = Math.max(0, t2x(s.from));
     const x1 = Math.min(width - 1, t2x(s.to));
@@ -266,9 +307,8 @@ export function addAudioStrip(sheet, opts) {
     }
   }
 
-  // 切点刻度：顶部短竖线
-  for (const t of cuts) {
-    if (t < win.from || t > win.to) continue;
+  // 切点刻度：顶部短竖线（过密时抽稀，避免糊成黄带）
+  for (const t of thinCutTicks(cuts, { from: win.from, to: win.to, maxTicks: Math.max(40, Math.floor(width / 3)) })) {
     const x = t2x(t);
     for (let y = 0; y < Math.max(3, Math.round(stripH * 0.35)); y++) {
       const i = ((height + y) * width + x) * 3;
@@ -318,7 +358,71 @@ export function sharpness(buf, width, height) {
 }
 
 /**
+ * 切点刻度抽稀：同一窗口内最多画 maxTicks 根，均匀保留，避免蒙太奇糊成黄带。
+ * @param {number[]} cuts
+ * @param {{from:number,to:number,maxTicks?:number}} opts
+ */
+export function thinCutTicks(cuts, { from, to, maxTicks = 80 } = {}) {
+  const lo = Number(from);
+  const hi = Number(to);
+  const list = [...(cuts || [])]
+    .map(Number)
+    .filter((t) => Number.isFinite(t) && t >= lo && t <= hi)
+    .sort((a, b) => a - b);
+  const cap = Math.max(1, Math.floor(maxTicks));
+  if (list.length <= cap) return list;
+  const out = [];
+  for (let i = 0; i < cap; i++) {
+    const idx = Math.round((i * (list.length - 1)) / (cap - 1));
+    const t = list[idx];
+    if (!out.length || out[out.length - 1] !== t) out.push(t);
+  }
+  return out;
+}
+
+/**
+ * 锐度搜索窗口：有 focusAt（规划代表时刻）时，在其附近小窗内采候选，避免漂到段两端。
+ * @returns {{at:number,dur:number,seedTimes:number[]}}
+ */
+export function sharpSearchWindow({
+  at, dur, focusAt, focusRadius, candidates = 3, margin = 0.25,
+} = {}) {
+  const safeDur = Math.max(0, Number(dur) || 0);
+  const start = Number(at) || 0;
+  let searchAt = start;
+  let searchDur = safeDur;
+  const focus = Number(focusAt);
+  if (Number.isFinite(focus) && safeDur > 0) {
+    const radius = Number.isFinite(focusRadius)
+      ? Math.max(0.1, focusRadius)
+      : Math.min(2, Math.max(0.4, safeDur * 0.35));
+    const lo = Math.max(start, focus - radius);
+    const hi = Math.min(start + safeDur, focus + radius);
+    if (hi > lo + 0.05) {
+      searchAt = lo;
+      searchDur = hi - lo;
+    }
+  }
+  const pad = Math.min(margin, searchDur / 3);
+  const span = Math.max(0, searchDur - pad * 2);
+  const times = [];
+  if (candidates <= 1 || span < 0.1) {
+    times.push(searchDur > 0 ? searchAt + searchDur / 2 : searchAt);
+  } else {
+    for (let i = 0; i < candidates; i++) {
+      times.push(searchAt + pad + (span * i) / (candidates - 1));
+    }
+  }
+  if (Number.isFinite(focus) && focus >= start && focus <= start + safeDur) {
+    const near = times.some((t) => Math.abs(t - focus) < 0.04);
+    if (!near) times.push(focus);
+  }
+  return { at: searchAt, dur: searchDur, seedTimes: times.sort((a, b) => a - b) };
+}
+
+/**
  * 段内取最锐的一帧：均匀取 candidates 个候选点，各抽一帧，比 Laplacian 方差。
+ * 传入 focusAt（绝对秒）时优先在代表时刻附近搜索。
  *
  * 成本：candidates 次「seek + 解 1 帧」，而不是解码整段。3 帧 ≈ 3 倍单帧耗时，
  * 但仍是毫秒级——真正的开销是进程启动，不是解码。
@@ -326,18 +430,12 @@ export function sharpness(buf, width, height) {
 export async function extractSharpest(opts) {
   const {
     input, at, dur, cellW, cellH, ffmpegPath = DEFAULT_FFMPEG,
-    candidates = 3, margin = 0.25, timeoutMs,
+    candidates = 3, margin = 0.25, timeoutMs, focusAt, focusRadius,
   } = opts;
-  const safeDur = Math.max(0, dur || 0);
-  const pad = Math.min(margin, safeDur / 3);
-  const span = Math.max(0, safeDur - pad * 2);
-  const times = [];
-  if (candidates <= 1 || span < 0.1) {
-    times.push(safeDur > 0 ? at + safeDur / 2 : at);
-  } else {
-    for (let i = 0; i < candidates; i++) times.push(at + pad + (span * i) / (candidates - 1));
-  }
-  const picked = await Promise.all(times.map((t) =>
+  const { seedTimes } = sharpSearchWindow({
+    at, dur, focusAt, focusRadius, candidates, margin,
+  });
+  const picked = await Promise.all(seedTimes.map((t) =>
     extractFrameRaw({ input, at: t, cellW, cellH, ffmpegPath, timeoutMs })
       .then((f) => ({ ...f, sharp: sharpness(f.buffer, cellW, cellH) }))));
   return picked.reduce((best, cur) => (cur.sharp > best.sharp ? cur : best));

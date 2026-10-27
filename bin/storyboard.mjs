@@ -14,14 +14,15 @@ import { args as parse } from './_args.mjs';
 import { probeVideo } from '../src/probe.js';
 import { planWindows } from '../src/plan.js';
 import {
-  DETAIL_CHARS, formatManifest, formatTimeline, runStoryboard, saveStoryboards,
+  DETAIL_CHARS, buildEpisodeFromResult, formatManifest, formatTimeline, runStoryboard, saveStoryboards,
 } from '../src/pipeline.js';
 
 const opt = parse(process.argv.slice(2), {
   cells: 0, sheets: 0, from: 0, to: 0, threshold: 'auto', 'min-gap': 1.2,
   pick: 'sharp', burn: 'index', badge: 0.15, transcript: 'auto',
   out: 'storyboard.png', manifest: null, plan: 0, 'text-only': false, 'cell-range': null,
-  batch: 0, detail: 'med',
+  batch: 0, detail: 'med', strategy: 'coverage', episode: null,
+  fingerprints: true,
 });
 const input = opt._[0];
 if (!input) {
@@ -97,6 +98,8 @@ if (batchStep > 0) {
 
 const adaptive = !process.argv.includes('--no-adaptive');
 const textOnly = Boolean(opt['text-only']);
+const wantFingerprints = opt.fingerprints !== false
+  && !process.argv.includes('--no-fingerprints');
 const cellRange = (() => {
   const raw = opt['cell-range'];
   if (!raw) return null;
@@ -118,6 +121,8 @@ const r = await runStoryboard({
   transcript: String(opt.transcript),
   adaptive,
   textOnly,
+  strategy: String(opt.strategy || 'coverage'),
+  fingerprints: wantFingerprints,
 });
 
 console.log(`[probe] ${info.width}x${info.height} ${info.fps.toFixed(2)}fps ${info.duration.toFixed(2)}s` +
@@ -126,7 +131,8 @@ console.log(`[probe] ${info.width}x${info.height} ${info.fps.toFixed(2)}fps ${in
     ? `  window=${r.window.from.toFixed(1)}..${r.window.to.toFixed(1)}s` : ''));
 console.log(`[scan] ${r.summary.frames} 帧 → ${r.cuts.length} 个切点（阈值 ${r.threshold}，` +
   `${r.plan.adaptive ? `自适应 ${r.plan.bursts.length} 个密集段` : '均匀分配'}）`);
-console.log(`[plan] ${r.plan.cells} 格 × ${r.plan.sheets} 张 — ${r.plan.reason}`);
+console.log(`[plan] ${r.plan.cells} 格 × ${r.plan.sheets} 张 · ${r.plan.strategy ?? '?'} — ${r.plan.reason}`);
+if (r.status) console.log(`[status] shots=${r.status.shots} audio=${r.status.audio} transcript=${r.status.transcript}`);
 if (r.audio) console.log(`[audio] ${r.audio.summary}`);
 if (r.transcript) {
   console.log(`[transcript] ${r.transcript.source}${r.transcript.model ? ` (${r.transcript.model})` : ''}` +
@@ -134,29 +140,47 @@ if (r.transcript) {
     `${r.transcript.error ? `  ⚠️ ${r.transcript.error}` : ''}`);
 }
 
-const paths = await saveStoryboards(r, opt.out, { quality: 4 });
-for (const [i, sheet] of r.sheets.entries()) {
-  console.log(`[sheet] ${paths[i]}  ${sheet.width}x${sheet.height}  ${sheet.cols}x${sheet.rows}` +
-    `  cell≈${sheet.cellW}x${sheet.cellH}${sheet.stripH ? `  strip=${sheet.stripH}px` : ''}`);
+if (!textOnly) {
+  const paths = await saveStoryboards(r, opt.out, { quality: 4 });
+  for (const [i, sheet] of r.sheets.entries()) {
+    console.log(`[sheet] ${paths[i]}  ${sheet.width}x${sheet.height}  ${sheet.cols}x${sheet.rows}` +
+      `  cell≈${sheet.cellW}x${sheet.cellH}${sheet.stripH ? `  strip=${sheet.stripH}px` : ''}`);
+  }
 }
-console.log(`[done] ${Date.now() - t0}ms`);
+console.log(`[done] ${Date.now() - t0}ms` +
+  (r.timing ? `  (scan ${r.timing.shot_scan_ms}ms / audio ${r.timing.audio_ms}ms / asr ${r.timing.asr_ms}ms)` : ''));
 
 if (opt.manifest) {
   const payload = {
     input, window: r.window, threshold: r.threshold, summary: r.summary,
+    status: r.status, timing: r.timing,
     audio: r.audio ? { mean: r.audio.mean, peak: r.audio.peak, silences: r.audio.silences } : null,
     transcript: r.transcript,
-    plan: { cells: r.plan.cells, sheets: r.plan.sheets, adaptive: r.plan.adaptive, bursts: r.plan.bursts },
+    plan: {
+      cells: r.plan.cells, sheets: r.plan.sheets, adaptive: r.plan.adaptive,
+      strategy: r.plan.strategy, plan_id: r.plan.plan_id, bursts: r.plan.bursts,
+    },
     sheets: r.sheets.map((s) => ({
       sheet: s.sheet, cols: s.cols, rows: s.rows, width: s.width, height: s.height,
       stripH: s.stripH ?? null, cells: s.cells,
     })),
+    cells: r.cells ?? null,
   };
   await writeFile(opt.manifest, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
   console.log(`[manifest] ${opt.manifest}`);
 }
 
-if (opt.text) {
+if (opt.episode) {
+  const episode = buildEpisodeFromResult(r, {
+    trigger: 'cli',
+    path: input,
+    platform: 'local',
+  });
+  await writeFile(String(opt.episode), `${JSON.stringify(episode, null, 2)}\n`, 'utf8');
+  console.log(`[episode] ${opt.episode}`);
+}
+
+if (opt.text || textOnly) {
   console.log(`\n${formatManifest(r, {
     cellRange, maxCellChars: DETAIL_CHARS[String(opt.detail)] ?? DETAIL_CHARS.med,
   })}`);

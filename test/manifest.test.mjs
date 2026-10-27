@@ -7,7 +7,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DETAIL_CHARS, countTextInSilence, formatManifest, truncateAtSentence } from '../src/pipeline.js';
+import {
+  DETAIL_CHARS, PROBE_DUAL_MODE_MINUTES, formatManifest, formatProbe, truncateAtSentence,
+} from '../src/pipeline.js';
 
 /** 造一个 64 格的 result（每格 300 字），不跑 ffmpeg */
 function makeResult({ cells = 64, textLen = 300 } = {}) {
@@ -136,45 +138,93 @@ test('detail 三档：越小越省，且都从格边界截', () => {
   for (const { k, len } of variants) assert.ok(len > 0, `${k} 不该为空`);
 });
 
-/* ---------------------------------------------------------------- 切点列表 */
-
-test('formatManifest: 切点 ≤24 时列出精确时间', () => {
-  const r = makeResult({ cells: 16 });
-  r.cuts = [{ t: 12.75 }, { t: 16.13 }, { t: 44.5 }];
-  r.window = { from: 0, to: 100, duration: 100 };
-  const text = formatManifest(r, { maxChars: 200_000 });
-  assert.match(text, /cut points \(3\): 00:12\.75, 00:16\.13, 00:44\.50/);
+test('degraded 抽样扫描：清单必须警告 coverage / unscanned', () => {
+  const base = makeResult();
+  const text = formatManifest({
+    ...base,
+    degraded: true,
+    status_shots: 'degraded',
+    sample: {
+      coverage_ratio: 0.1,
+      unscanned_gap_count: 11,
+      unscanned_gaps: [{ from: 30, to: 300 }, { from: 330, to: 600 }],
+    },
+    plan: { ...base.plan, strategy: 'coverage', minGap: 0.8, bursts: [] },
+  }, { maxChars: 200_000 });
+  assert.match(text, /shots="sampled-degraded"/);
+  assert.match(text, /WARNING: shot scan is SAMPLED\/DEGRADED/);
+  assert.match(text, /coverage≈10%/);
+  assert.match(text, /unscanned examples/);
+  assert.match(text, /strategy="coverage"/);
 });
 
-test('formatManifest: 切点太多时不列（总览只给密度）', () => {
-  const r = makeResult({ cells: 16 });
-  r.cuts = Array.from({ length: 40 }, (_, i) => ({ t: i * 2 }));
-  r.window = { from: 0, to: 100, duration: 100 };
-  const text = formatManifest(r, { maxChars: 200_000 });
-  assert.ok(!/cut points/.test(text), '40 个切点不该逐条列出');
+test('effectiveMinGap / cutsUncertain 写进清单顶栏', () => {
+  const base = makeResult();
+  const text = formatManifest({
+    ...base,
+    plan: {
+      ...base.plan,
+      minGap: 2.0,
+      effective_min_gap: 0.54,
+      cuts_uncertain: true,
+      bursts: [],
+    },
+  }, { maxChars: 200_000 });
+  assert.match(text, /minGap="2"/);
+  assert.match(text, /effectiveMinGap="0\.54"/);
+  assert.match(text, /cutsUncertain="true"/);
+  assert.match(text, /requested minGap=2s was clamped to effectiveMinGap=0\.54s/);
+  assert.match(text, /cut list may be UNRELIABLE/);
 });
 
-/* ---------------------------------------------------------------- 台词/静音一致性 */
-
-test('countTextInSilence: 整句压在静音里才算', () => {
-  const silences = [{ from: 10, to: 14 }];
-  const segs = [
-    { from: 10.2, to: 13.5 },     // 几乎全在静音里 → 算
-    { from: 13.0, to: 15.0 },     // 只有 50% → 不算
-    { from: 20, to: 22 },         // 完全在外面 → 不算
-  ];
-  assert.equal(countTextInSilence(segs, silences), 1);
+test('degraded: motion 单独警告切点不可信', () => {
+  const base = makeResult();
+  const text = formatManifest({
+    ...base,
+    degraded: true,
+    degraded_kind: 'motion',
+    status_shots: 'degraded-motion',
+    motion: { median_shot_sec: 0.32, high_score_ratio: 0.22, p90: 38 },
+    plan: { ...base.plan, minGap: 1.2, effective_min_gap: 1.2, cuts_uncertain: true, bursts: [] },
+  }, { maxChars: 200_000 });
+  assert.match(text, /shots="degraded-motion"/);
+  assert.match(text, /degraded: motion/);
+  assert.match(text, /median shot ≈0\.32s/);
+  assert.doesNotMatch(text, /shots="sampled-degraded"/);
 });
 
-test('countTextInSilence: 没有静音段 / 没有台词都为 0', () => {
-  assert.equal(countTextInSilence([{ from: 1, to: 2 }], []), 0);
-  assert.equal(countTextInSilence([], [{ from: 1, to: 2 }]), 0);
-  assert.equal(countTextInSilence(undefined, undefined), 0);
+test('burst 清单提示 zoom / minGap', () => {
+  const base = makeResult();
+  const text = formatManifest({
+    ...base,
+    transcript: { source: 'subtitle', model: 'embedded', segments: 10 },
+    plan: {
+      ...base.plan,
+      bursts: [
+        { from: 10, to: 14, density: 2.2, shots: 9 },
+        { from: 80, to: 85, density: 1.8, shots: 6 },
+      ],
+    },
+  }, { maxChars: 200_000 });
+  assert.match(text, /cut bursts \(fast montage\)/);
+  assert.match(text, /video_zoom/);
+  assert.match(text, /minGap: 0\.4/);
 });
 
-test('formatManifest: 有台词压在静音里时给出提示', () => {
-  const r = makeResult({ cells: 4 });
-  r.transcript = { source: 'asr', model: 'fake', segments: 3, textInSilence: 2 };
-  const text = formatManifest(r, { maxChars: 200_000 });
-  assert.match(text, /2 line\(s\) of text sit inside a detected silence/);
+test('formatProbe: ≥8 分钟给出 STRUCTURE/SEQUENCE', () => {
+  assert.equal(PROBE_DUAL_MODE_MINUTES, 8);
+  const long = formatProbe({
+    path: 'a.mp4', duration: 9 * 60, width: 1920, height: 1080, fps: 24,
+    aspect: 16 / 9, rotation: 0, videoCodec: 'h264', container: 'mp4',
+    hasAudio: true, audioCodec: 'aac', hasSubtitle: false,
+  });
+  assert.match(long, /STRUCTURE/);
+  assert.match(long, /SEQUENCE/);
+  assert.match(long, /visual-only/);
+  const short = formatProbe({
+    path: 'b.mp4', duration: 120, width: 1280, height: 720, fps: 25,
+    aspect: 16 / 9, rotation: 0, videoCodec: 'h264', container: 'mp4',
+    hasAudio: true, audioCodec: 'aac', hasSubtitle: true,
+  });
+  assert.ok(!/STRUCTURE \(spoils/.test(short));
 });

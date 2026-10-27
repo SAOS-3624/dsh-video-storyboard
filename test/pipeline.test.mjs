@@ -11,7 +11,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { runStoryboard, formatManifest, saveStoryboards } from '../src/pipeline.js';
+import { runStoryboard, formatManifest, saveStoryboards, countTextInSilence } from '../src/pipeline.js';
 import { DEFAULT_FFMPEG } from '../src/probe.js';
 
 const run = promisify(execFile);
@@ -186,13 +186,16 @@ test('插件接线: apply() 注册一个叫 video_storyboard 的工具', async (
     assert.match(value.text, /<storyboard[\s\S]*cell 1/);
     assert.equal(value.images.length, 1);
 
-    // zoom 也要真跑一次：窗口收窄、单图、格数默认 6
+    // zoom 也要真跑一次：窗口收窄、单图、格数默认 6；minGap/transcript 必须接到管线
     saved.length = 0;
     const zoom = registered.find((t) => t.name === 'video_zoom');
-    const z = await zoom.execute({ input: fixture, from: 1, to: 3 });
+    const z = await zoom.execute({
+      input: fixture, from: 1, to: 3, cells: 4, minGap: 0.4, transcript: 'off',
+    });
     assert.equal(saved.length, 1);
     assert.equal(saved[0].data.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
     assert.match(z.text, /window="1\.00-3\.00"/);
+    assert.ok(z.images.length === 1);
 
     // probe 也真跑一次：不取帧、不花钱，只读容器头
     const probe = registered.find((t) => t.name === 'video_probe');
@@ -210,6 +213,51 @@ test('插件接线: apply() 注册一个叫 video_storyboard 的工具', async (
 });
 
 /* ---------------------------------------------------------------- 批量复用扫描 */
+
+test('e2e: zoom 口径 — grid + minGap + burn index+time', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeFixture(dir);
+
+  const r = await runStoryboard({
+    input: file, from: 0, to: 3, cells: 4, sheets: 1,
+    adaptive: false, minGap: 0.4, burn: 'index+time',
+    transcript: 'off', encode: false,
+  });
+  assert.equal(r.sheets.length, 1);
+  assert.ok(r.sheets[0].cols * r.sheets[0].rows >= 4);
+  assert.equal(r.plan.burn, 'index+time');
+  assert.equal(r.plan.minGap, 0.4);
+  // 每格时长应能短于默认 1.2（否则 minGap 没接到）
+  const durs = r.sheets[0].cells.map((c) => c.t_end - c.t_start);
+  assert.ok(Math.min(...durs) < 1.2, `minGap=0.4 时应允许短格，实得 ${durs}`);
+});
+
+test('countTextInSilence: 只数 >60% 压在静音里的句子', () => {
+  const segments = [{ from: 0, to: 2 }, { from: 10, to: 12 }];
+  const silences = [{ from: 0, to: 1.5 }, { from: 10, to: 10.2 }];
+  assert.equal(countTextInSilence(segments, silences), 1);
+  assert.equal(countTextInSilence([], silences), 0);
+  assert.equal(countTextInSilence(segments, []), 0);
+});
+
+test('e2e: 自适应路径也吃 minGap', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeFixture(dir);
+
+  const r = await runStoryboard({
+    input: file, cells: 4, adaptive: true, minGap: 1.5, transcript: 'off', encode: false,
+    strategy: 'density', // 覆盖策略用时间新颖性控间隔；密度路径直接吃 minGap
+  });
+  assert.ok(r.cuts.length > 0, 'fixture 应有切点，才会走自适应');
+  for (const c of r.sheets[0].cells) {
+    assert.ok(c.t_end - c.t_start + 1e-9 >= Math.min(1.5, 0.9),
+      `自适应格长应尊重 minGap，实得 ${c.t_end - c.t_start}`);
+  }
+});
 
 test('e2e: 传入 precomputed 时不再自己扫描', async (t) => {
   if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');

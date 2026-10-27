@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fitSegments, segDur, segmentsFromCuts, totalDur } from '../src/segments.js';
+import {
+  fitSegments, resolveEffectiveMinGap, segDur, segmentsFromCuts, totalDur,
+} from '../src/segments.js';
 
 /* ---------------------------------------------------------------- 切点 → 区间 */
 
@@ -108,4 +110,16 @@ test('fitSegments: k 非法抛错', () => {
 test('fitSegments: 段太短时停止拆分，不死循环', () => {
   const out = fitSegments([[0, 0.3]], 10);
   assert.ok(out.length <= 2, `不应把 0.3s 拆成 10 份，实得 ${out.length}`);
+});
+
+test('resolveEffectiveMinGap: 短镜头素材会把请求的 2.0 钳到粒度附近', () => {
+  // 中位段长 0.6 → grain = 0.54；请求 2.0 → 有效 0.54
+  const segs = [[0, 0.6], [0.6, 1.2], [1.2, 1.8], [1.8, 3.0]];
+  const gap = resolveEffectiveMinGap(segs, 2.0);
+  assert.ok(gap < 1.0, `effective=${gap} 不应仍是 2.0`);
+  assert.ok(Math.abs(gap - 0.54) < 0.02, `期望≈0.54，实得 ${gap}`);
+});
+
+test('resolveEffectiveMinGap: 无 minGap 返回 0', () => {
+  assert.equal(resolveEffectiveMinGap([[0, 5]], 0), 0);
 });

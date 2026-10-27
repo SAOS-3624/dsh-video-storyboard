@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readdir, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { cacheKey, pruneCache, readCache, withCache, writeCache } from '../src/cache.js';
+import {
+  CACHE_VERSION, cacheKey, pruneCache, readCache, withCache, writeCache,
+} from '../src/cache.js';
 
 const withTemp = async (fn) => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-cache-'));
@@ -37,7 +39,7 @@ test('读写往返', async () => {
     await writeCache('abc', { value: { cuts: 3 } }, { dir });
     const hit = await readCache('abc', { dir });
     assert.deepEqual(hit.value, { cuts: 3 });
-    assert.equal(hit.v, 1);
+    assert.equal(hit.v, CACHE_VERSION);
   });
 });
 
@@ -78,4 +80,28 @@ test('pruneCache: 超预算时删最旧的', async () => {
 test('pruneCache: 目录不存在时不炸', async () => {
   const r = await pruneCache({ dir: join(tmpdir(), 'no-such-dir-8f1a') });
   assert.equal(r.removed, 0);
+});
+
+test('withCache 命中触摸 mtime → LRU 保留热条目', async () => {
+  await withTemp(async (dir) => {
+    await writeCache('cold', { value: { pad: 'x'.repeat(800) } }, { dir });
+    await writeCache('hot', { value: { pad: 'y'.repeat(800) } }, { dir });
+    // 把 cold 设为更旧
+    const coldPath = join(dir, 'cold.json');
+    const hotPath = join(dir, 'hot.json');
+    const old = new Date(Date.now() - 60_000);
+    await utimes(coldPath, old, old);
+    await utimes(hotPath, old, old);
+    // 命中 hot → 刷新 mtime
+    const hit = await withCache('hot', async () => ({ pad: 'should-not' }), { dir });
+    assert.equal(hit.cached, true);
+    const hotM = (await stat(hotPath)).mtimeMs;
+    const coldM = (await stat(coldPath)).mtimeMs;
+    assert.ok(hotM > coldM, `hot mtime ${hotM} 应晚于 cold ${coldM}`);
+    const result = await pruneCache({ dir, maxBytes: 1200 });
+    assert.ok(result.removed >= 1);
+    const left = await readdir(dir);
+    assert.ok(left.includes('hot.json'), '热条目应保留');
+    assert.ok(!left.includes('cold.json'), '冷条目应被淘汰');
+  });
 });

@@ -95,23 +95,15 @@ export function suppressClose(cuts, minGap = 0.35) {
 }
 
 /**
- * 自适应阈值：按"每秒大约多少个切点"反推，而不是按分数倍数。
+ * 速率法规划：阈值 + 目标切点数。
+ * 过滤请用 `score > threshold`（严格大于），避免同分整簇被 `>=` 整批带进来。
  *
- * 为什么换掉"3×p95"（用 6 条真实视频打脸过）：
- *  - B-roll 类（p95=12.8）→ 3×=38 → 88 切点，OK
- *  - 快剪动画 PV（p90=26、p95=43）→ 3×=130 → **0 个切点**
- *  - 另一支 92s 的 PV（p95=32）→ 3×=96 → 14 个切点
- * 分数倍数在"切点极密"的素材上会把阈值推到切点带里面去。而这类素材恰恰是
- * 每个画面都不一样，倍数法必崩。
- *
- * 换成速率法后：目标约 1 个切点 / minGap 秒，再用 floor 兜住"整片不动"的素材
- * （一支 251s 的静态单镜头素材，p95=2.5，速率法会给出分数 3 的阈值 → floor 12 把它拉回来，切点 0）。
- *
- * @param {number[]} scores 逐帧分数
- * @param {{duration?:number, minGap?:number, floor?:number}} opts
+ * @returns {{threshold:number, target:number, gap:number}}
  */
-export function autoThreshold(scores, { duration, minGap, floor = 12 } = {}) {
-  if (!Array.isArray(scores) || scores.length === 0) return floor;
+export function planAutoThreshold(scores, { duration, minGap, floor = 12 } = {}) {
+  if (!Array.isArray(scores) || scores.length === 0) {
+    return { threshold: floor, target: 0, gap: 1.5 };
+  }
   const sorted = [...scores].sort((a, b) => a - b);
   const n = sorted.length;
   const total = duration > 0 ? duration : n / 25;
@@ -119,8 +111,77 @@ export function autoThreshold(scores, { duration, minGap, floor = 12 } = {}) {
   const gap = typeof minGap === 'number' ? minGap : Math.min(1.5, Math.max(0.5, total / 60));
   const target = Math.max(1, Math.min(n * 0.25, total / gap));   // 上限 25% 的帧
   const idx = Math.max(0, Math.min(n - 1, Math.floor(n - target)));
-  // 取整朝下：宁可多报一个切点（后续会合并），也不要因为四舍五入丢掉真切镜
-  return Math.max(floor, Math.floor(sorted[idx]));
+  // 取整朝下 + 1e-6：与 `score > threshold` 联用，把恰好落在分位上的同分簇挡在门外
+  const threshold = Math.max(floor, Math.floor(sorted[idx])) + 1e-6;
+  return { threshold, target: Math.round(target), gap };
+}
+
+/**
+ * 自适应阈值（兼容旧调用方，返回 number）。
+ * 内部等价于 `planAutoThreshold(...).threshold`。
+ */
+export function autoThreshold(scores, opts = {}) {
+  return planAutoThreshold(scores, opts).threshold;
+}
+
+/**
+ * suppressClose 之后若仍多于 target，按分数保留 top-N，再按时间排序。
+ * （同分簇即使用 `>` 过滤仍可能偏多时的第二道闸。）
+ */
+export function capCutsByScore(cuts, target) {
+  const list = Array.isArray(cuts) ? cuts : [];
+  const k = Math.max(0, Math.floor(Number(target) || 0));
+  if (!k || list.length <= k) return list;
+  return [...list]
+    .sort((a, b) => (b.score - a.score) || (a.t - b.t))
+    .slice(0, k)
+    .sort((a, b) => a.t - b.t);
+}
+
+/**
+ * 连续运镜 / 快闪：中位镜头 < 0.5s 且高分帧占比很高 → 切点计数不可信。
+ * @returns {{degraded:false}|{degraded:'motion', median_shot_sec:number, high_score_ratio:number, p90:number}}
+ */
+export function assessMotionDegraded(stats, cuts, { duration } = {}) {
+  const scores = (stats ?? []).map((s) => Number(s.score)).filter((v) => Number.isFinite(v));
+  if (scores.length < 30) return { degraded: false };
+
+  const dur = duration > 0 ? duration : (
+    stats.length ? Math.max(0.1, stats[stats.length - 1].t - stats[0].t) : 0
+  );
+  const times = [...(cuts ?? [])]
+    .map((c) => Number(c.t))
+    .filter((t) => Number.isFinite(t))
+    .sort((a, b) => a - b);
+  const gaps = [];
+  let prev = stats[0]?.t ?? 0;
+  for (const t of times) {
+    if (t > prev) gaps.push(t - prev);
+    prev = t;
+  }
+  const end = (stats[stats.length - 1]?.t ?? prev) || prev;
+  if (end > prev) gaps.push(end - prev);
+  if (!gaps.length && dur > 0) gaps.push(dur);
+  gaps.sort((a, b) => a - b);
+  const mid = gaps.length
+    ? (gaps.length % 2 ? gaps[Math.floor(gaps.length / 2)]
+      : (gaps[gaps.length / 2 - 1] + gaps[gaps.length / 2]) / 2)
+    : dur;
+
+  const sorted = [...scores].sort((a, b) => a - b);
+  const p90 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))];
+  const highRatio = scores.filter((v) => v >= p90).length / scores.length;
+
+  // 中位镜头极短 + 大量帧都在「高分带」→ 更像连续运动被当成切点
+  if (mid < 0.5 && highRatio >= 0.18) {
+    return {
+      degraded: 'motion',
+      median_shot_sec: +mid.toFixed(3),
+      high_score_ratio: +highRatio.toFixed(3),
+      p90: +p90.toFixed(2),
+    };
+  }
+  return { degraded: false, median_shot_sec: +mid.toFixed(3), high_score_ratio: +highRatio.toFixed(3) };
 }
 
 /** 分数分布的摘要，供 suggest() 判断"内容有多密" */
@@ -140,7 +201,7 @@ export function scanSummary(scores) {
  * 扫描整条视频，返回切点与逐帧分数。
  * @param {{input:string, fps:number, ffmpegPath?:string, width?:number, height?:number,
  *          threshold?:number|'auto', minGap?:number, signal?:AbortSignal, onProgress?:Function}} opts
- *   threshold='auto' 时按 p95×3 自适应（推荐，真实素材与合成素材都能用）
+ *   threshold='auto' 时用速率法（约 1 切 / minGap 秒，见 autoThreshold；已弃用 p95×3）
  * @returns {Promise<{cuts:Array<{t:number,score:number}>, stats:Array<{t:number,score:number}>,
  *                    frames:number, threshold:number}>}
  */
@@ -209,12 +270,38 @@ export function scanShots(opts) {
         return;
       }
       const scores = stats.map((s) => s.score);
-      const used = threshold === 'auto'
-        ? autoThreshold(scores, { duration: end !== undefined ? end - start : frame / fps })
-        : threshold;
-      const raw = stats.filter((s) => s.score >= used).map((s) => ({ ...s }));
-      const cuts = suppressClose(raw, minGap);
-      resolve({ cuts, stats, frames: frame, threshold: used, summary: scanSummary(scores) });
+      const duration = end !== undefined ? end - start : frame / fps;
+      let used;
+      let target = 0;
+      if (threshold === 'auto') {
+        const plan = planAutoThreshold(scores, { duration, minGap });
+        used = plan.threshold;
+        target = plan.target;
+      } else {
+        used = Number(threshold);
+      }
+      // 严格 > ：同分落在阈值上的整簇不进候选
+      const raw = stats.filter((s) => s.score > used).map((s) => ({ ...s }));
+      let cuts = suppressClose(raw, minGap);
+      if (target > 0) cuts = capCutsByScore(cuts, target);
+      const motion = assessMotionDegraded(stats, cuts, { duration });
+      resolve({
+        cuts,
+        stats,
+        frames: frame,
+        threshold: used,
+        summary: scanSummary(scores),
+        target_cuts: target || undefined,
+        ...(motion.degraded === 'motion' ? {
+          degraded: 'motion',
+          degraded_kind: 'motion',
+          motion: {
+            median_shot_sec: motion.median_shot_sec,
+            high_score_ratio: motion.high_score_ratio,
+            p90: motion.p90,
+          },
+        } : {}),
+      });
     });
   });
 }

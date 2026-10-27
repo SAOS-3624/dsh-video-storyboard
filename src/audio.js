@@ -67,6 +67,26 @@ const SS_RE = /silence_start: (-?[0-9.]+)/g;
 const SE_RE = /silence_end: (-?[0-9.]+)/g;
 
 /**
+ * 解析 silencedetect 的 stderr。纯函数，方便单测缺 silence_end / 非零 start 的边界。
+ * ffmpeg 时间是相对本次输入的；返回值一律是绝对时间。
+ */
+export function parseSilenceLog(stderr, { start = 0, end, minDur = SILENCE_MIN } = {}) {
+  const starts = [...String(stderr).matchAll(SS_RE)].map((m) => Number(m[1]));
+  const ends = [...String(stderr).matchAll(SE_RE)].map((m) => Number(m[1]));
+  const out = [];
+  for (let i = 0; i < starts.length; i++) {
+    // 缺 silence_end 时：有窗口终点就截到 end，否则用 from+minDur（from 已含 start，不能再加一次）。
+    const from = starts[i] + start;
+    let to;
+    if (Number.isFinite(ends[i])) to = ends[i] + start;
+    else if (end !== undefined) to = end;
+    else to = from + minDur;
+    if (to > from) out.push({ from: +from.toFixed(2), to: +to.toFixed(2) });
+  }
+  return out;
+}
+
+/**
  * 静音段（默认 -40dB 持续 0.6s 以上）。人声停顿与 BGM 间隙都在这里。
  * @returns {Promise<Array<{from:number,to:number}>>}
  */
@@ -78,16 +98,7 @@ export async function detectSilence({
     input, ffmpegPath, start, end,
     filter: `silencedetect=noise=${noise}dB:d=${minDur}`,
   });
-  // ffmpeg 输出的是相对本次输入的时间；加上 start 还原成绝对时间
-  const starts = [...stderr.matchAll(SS_RE)].map((m) => Number(m[1]));
-  const ends = [...stderr.matchAll(SE_RE)].map((m) => Number(m[1]));
-  const out = [];
-  for (let i = 0; i < starts.length; i++) {
-    const from = starts[i] + start;
-    const to = (ends[i] ?? (end !== undefined ? end - start : from + minDur)) + start;
-    if (to > from) out.push({ from: +from.toFixed(2), to: +to.toFixed(2) });
-  }
-  return out;
+  return parseSilenceLog(stderr, { start, end, minDur });
 }
 
 /**
@@ -124,11 +135,13 @@ export async function analyzeAudio({ input, ffmpegPath, start = 0, end } = {}) {
  *  - **drop**：从有声跌到静音区，跌幅 > 12 dB（突然安静、话说完、留白）
  * 相邻事件至少间隔 `minGap` 秒，避免把一段渐强拆成一串。
  *
+ * `offset`：把相对窗口的时间平移成绝对时间（与格子时间码对齐）。密度加权用相对时间时传 0。
+ *
  * @param {{series:number[], step:number, silences?:Array}} loudness
  * @returns {Array<{t:number, kind:'rise'|'drop', delta:number}>}
  */
 export function detectOnsets(loudness, {
-  riseDb = 8, dropDb = 15, windowSec = 0.5, minGap = 1.5, maxDelta = 30,
+  riseDb = 8, dropDb = 15, windowSec = 0.5, minGap = 1.5, maxDelta = 30, offset = 0,
 } = {}) {
   const series = loudness?.series ?? [];
   const step = loudness?.step ?? 0.1;
@@ -151,8 +164,9 @@ export function detectOnsets(loudness, {
     // 数字静音（-120 LUFS）里起声会算出 100dB 以上的假落差，截断到 maxDelta，
     // 免得它把"真正的大事"挤出排行榜。
     const delta = Math.max(-maxDelta, Math.min(maxDelta, raw));
-    if (delta > riseDb) push(+(i * step).toFixed(2), 'rise', +delta.toFixed(1));
-    else if (delta < -dropDb) push(+(i * step).toFixed(2), 'drop', +delta.toFixed(1));
+    const t = +(i * step + offset).toFixed(2);
+    if (delta > riseDb) push(t, 'rise', +delta.toFixed(1));
+    else if (delta < -dropDb) push(t, 'drop', +delta.toFixed(1));
   }
   return out;
 }

@@ -114,9 +114,6 @@ A tail window under 30 s is merged into the previous one instead of spending 384
 window that holds a single cell. Window boundaries are **snapped to real cuts** (one full scan up front,
 `--no-snap` to disable), so a window never ends in the middle of a sentence.
 
-**Full install & usage guide:** [docs/USAGE.md](docs/USAGE.md) · 中文：[docs/USAGE.zh.md](docs/USAGE.zh.md)
-— every parameter, six workflows, troubleshooting, and what each one costs.
-
 ## Quick start
 
 ```bash
@@ -211,13 +208,7 @@ Cost on a 90 s clip / 9 cells: `mid` 8.0 s · **`sharp` 9.2 s** · `thumb` 11.3 
 ### Audio: a strip inside the same image
 
 The sheet has a footer strip on the **same time axis** as the cells: teal bars are momentary loudness
-(EBU R128, measured locally with ffmpeg), grey blocks are silence (< −40 dB for > 0.6 s, drawn as a backdrop *behind* the bars), yellow ticks are
-cut points. Note the bars are normalised against p10–p97, so a short bar means "quiet for this film", not
-"silent" — only the grey backdrop means silence.
-
-The strip is a *rough* locator — at 1000 px for 300 s one pixel is 0.3 s, and a vision encoder may
-downscale it further, so read a tick to ±2–4 s. Exact times live in the text: each cell's range is given
-to 0.01 s, and a window with ≤ 24 cuts lists every cut point individually. So
+(EBU R128, measured locally with ffmpeg), dark blocks are silence, yellow ticks are cut points. So
 the model can say "cell 5 sits in the quiet stretch before the swell" — an alignment neither a
 music-analysis plugin nor a transcript alone can give it.
 
@@ -299,11 +290,14 @@ you to read the file in 5-minute windows instead of scanning it whole.
 Both run the same pipeline; zoom just narrows the window and drops `adaptive`, so each cell gets
 ~4× the pixels of a 16-cell overview.
 
-For fast-cut montage, `video_zoom` takes `minGap: 0.4` — half-second shots then get their own cell instead
-of being merged into a neighbour (default 1.2 s).
+Two extra knobs on `video_zoom`, both aimed at fast-cut montage:
 
-On the same 96–128 s window of a talking-head video, `video_zoom` at 429×239 per cell renders the
-burned-in subtitles **readably**; the 16-cell overview at 261×145 does not.
+- `minGap: 0.4` — lower the minimum spacing so half-second shots get their own cell instead of being
+  merged into a neighbour. Default is 1.2 s.
+
+On the same 96–128 s window of a talking-head video:
+`video_zoom` at 429×239 per cell renders the burned-in subtitles **readably**; the 16-cell overview
+at 261×145 does not.
 
 Zoom is opt-in — it only costs the extra image when the model actually asks for one.
 

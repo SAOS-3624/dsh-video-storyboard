@@ -79,6 +79,7 @@ export async function apply(ctx) {
       burn: args.burn ?? 'index',
       minGap: args.minGap ?? 1.2,
       transcript: args.transcript ?? 'auto',
+      enrichment: args.enrichment ?? 'auto',
       textOnly: args.textOnly === true,
       detail: args.detail ?? 'med',
     }, validateToolArgs(args), args.cellRange ?? null),
@@ -86,17 +87,26 @@ export async function apply(ctx) {
 
   const zoom = defineTool({
     ...zoomToolSpec(),
-    execute: (args) => runAndAttach(ctx, {
-      input: args.input,
-      from: args.from,
-      to: args.to,
-      cells: args.cells ?? 6,
-      sheets: 1,
-      pick: args.pick ?? 'sharp',
-      burn: args.burn ?? 'index',
-      // 近距离重看时不再按密度挪格：窗口本来就短，均分更好预测
-      adaptive: false,
-    }, validateZoomArgs(args)),
+    execute: (args) => {
+      const mode = args.mode ?? 'temporal';
+      return runAndAttach(ctx, {
+        input: args.input,
+        from: args.from,
+        to: args.to,
+        // spatial：少格看清单帧；temporal：多采样看清动作顺序
+        cells: args.cells ?? (mode === 'spatial' ? 4 : 6),
+        sheets: 1,
+        pick: args.pick ?? 'sharp',
+        burn: args.burn ?? 'index',
+        minGap: args.minGap ?? (mode === 'temporal' ? 0.4 : 1.2),
+        transcript: args.transcript ?? 'auto',
+        strategy: 'coverage',
+        zoomMode: mode,
+        reuseAnalysis: true,
+        // 有父 VAA 时切片后仍可用 coverage；无切点时退回均分
+        adaptive: true,
+      }, validateZoomArgs(args));
+    },
   });
 
   // 只读容器头，不花图片 token —— 让模型在第一次出图前先知道"多长、按什么粒度读"

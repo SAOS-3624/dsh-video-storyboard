@@ -1,24 +1,71 @@
 # Changelog
 
+## [0.3.0] — 2026-10-28
+
+First V2 release: reusable analysis asset, coverage-based selection, long-video sampling,
+and an optional DSH enrichment sidecar. External tools are unchanged:
+`video_probe` / `video_storyboard` / `video_zoom`.
+
+### Architecture
+
+- `analyzeVideo` → **Video Analysis Asset** (probe + shots + audio + transcript + timing/cache stats)
+- `planStoryboard(analysis, opts)` → stable cells (`cell_id` / `start_ms` / `end_ms` / `selection_reason`)
+- `renderStoryboard(input, analysis, plan)` → images only; `runStoryboard` is a façade and accepts an injected analysis
+- Process **vaa-store** + `sliceAnalysis` reuse a parent analysis for zoom; layered L1 cache (`shots` / `audio` / `transcript`, schema v2)
+
+### Selection
+
+- Default **`coverage`** strategy: cuts + audio + dialogue + uniform → score → time-bucket coverage, then salience fill with novelty
+- **aHash fingerprints** suppress near-duplicate cells; legacy `density` strategy retained (equal density-integral cells)
+- `video_zoom` `temporal` / `spatial`; `minGap` is clamped to the material's own shot grain, so 0.3–0.6 s montage is not merged away
+- Explicit analysis `status` for probe / shots / audio / transcript failures
+
+### Long video & performance
+
+- Windows ≥1h (or `sampleAbove`): **sampled shot scan** (30 s every 5 min), `degraded` + `sample` metadata, `unscanned_gaps`
+- Cache LRU: a hit refreshes mtime; `--batch` scans once, snaps windows to cuts, reuses the scan across windows
+- Manifest warns on degraded/coverage gaps and suggests `video_zoom` / `minGap` for dense montage
+
+### Text side
+
+- `textOnly`, `cellRange` paging, `detail: low|med|high`; ~25% shorter index with citations intact
+- `video_probe` reading plan (STRUCTURE / SEQUENCE) from 8 min, at 0 image tokens
+- **`countTextInSilence`** flags lines inside a detected silence (speech below the -40 dB gate, or ASR invention)
+- Music-vs-dialogue hint from loudness + speech rate; audio ticks thinned when dense
+
+### Optional enrichment (default off)
+
+- `~/.dsh/video.json` / `DSH_VIDEO_*`: remote TransNet-class cuts, diarization, emotion/events
+- `src/enrichment/*` merges remote cuts with HSV and attaches speakers; tool `enrichment: auto|off`
+- Sidecar stub `extras/dsh-video-enrichment` (FastAPI, optional TransNet / pyannote); failures never break the grid
+- Docs: `docs/enrichment-contract.md`
+
+### CLI / Memory
+
+- `--episode`, `--no-fingerprints`, `--from` / `--to`, `--batch`, `--plan`, `--cell-range`
+- `buildEpisodeFromResult` produces episode JSON for external memory adapters
+
+### Packaging / correctness
+
+- Portable `npm run check` (`scripts/syntax-check.mjs`); `dsh.plugin.json` version aligned with `package.json`
+- Dropped `layout: 'strip'` (grid keeps a normal aspect ratio; burned indices fix reading order)
+- `autoThreshold` returns `floor(quantile) + 1e-6` and filters with strict `>`; `capCutsByScore` after `suppressClose`; `degraded: motion` when median shot < 0.5 s and high-score ratio is high
+- Manifest reports `effective_min_gap` + `cuts_uncertain`
+- Tests: **231 passing**
 ## [0.2.2] — 2026-10-27
 
-Three things, all of them about *not* wasting the reader's attention.
+Wiring fixes: features that were documented / schema-declared but silently dropped.
 
-**`layout: 'strip'` is gone.** It was never worth its surface area: at equal cell count a grid canvas keeps
-a normal aspect ratio, so the cells are actually **bigger**, and the burned-in indices already settle the
-reading order. Removed the parameter, the 8:1 aspect guard and every doc mention.
-*Breaking for anyone who passed it — hence the version note below.*
-
-**Transcript vs silence consistency.** A line that sits >60 % inside a detected silence is counted and
-reported: either the speech is under the −40 dB gate, or the ASR invented it. Pure in-memory comparison —
-measured **0.009 ms** for 222 lines × 11 gaps, no extra ffmpeg call, one line in the text block when non-zero.
-
-**A real manual.** `docs/USAGE.md` + `docs/USAGE.zh.md`: three install paths, a 3-minute first run, every
-parameter of all three tools, six workflows, transcript backend config, cache, a troubleshooting table built
-from failures we actually hit, and a cost table.
-
-> Versioning note: removing a parameter is technically a breaking change (0.3.0). It is released as 0.2.2
-> because the parameter had existed for under an hour and nobody could have depended on it.
+- **`video_zoom` now forwards `minGap` / `layout` / `transcript`** — schema and README already promised
+  them; `index.js` was dropping the args before `runStoryboard`.
+- **`burn: 'index+time'` actually burns a second line** (`m:ss`) under the cell index (colon glyph added).
+- **Adaptive path respects `minGap`** — previously only `fitSegments` saw it; `planCellRanges` now uses
+  the same median-shot grain clamp.
+- Strip fallback threshold docs match code: **8:1** (was written as 12:1 in the tool description).
+- Silence parse: missing `silence_end` no longer double-adds `start`.
+- Audio onset events in the manifest use **absolute** time (aligned with cell timecodes); density still
+  weights on window-relative time.
+- `findBursts().shots` is computed (was always `undefined` in the plan).
 
 ## [0.2.1] — 2026-10-27
 
@@ -32,7 +79,7 @@ architectural change).
 - `video_zoom` accepts `minGap` — re-read a fast-cut montage with `minGap: 0.4` and 0.3 s shots get their
   own cell instead of being merged into a neighbour.
 - `video_zoom` accepts `layout: 'strip'` — one row of cells for a short window of continuous motion.
-  Falls back to a grid if the strip would exceed 12:1 (vision encoders resize by the long edge, so an
+  Falls back to a grid if the strip would exceed 8:1 (vision encoders resize by the long edge, so an
   18:1 strip leaves every cell ~100 px wide).
 - `--batch` now scans once for cut points and **snaps window boundaries to real cuts** (`--no-snap` to
   disable). A 92 s clip at 30 s windows lands on 0–30.88 / 30.88–59.88 / 59.88–92 instead of the clock.
@@ -47,13 +94,6 @@ information lost that the model can actually use.
   manifest
 - `image 1` dropped when there is only one sheet (it is pure redundancy); kept for multi-sheet
 
-**`detail: low | med | high`** — transcript budget per cell, and truncation now lands on a
-sentence boundary instead of cutting mid-word.
-
-Measured on a 9-cell run: `low` 1,521 chars · `med` 1,915 · `high` 3,031. Note that med is *cheaper*
-than the old hard-cut 120 (2,171) even though the budget is the same, because stopping at the last
-sentence end usually costs fewer characters than filling the quota.
-
 **`detail: low|med|high`** — transcript budget per cell (60/120/400), and truncation lands on a
 sentence boundary. Measured on 9 cells: 1,521 / 1,915 / 3,031 characters — `med` is 12 % cheaper than
 the old hard cut at the same budget.
@@ -64,23 +104,7 @@ the old hard cut at the same budget.
 **Speed.** `--batch` reuses one full scan across windows (17.0 s → 9.0 s on a 92 s clip); `video_zoom`
 takes `minGap` and `layout: 'strip'`; audio strip height is capped by cell height.
 
-**Removed `layout: 'strip'`.** It was never worth its surface area: at equal cell count a grid canvas has a
-normal aspect ratio, so the cells are *bigger*, and the burned indices already settle the reading order. One
-fewer parameter to explain.
-
-**Transcript vs silence consistency.** A line that sits (>60 %) inside a detected silence is counted and
-reported: either the speech is below the −40 dB gate, or the ASR invented it. Pure in-memory comparison —
-measured **0.009 ms** for 222 lines × 11 gaps, no extra ffmpeg call.
-
-**Cut points are listed when they fit.** A window with ≤ 24 cuts now prints
-`cut points (3): 00:12.75, 00:16.13, 00:44.50` — exact times, because the strip can only be read to
-±2–4 s. Busy windows still get counts only, so an overview does not pay for a 141-entry list.
-
-**Silence blocks stay a backdrop.** Tried drawing them as an occluder (bars skipped inside silence); it
-looked like the waveform was chopped into solid grey bars, so it was reverted — grey is a backdrop *behind*
-the bars. The wording now says what a short bar actually means: "quiet for this film", not "silent".
-
-Tests 174 → **186**.
+Tests 174 → **183**.
 
 ## [0.2.0] — 2026-10-27
 
@@ -110,8 +134,6 @@ ASR output, single-pass (longest match first, no substring re-entry), with the r
 
 **Baseline.** `docs/BASELINE.md`: four clips measured end to end, plus the finding that loudness and speech
 rate move in opposite directions.
-
-## [0.1.0] — 2026-10-27
 
 ## [0.1.0] — 2026-10-27
 

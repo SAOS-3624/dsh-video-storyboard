@@ -210,12 +210,16 @@ export function alignCells(cells, segments) {
   return cells.map((cell) => {
     const hits = segments.filter((s) => s.to > cell.from && s.from < cell.to);
     const text = hits.map((s) => s.text).join(' ').trim();
+    const speakers = [...new Set(hits.map((s) => s.speaker).filter(Boolean))];
+    const emotions = [...new Set(hits.map((s) => s.emotion).filter(Boolean))];
     const dur = Math.max(0.1, cell.to - cell.from);
     return {
       text,
       chars: text.length,
       charsPerSec: +(text.length / dur).toFixed(2),
       segments: hits.length,
+      ...(speakers.length ? { speakers } : {}),
+      ...(emotions.length ? { emotions } : {}),
     };
   });
 }

@@ -1,0 +1,4 @@
+-r requirements.txt
+torch>=2.0
+torchaudio>=2.0
+pyannote.audio>=3.1

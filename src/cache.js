@@ -1,22 +1,22 @@
 /**
- * cache.js — 扫描结果缓存。
+ * cache.js — 分层分析缓存。
  *
- * 缓存什么：切点、阈值、分数摘要。这三样只跟"(文件, 窗口, 阈值策略)"有关，
- * 与格数/取帧方式无关，所以 storyboard 和 zoom 能共用同一份。
+ * L0 身份：路径 + size + mtime（不做整文件 hash，2GB 读一遍比重扫还慢）
+ * L1 artifact：shots / audio / transcript 各有独立键与算法版本
+ * L2 计划/渲染：由调用方用 plan_hash 自行命名（本模块只提供通用读写）
  *
- * **不缓存**响度序列：2 小时片子有 7 万个点，JSON 会涨到几百 KB；而音频解码比
- * 视频解码便宜得多，重算更划算。
+ * 旧版 `cacheKey` 仍可用（等价于 shots 键），保持 CLI/测试兼容。
  *
  * 目录可用 DSH_VIDEO_CACHE_DIR 指定（C 盘紧张时指到别的盘）。
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { mkdir, readFile, readdir, stat, unlink, utimes, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-export const CACHE_VERSION = 1;
-export const MAX_CACHE_BYTES = 50 * 1024 * 1024;
+export const CACHE_VERSION = 2;
+export const MAX_CACHE_BYTES = 80 * 1024 * 1024;
 
 export function cacheDir(env = process.env) {
   if (env.DSH_VIDEO_CACHE_DIR) return env.DSH_VIDEO_CACHE_DIR;
@@ -26,22 +26,41 @@ export function cacheDir(env = process.env) {
   return join(env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'dsh-video-storyboard');
 }
 
+/** L0：文件身份片段；读不到文件时返回 null。 */
+export async function fileIdentity(input) {
+  try {
+    const st = await stat(input);
+    return { path: input, size: st.size, mtime: Math.round(st.mtimeMs) };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * 缓存键：路径 + 大小 + mtime + 窗口 + 阈值模式。
+ * L1 artifact 键。`kind` 区分 shots / audio / transcript / plan / …
+ * `params` 序列化进键，换算法版本或 ASR 端点会自然 miss。
+ */
+export async function artifactKey({ input, kind, start, end, params = {} }) {
+  const id = await fileIdentity(input);
+  if (!id) return null;
+  const paramPart = Object.keys(params).sort()
+    .map((k) => `${k}=${String(params[k])}`).join('&');
+  const raw = [
+    CACHE_VERSION, kind, id.path, id.size, id.mtime,
+    start ?? 0, end ?? 'eof', paramPart,
+  ].join('|');
+  return createHash('sha1').update(raw).digest('hex').slice(0, 24);
+}
+
+/**
+ * 兼容旧调用：等价于 shots artifact（threshold 进 params）。
  * 不用文件内容 hash —— 2GB 的文件读一遍比重新扫描还慢。
  */
 export async function cacheKey({ input, start, end, threshold }) {
-  let size = 0;
-  let mtime = 0;
-  try {
-    const st = await stat(input);
-    size = st.size;
-    mtime = Math.round(st.mtimeMs);
-  } catch {
-    return null;                                  // 文件不可读就不缓存
-  }
-  const raw = [CACHE_VERSION, input, size, mtime, start ?? 0, end ?? 'eof', String(threshold)].join('|');
-  return createHash('sha1').update(raw).digest('hex').slice(0, 20);
+  return artifactKey({
+    input, kind: 'shots', start, end,
+    params: { threshold: String(threshold) },
+  });
 }
 
 export async function readCache(key, { dir = cacheDir() } = {}) {
@@ -102,7 +121,14 @@ export async function pruneCache({ dir = cacheDir(), maxBytes = MAX_CACHE_BYTES 
  */
 export async function withCache(key, producer, opts = {}) {
   const hit = await readCache(key, opts);
-  if (hit?.value) return { ...hit.value, cached: true };
+  if (hit?.value) {
+    // 触摸 mtime，让 pruneCache 按真正 LRU 淘汰
+    const dir = opts.dir ?? cacheDir();
+    try {
+      await utimes(join(dir, `${key}.json`), new Date(), new Date());
+    } catch { /* fail-open */ }
+    return { ...hit.value, cached: true };
+  }
   const value = await producer();
   await writeCache(key, { value }, opts);
   return { ...value, cached: false };

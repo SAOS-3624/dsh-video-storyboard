@@ -81,9 +81,12 @@ See [asr-contract.md](./asr-contract.md).
 
 ## 6. Deliberately not used
 
-| Technique | Why not |
+| Technique | Why not **in-tree** |
 |---|---|
-| TransNet V2 / deep SBD | needs a DL runtime + weights; we refuse both |
-| Music/emotion models (MERT, CLAP, Qwen-Audio) | license and size; loudness is a *measurement*, not understanding, and we say so |
+| TransNet V2 / deep SBD | weights stay out of the npm package; optional via `extras/dsh-video-enrichment` + `~/.dsh/video.json` |
+| Music/emotion models (MERT, CLAP, Qwen-Audio) | same — sidecar / SenseVoice tags; loudness remains the zero-dep measurement |
+| Speaker diarization (pyannote) | optional sidecar backend (`DSH_ENRICH_DIARIZE_BACKEND=pyannote`) |
 | Learned saliency (SCSampler-style) | a 20-line cut-rate curve gets most of the benefit at zero model cost |
 | Optical-flow-based cut detection | 10–50× the compute for a marginal gain over HSV difference |
+
+See [enrichment-contract.md](./enrichment-contract.md) for the HTTP dialect DeepSeek Harness expects.
