@@ -40,3 +40,28 @@ jobs:
       - name: unit + e2e tests
         run: npm test
         # test/contract.test.mjs self-skips when no local DSH install is present.
+
+  # contract.test.mjs 默认在没有本地 DSH 安装时 self-skip —— 也就是说宿主集成那一面
+  # 在 CI 里从来没真跑过。而 schema 用了宿主不认的关键字时，不是"工具不好用"，是
+  # ctx.tools.register() 直接抛错、整棵插件树起不来。所以这一条单独跑，宿主包从 npm
+  # 上取（@deepseek-ai/dsh-tools 是公开发布的），不依赖本地安装。
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: install the real host package
+        run: |
+          npm install --no-save --no-package-lock --no-audit --no-fund \
+            @deepseek-ai/dsh-tools@next
+          node -e "console.log('host', require('./node_modules/@deepseek-ai/dsh-tools/package.json').version)"
+
+      - name: contract test against the real host
+        env:
+          DSH_TOOLS_PATH: node_modules/@deepseek-ai/dsh-tools/lib/index.js
+        run: node --test test/contract.test.mjs
