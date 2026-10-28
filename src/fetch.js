@@ -304,8 +304,9 @@ export function explainYtdlpError(stderr, code = 1) {
   if (/HTTP Error 567/i.test(text)) {
     return 'Bilibili refused this request (HTTP 567) — that is their risk control, not a plugin bug. ' +
       'It usually means the video needs a signed-in session (1080P+, 会员/付费, or a fresh rate-limit). ' +
-      'Fix: export cookies.txt and point DSH_VIDEO_COOKIES at it, or download the file yourself and pass a ' +
-      'local path. Anonymous 360P usually still works on ordinary videos.';
+      'Fix: export cookies.txt (README "needs a signed-in video" / docs/SETUP.md §3) and point ' +
+      'DSH_VIDEO_COOKIES at it, or download the file yourself and pass a local path. ' +
+      'Anonymous 360P usually still works on ordinary videos.';
   }
   if (/HTTP Error 412/i.test(text)) {
     return 'HTTP 412: the site rate-limited this request. Wait a moment and retry.';

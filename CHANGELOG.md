@@ -19,6 +19,11 @@
   problem — most often a video that needs a signed-in session (1080P+, 会员/付费) or a rate-limit. Before, the
   message was yt-dlp's raw text, which reads like a plugin bug.
 
+  **Docs gap this exposed**: `docs/SETUP.md` had a full cookies walkthrough all along, but the README — the
+  page people actually land on — never mentioned cookies at all. There is now a "needs a signed-in video"
+  section there: when it is needed, the three steps with Cookie-Editor, both config paths, the local-file
+  alternative, and the reminder that `SESSDATA` is a login credential.
+
   Now: one automatic retry with a browser User-Agent, `Referer: https://www.bilibili.com/`, and
   `--sleep-requests 1` (the retry only fires on 567/412, never on permanent errors); if it still fails, the
   error names both ways out — a cookies.txt, or download the file and pass a local path. `--retries 3

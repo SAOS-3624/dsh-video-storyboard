@@ -125,6 +125,56 @@ cell 3 (r1c3) = 00:33.29-00:47.08  cuts 10  16 frames (4×4)
 | 快闪重判 | 零额外解码（复用逐帧分数） |
 | 切点召回 | 概念 PV 44 刀 / 混剪 178 刀（151 秒）/ 口播 125 刀 |
 
+## 需要登录的视频（B 站 1080P+ / HTTP 567）
+
+**先说结论**：普通视频匿名就能看 360p；**要高清、会员、或遇到 567，才需要 cookies**。
+
+### 什么时候需要
+
+| 现象 | 需要 cookies |
+|---|---|
+| 提示 `HTTP Error 567` | ✅ 这是 B 站风控，多半是"该视频要登录" |
+| `Sign in to confirm` / 需要登录 | ✅ |
+| 想要 1080P 以上的清晰度 | ✅（B 站高清要登录态） |
+| 普通视频、360p、匿名 | ❌ 不需要 |
+
+### 三步导出（Chrome / Edge）
+
+1. 装扩展 **Cookie-Editor**（作者 cgagnier）
+2. 打开 bilibili.com 并登录 → 点扩展 → **Export** → 选 **Netscape** 格式 → 存成 `bili-cookies.txt`
+3. 告诉插件它在哪：
+
+```json
+// ~/.dsh/video.json
+{ "cookies": "D:/cookies/bili-cookies.txt" }
+```
+
+或者每次调用时传：
+
+```js
+video_storyboard({ input: "https://www.bilibili.com/video/BV...", cookies: "D:/cookies/bili-cookies.txt" })
+```
+
+也可以设环境变量 `DSH_VIDEO_COOKIES`（桌面版读不到 `setx` 的变量，优先用配置文件）。
+
+> **为什么不能用 `--cookies-from-browser`**：Chromium 127+ 的 App-Bound Encryption 让 `SESSDATA` 只能由浏览器进程解密，
+> 普通进程读出来是 `v20` 密文。所以必须**导出文件**，这是机制问题，不是你配错了。
+
+### 不想配 cookies？
+
+**直接把视频下载下来，喂本地路径**——插件对本地文件一视同仁，还更快：
+
+```js
+video_storyboard({ input: "D:/video/xxx.mp4" })
+```
+
+### 隐私提醒
+
+`cookies.txt` 里的 `SESSDATA` **等同于你的登录凭证**。别提交到仓库、别发群里、别贴到 issue 里。
+用完可以退出登录让它失效。
+
+> 完整步骤（含格式示例、验证顺序、故障对照）见 **[docs/SETUP.zh.md §3](docs/SETUP.zh.md)**。
+
 ## 字幕与 ASR（怎么让它"听懂"）
 
 转写是**可选**的：不配也能出图，只是清单里没有台词。
