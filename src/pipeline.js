@@ -173,10 +173,12 @@ export async function runStoryboard(opts) {
   // 用户反馈（野生的猛龙）：纯 PPT 视频上"阈值压到 0.08 也一条都检不出来，只能退回等间隔"。
   if (!precomputed && scan.stats.length > 20) {
     const medianScore = quantile(scan.stats.map((x) => x.score), 0.5);
-    // 两个条件都要：画面确实很静（中位分 < 3）**且**绝对阈值几乎没找到刀（< 0.1 刀/秒）。
-    // 只放开第一个会误伤——实测概念 PV 的中位数也低（大量静止帧），一放开就 44 → 88 刀。
+    void medianScore;   // 保留一份供日志/调参用；判定不再依赖它
+    // 判据是**刀密度**，不是"画面静不静"：实测概念 PV / 沧野 / MAD 的中位分都是 0.9–1.1，
+    // 和录屏素材（0.0–1.4）完全混在一起，用中位分根本分不开。
+    // 能分开的是刀/秒：录屏 0.11–0.22，视频内容 0.40–0.49。
     const perSec = cuts.length / Math.max(1, winDur);
-    if (medianScore < 3 && perSec < 0.1) {
+    if (perSec < 0.25) {
       // minAbs 4：实测 320×180 上"改一块约 3.5% 的画面"峰值只有 5.7 分、7.8% 才 11.8 分 ——
       // 绝对阈值 12~15 全都漏；而静止画面的噪声底只有 0.0–1.5，4 分足够把噪声挡在外面。
       const spikes = suppressClose(spikeCuts(scan.stats, { k: 4, minAbs: 4, halfWindow: 12 }), scanGap);
