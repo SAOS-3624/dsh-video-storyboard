@@ -8,7 +8,7 @@ test('lifecycleConfig: 没配 manage.start 就不托管', () => {
   assert.equal(lifecycleConfig({ manage: {} }), null);
   const c = lifecycleConfig({ manage: { start: 'x.cmd' } });
   assert.equal(c.start, 'x.cmd');
-  assert.equal(c.idleMs, 120_000);
+  assert.equal(c.idleMs, 600_000, '默认 10 分钟：冷启动 30 秒，关太早等于每次重付');
 });
 
 test('probeEndpoint: /health 不通时退到 /v1/models', async () => {

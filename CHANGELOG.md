@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The idle window is now 10 minutes, and the backstop moved to 30.** Cold start costs 30 s, so a 2-minute
+  window meant re-paying it constantly. The rule is now literally "10 minutes after the last run, with no new
+  run in between, stop it". `manage.idleMs` still overrides per machine. The server's own `ASR_IDLE_EXIT_S`
+  went from 600 s to 1800 s — a backstop must be *longer* than the caller's timer, otherwise it closes an
+  instance that is still in use.
+
 ### Fixed
 
 - **A long scan could let the idle timer shut the service down mid-run.** The timer is set when a run ends,

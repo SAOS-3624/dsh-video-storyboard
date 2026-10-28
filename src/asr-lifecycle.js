@@ -28,7 +28,9 @@ export function lifecycleConfig(config = {}) {
     start: String(m.start),
     stop: m.stop ? String(m.stop) : null,
     waitMs: Number.isFinite(m.waitMs) ? m.waitMs : 120_000,
-    idleMs: Number.isFinite(m.idleMs) ? m.idleMs : 120_000,
+    // 默认 10 分钟：冷启动要 30 秒，2 分钟就关等于每次都要重付这 30 秒。
+    // 语义是"最后一次运行结束后 10 分钟没有新运行就关"。
+    idleMs: Number.isFinite(m.idleMs) ? m.idleMs : 600_000,
     healthPath: typeof m.healthPath === 'string' ? m.healthPath : '/health',
   };
 }
