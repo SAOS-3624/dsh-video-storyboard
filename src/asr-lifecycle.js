@@ -24,8 +24,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export function lifecycleConfig(config = {}) {
   const m = config?.manage;
   if (!m || typeof m !== 'object' || !m.start) return null;
+  // start 可以是字符串（.cmd/.exe）或数组（[exe, ...args]）。
+  // **数组更干净**：Windows 上起 .cmd 会闪一个控制台窗口，而且批处理对行尾/编码很敏感
+  // （LF 行尾会让 cmd.exe 把注释片段当命令执行 —— 实测弹出一屏 "'wo' 不是内部或外部命令"）。
+  const start = Array.isArray(m.start) ? m.start.map(String) : String(m.start);
   return {
-    start: String(m.start),
+    start,
     stop: m.stop ? String(m.stop) : null,
     waitMs: Number.isFinite(m.waitMs) ? m.waitMs : 120_000,
     // 默认 10 分钟：冷启动要 30 秒，2 分钟就关等于每次都要重付这 30 秒。
@@ -135,17 +139,23 @@ export async function ensureAsr({
   }
   if (!life) return { owned: false, started: false, reason: 'no manage.start configured' };
 
-  log(`starting local ASR: ${life.start}`);
-  // Windows 上直接 spawn 一个 .cmd，进程会跟着父进程一起死（实测：node 退出后 python 也退了，
-  // 下一次转写就拿到 asr-failed）。用 `start "" /b` 脱离当前控制台 + detached + unref 才能活下来。
-  const isBatch = /\.(cmd|bat)$/i.test(life.start);
-  const child = process.platform === 'win32' && isBatch
-    ? spawnImpl(SHELL_EXE, ['/c', 'start', '', '/b', life.start], {
+  log(`starting local ASR: ${Array.isArray(life.start) ? life.start.join(' ') : life.start}`);
+  let child;
+  if (Array.isArray(life.start)) {
+    // 直接起 exe：windowsHide 才会真的不建控制台窗口，也不受批处理编码影响
+    child = spawnImpl(life.start[0], life.start.slice(1), {
       detached: true, stdio: 'ignore', windowsHide: true, env,
-    })
-    : spawnImpl(life.start, [], {
-      shell: true, detached: true, stdio: 'ignore', windowsHide: true, env,
     });
+  } else {
+    const isBatch = /\.(cmd|bat)$/i.test(life.start);
+    child = process.platform === 'win32' && isBatch
+      ? spawnImpl(SHELL_EXE, ['/c', 'start', '', '/b', life.start], {
+        detached: true, stdio: 'ignore', windowsHide: true, env,
+      })
+      : spawnImpl(life.start, [], {
+        shell: true, detached: true, stdio: 'ignore', windowsHide: true, env,
+      });
+  }
   child.unref?.();
   ownedChild = child;
 

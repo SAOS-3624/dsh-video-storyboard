@@ -118,3 +118,26 @@ test('isOwned: 只有我们拉起的实例才算自己拥有', async () => {
   });
   assert.equal(isOwned(), false, '别人已经在跑，不该记成我们拥有');
 });
+
+test('lifecycleConfig: start 支持数组（直接起 exe，不经过 .cmd）', () => {
+  const c = lifecycleConfig({ manage: { start: ['C:/py.exe', 'srv.py'] } });
+  assert.deepEqual(c.start, ['C:/py.exe', 'srv.py']);
+  const s = lifecycleConfig({ manage: { start: 'a.cmd' } });
+  assert.equal(s.start, 'a.cmd');
+});
+
+test('ensureAsr: 数组形式按 [exe, ...args] 起进程，且隐藏窗口', async () => {
+  __resetLifecycle();
+  const calls = [];
+  let n = 0;
+  await ensureAsr({
+    baseUrl: 'http://127.0.0.1:8000/v1',
+    config: { manage: { start: ['C:/py.exe', 'srv.py'], waitMs: 3000 } },
+    fetchImpl: async () => { n += 1; if (n <= 2) throw new Error('down'); return { ok: true }; },
+    spawnImpl: (cmd, args, opts) => { calls.push({ cmd, args, opts }); return { pid: 99, unref() {} }; },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'C:/py.exe');
+  assert.deepEqual(calls[0].args, ['srv.py']);
+  assert.equal(calls[0].opts.windowsHide, true, '必须隐藏窗口，否则会弹一个 cmd 黑框');
+});

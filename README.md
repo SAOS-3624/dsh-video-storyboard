@@ -214,12 +214,16 @@ video_storyboard({ input: "D:/video/xxx.mp4" })
   "language": "zh",
   "hotwords": "像差 焦段 光圈",
   "manage": {
-    "start": "D:/asr-local/start-asr.cmd",
+    "start": ["D:/asr-local/.venv/Scripts/python.exe", "D:/asr-local/server-sherpa.py"],
     "idleMs": 5000,
     "waitMs": 60000
   }
 }
 ```
+
+> `start` 建议写成**数组**（`[exe, ...args]`）。字符串形式（`.cmd`）也能用，但 Windows 上会闪一个
+> 控制台窗口，而且批处理对行尾极敏感——**LF 行尾的 .cmd 会被 cmd.exe 当成命令逐片段执行**，
+> 弹出一屏 `'wo' 不是内部或外部命令`。已踩过。
 
 - **本机地址不需要 `key`**（`127.0.0.1` / `localhost` / `[::1]`）。自己跑的服务一般不校验 Authorization，插件不会再逼你填一个假 key。
 - `manage` 是生命周期托管：调用时端点不通就拉起；**最后一次运行结束后 `idleMs` 内没有新运行**，就请它自己退出（走服务的 `POST /shutdown`）。

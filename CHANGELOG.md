@@ -15,6 +15,15 @@
 
 ### Fixed
 
+- **A console window popped up on every conversation, spewing `'wo' is not recognized`.** Two causes:
+  the ASR service was launched through `start-asr.cmd`, which allocates a console when the spawner is a GUI
+  app, and that `.cmd` had been rewritten with **LF line endings** (plus Chinese comments) — cmd.exe then
+  executed fragments of the `REM` lines as commands.
+
+  `manage.start` now accepts an array (`[exe, ...args]`) and the default config uses it, spawning
+  `python.exe server-sherpa.py` directly with `windowsHide` — no console, no batch parsing. `start-asr.cmd`
+  was rewritten with CRLF and ASCII-only text for the cases where a human runs it by hand.
+
 - **Stale cookies silently capped quality at 480p.** Reported against BV1HHns6oE4G: the manifest said the source
   had no 1080p, while the browser clearly did. Measured with the user's own `bili-cookies.txt`:
 
