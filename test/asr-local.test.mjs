@@ -37,6 +37,7 @@ async function startFakeAsr(handler) {
       auth: req.headers.authorization,
       contentType: req.headers['content-type'] ?? '',
       bytes: body.length,
+      body: body.toString('latin1'),   // 断言 multipart 里的字段用
     });
     const { status = 200, json } = handler(req, body);
     res.writeHead(status, { 'content-type': 'application/json' });
@@ -128,6 +129,22 @@ test('ASR 客户端：云端没配 key → 直接返回 null，不发请求', as
   // 云端必须 key（没有必然 401）。本机服务不在此列 —— 见下一条。
   const result = await transcribe({ input: 'whatever.mp4', baseUrl: 'https://api.example.com/v1', apiKey: null });
   assert.equal(result, null);
+});
+
+test('ASR 客户端：配了热词就把它作为 hotword 字段发出去', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-hot-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeAudio(dir);
+  const fake = await startFakeAsr(() => ({ json: { text: '测试', segments: [{ start: 0, end: 1, text: '测试' }] } }));
+  t.after(() => fake.close());
+
+  await transcribe({ input: file, baseUrl: fake.baseUrl, apiKey: 'x', hotwords: '像差 焦段' });
+  const body = fake.seen.at(-1).body;
+  assert.match(body, /name="hotword"/, '必须带 hotword 字段');
+  // multipart 里中文是 UTF-8 原文，转 latin1 会变乱码，用 Buffer 再核对一次
+  const raw = Buffer.from(body, 'latin1').toString('utf8');
+  assert.match(raw, /像差 焦段/);
 });
 
 test('ASR 客户端：本机服务没配 key 也会真的去请求（不要求假 key）', async () => {

@@ -96,6 +96,9 @@ export function resolveAsrConfig(env = process.env) {
     source: fromEnv ? 'env' : (file.baseUrl || file.key ? 'file' : 'default'),
     // 术语校正表：错误写法 → 正确写法
     terms: file.terms && typeof file.terms === 'object' ? file.terms : undefined,
+    // 热词：空格分隔的一串词，交给 seaco_paraformer 解码时偏置
+    hotwords: typeof file.hotwords === 'string' && file.hotwords.trim() ? file.hotwords.trim() : '',
+    terms: file.terms && typeof file.terms === 'object' ? file.terms : undefined,
     // 生命周期托管：{ start, stop?, idleMs?, waitMs? } —— 见 asr-lifecycle.js
     manage: file.manage && typeof file.manage === 'object' ? file.manage : undefined,
     ...(file.path ? { configPath: file.path } : {}),
@@ -159,6 +162,7 @@ export async function extractSubtitleTrack({ input, ffmpegPath = DEFAULT_FFMPEG,
 export async function transcribe({
   input, ffmpegPath = DEFAULT_FFMPEG, start = 0, end,
   baseUrl = ASR_DEFAULTS.baseUrl, model = ASR_DEFAULTS.model,
+  hotwords = resolveAsrConfig().hotwords,
   apiKey,
   language = ASR_DEFAULTS.language,
   timeoutMs = 180_000,
@@ -187,6 +191,8 @@ export async function transcribe({
   form.append('file', new Blob([stdout], { type: 'audio/wav' }), 'audio.wav');
   form.append('model', model);
   form.append('response_format', 'verbose_json');
+  // 热词：专治同音字（实测"像差"会被识别成"相差"）。服务端不认识这个字段时会忽略，不会报错。
+  if (hotwords) form.append('hotword', hotwords);
   if (language) form.append('language', language);
 
   const res = await fetch(`${baseUrl.replace(/\/$/, '')}/audio/transcriptions`, {

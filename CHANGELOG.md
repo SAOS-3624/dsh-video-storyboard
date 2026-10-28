@@ -13,6 +13,15 @@
 3. **长片扫描期间被空闲计时器关掉**（本轮修）—— 计时器在"上一次运行结束"时设的，
    新一次运行扫描超过窗口就会白丢一次冷启动（30 秒）。运行入口即续命。
 
+### Added
+
+- **Hotwords: a word list that biases decoding, so homophones stop winning.** `"hotwords": "像差 焦段 光圈"`
+  in `asr.json`, sent as a `hotword` form field. seaco_paraformer supports it natively. Measured on a lens
+  review: *"也就是所谓的**相差**"* → *"也就是所谓的**像差**"* with one word added, no other change.
+
+  This matters more than swapping models: the transcription was already fluent, the misses were homophones
+  (像差/相差) that no general model resolves without knowing the subject.
+
 ### Fixed
 
 - **A partial download was wiped on failure, so every retry started from zero.** On a flaky connection the
