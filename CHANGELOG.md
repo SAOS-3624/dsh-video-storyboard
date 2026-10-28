@@ -15,6 +15,22 @@
 
 ### Fixed
 
+- **Stale cookies silently capped quality at 480p.** Reported against BV1HHns6oE4G: the manifest said the source
+  had no 1080p, while the browser clearly did. Measured with the user's own `bili-cookies.txt`:
+
+  ```
+  with cookies:      [480, 360]
+  without cookies:   [1080, 720, 480, 360]
+  ```
+
+  An expired or low-privilege `SESSDATA` makes Bilibili hand back a *shorter* format list — the plugin then
+  believed it and reported "no 1080p source", which was true of the request and false about the video.
+
+  Both the probe and the download path now go through one `probeSummary()`: when cookies are configured and
+  the result caps at ≤720p, it probes once more anonymously and keeps whichever list is taller, recording
+  why (`cookies 只允许 480p，匿名反而能拿到 1080p —— SESSDATA 可能过期…`). Verified: that URL now reports
+  max 1080, `zoomTarget` 1080 and a 1080p direct link.
+
 - **Bilibili's HTTP 567 now says what it is and tries once more.** 567 is their risk control, not a format
   problem — most often a video that needs a signed-in session (1080P+, 会员/付费) or a rate-limit. Before, the
   message was yt-dlp's raw text, which reads like a plugin bug.

@@ -513,19 +513,7 @@ export async function fetchMedia(input, opts = {}) {
 
   // ---- 解析
   onProgress?.({ phase: 'resolve', url });
-  const probeArgs = ['-J', '--no-warnings', '--no-playlist'];
-  if (auth.cookiesPath) probeArgs.push('--cookies', auth.cookiesPath);
-  probeArgs.push(url);
-  const probed = await run(tool, probeArgs, { timeoutMs: 90_000 });
-  if (probed.code !== 0) throw new Error(explainYtdlpError(probed.stderr, probed.code));
-
-  let info;
-  try {
-    info = JSON.parse(probed.stdout);
-  } catch {
-    throw new Error('yt-dlp returned unparsable JSON while resolving this link');
-  }
-  const summary = summariseInfo(unwrapSingle(info, url));
+  const { summary, authKind, warning: authNote, raw: info } = await probeSummary({ url, auth, tool, env, run });
 
   // 顺手把 zoom 要用的高清直链挑出来并记住 —— formats 已经在手里了，这一步零成本。
   // 否则 zoom 会再跑一次 `-J`（2.4 s），而它每次都紧跟在这个调用后面。
@@ -651,10 +639,11 @@ export async function fetchMedia(input, opts = {}) {
     zoomTarget,
     title: summary.title,
     duration: summary.duration,
-    auth: auth.kind,
+    auth: authKind,
     // 只有"匿名 + 确实拿不到目标档"才说一句。匿名但够高清时闭嘴 ——
     // 早期版本无条件报错，实测把"匿名本来就有 1080P"的视频也拦了，纯属帮倒忙。
-    ...(auth.kind === 'anonymous' && zoomTarget < zoomHeight ? { authWarning: auth.warning } : {}),
+    ...((authKind === 'anonymous' && zoomTarget < zoomHeight) || authNote
+      ? { authWarning: authNote ?? auth.warning } : {}),
     ...(zoomTarget < zoomHeight ? { degraded: [`source-max-${summary.maxHeight ?? '?'}p`] } : {}),
   };
 
@@ -795,6 +784,50 @@ export async function resolveDirectUrl(input, opts = {}) {
  * @returns {Promise<{url:string, title:string|null, duration:number|null,
  *                    heights:number[], maxHeight:number|null, auth:string}>}
  */
+
+/**
+ * 带 cookies 探测，并处理"有 cookies 反而更少"的真实事故：
+ * 过期/低权限的 SESSDATA 会让 B 站降级，实测同一支视频带 cookies 只有 480p、匿名却有 1080p。
+ * 只在 maxHeight ≤ 720 时多探一次（可疑才付这 3–5 秒）。
+ *
+ * @returns {{summary:object, authKind:string, warning?:string}}
+ */
+async function probeSummary({ url, auth, tool, env, run }) {
+  const args = ['-J', '--no-warnings', '--no-playlist'];
+  const out = {};
+  if (auth.cookiesPath) args.push('--cookies', auth.cookiesPath);
+  args.push(url);
+  const probed = await run(tool, args, { timeoutMs: 90_000 });
+  if (probed.code !== 0) throw new Error(explainYtdlpError(probed.stderr, probed.code));
+  let info;
+  try {
+    info = JSON.parse(probed.stdout);
+  } catch {
+    throw new Error('yt-dlp returned unparsable JSON while probing this link');
+  }
+  const summary = summariseInfo(unwrapSingle(info, url));
+  const raw = unwrapSingle(info, url);
+  if (!auth.cookiesPath || !(summary.maxHeight > 0 && summary.maxHeight <= 720)) {
+    return { summary, authKind: auth.kind, raw };
+  }
+  try {
+    const anon = await run(tool, ['-J', '--no-warnings', '--no-playlist', url], { timeoutMs: 90_000 });
+    if (anon.code !== 0) return { summary, authKind: auth.kind, raw };
+    const anonInfo = unwrapSingle(JSON.parse(anon.stdout), url);
+    const a = summariseInfo(anonInfo);
+    if (a.maxHeight <= summary.maxHeight) return { summary, authKind: auth.kind, raw };
+    return {
+      summary: { ...a, title: a.title || summary.title },
+      raw: anonInfo,
+      authKind: 'anonymous',
+      warning: 'cookies 只允许 ' + summary.maxHeight + 'p，匿名反而能拿到 ' + a.maxHeight + 'p' +
+        ' —— SESSDATA 可能过期或权限不足，建议重新导出 cookies.txt',
+    };
+  } catch {
+    return { summary, authKind: auth.kind, raw };   // 匿名探失败不影响主结果
+  }
+}
+
 export async function probeUrl(input, opts = {}) {
   const {
     cookies, allowAnonymous = false, env = process.env, ytdlp, run = runProcess,
@@ -804,27 +837,15 @@ export async function probeUrl(input, opts = {}) {
   const auth = await resolveAuth({ cookies, allowAnonymous, env });
   const tool = ytdlp || await discoverYtdlp({ env, run });
 
-  const args = ['-J', '--no-warnings', '--no-playlist'];
-  if (auth.cookiesPath) args.push('--cookies', auth.cookiesPath);
-  args.push(url);
-
-  const probed = await run(tool, args, { timeoutMs: 90_000 });
-  if (probed.code !== 0) throw new Error(explainYtdlpError(probed.stderr, probed.code));
-
-  let info;
-  try {
-    info = JSON.parse(probed.stdout);
-  } catch {
-    throw new Error('yt-dlp returned unparsable JSON while probing this link');
-  }
-  const summary = summariseInfo(unwrapSingle(info, url));
+  const { summary, authKind, warning } = await probeSummary({ url, auth, tool, env, run });
   return {
     url,
     title: summary.title,
     duration: summary.duration,
     heights: summary.heights,
     maxHeight: summary.maxHeight,
-    auth: auth.kind,
+    auth: authKind,
+    ...(warning ? { authWarning: warning } : {}),
   };
 }
 
