@@ -432,9 +432,10 @@ export async function runStoryboard(opts) {
         sheet: si + 1,
         t_start: +a.toFixed(3),
         t_end: +b.toFixed(3),
-        t_frame: +frame.t.toFixed(3),
+        // 平铺格的画面是 k² 个瞬间，不存在“这一格的取帧时刻”；
+        // 不写 t_frame，清单和 evidence 都不会给出误导性的 frame@。
+        ...(sub > 1 ? { sub } : { t_frame: +frame.t.toFixed(3) }),
         ...(cellCuts > 0 ? { cuts: cellCuts } : {}),
-        ...(sub > 1 ? { sub } : {}),
         ...(frame.sharp !== undefined ? { sharp: +frame.sharp.toFixed(1) } : {}),
         ...(text?.text ? { text: text.text, charsPerSec: text.charsPerSec } : {}),
       });

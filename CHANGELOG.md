@@ -28,6 +28,9 @@
   silently fell back to the local 360p copy without counting a `frameFallback`. Now it uses the real fields,
   falls back per tile on failure, and reports the fallback.
 
+- **Tiled cells no longer emit `frame@`.** A k×k cell contains k² moments; the old midpoint timestamp was
+  not the moment its picture was taken. The evidence sidecar records `frame_at: null` for those cells.
+
 ## [0.4.0] — 2026-10-28
 
 The release where fast cuts finally count. Three things were true before this version and are not any more:

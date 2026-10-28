@@ -672,7 +672,7 @@ export function __clearDirectCache() {
 }
 
 /** 从 yt-dlp 的 formats 里挑一条不超过 height 的最好画面轨 */
-function pickVideoFormat(formats, height) {
+export function pickVideoFormat(formats, height) {
   const video = formats.filter((f) => f.vcodec && f.vcodec !== 'none');
   if (video.length === 0) return null;
   // **按短边比，不按 height**：竖屏视频的 height 是长边（1080x1920），用 height<=1080 会把

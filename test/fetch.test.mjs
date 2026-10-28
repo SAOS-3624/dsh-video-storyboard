@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import {
   assertFetchableUrl, discoverYtdlp, explainYtdlpError, fetchMedia, formatSelector, isHttpUrl,
-  loadVideoConfig, mediaKey, normalizeUrl, pruneMedia, resolveAuth, resolveDirectUrl,
+  loadVideoConfig, mediaKey, normalizeUrl, pickVideoFormat, pruneMedia, resolveAuth, resolveDirectUrl,
   summariseInfo, unwrapSingle,
   __clearDirectCache,
 } from '../src/fetch.js';
@@ -457,18 +457,14 @@ test('fetchMedia: 匿名且源只到 360p 时，既标 degraded 也说明是匿�
   }
 });
 
-test('pickVideoFormat: 竖屏按短边选，不会被 height 卡掉 1080x1920', async () => {
+test('pickVideoFormat: 竖屏按短边选，不会被 height 卡掉 1080x1920', () => {
   // issue #9：竖屏的 height 是长边，用 height<=1080 会把 1080x1920 排除、退到 480x852
-  const { pickVideoFormatForTest } = await import('../src/fetch.js').then((m) => ({
-    pickVideoFormatForTest: m.__pickVideoFormat,
-  })).catch(() => ({ pickVideoFormatForTest: null }));
-  if (!pickVideoFormatForTest) return;   // 没导出就跳过（内部函数）
   const formats = [
     { vcodec: 'h264', width: 360, height: 640, tbr: 500 },
     { vcodec: 'h264', width: 480, height: 852, tbr: 800 },
     { vcodec: 'h264', width: 720, height: 1280, tbr: 1800 },
     { vcodec: 'h264', width: 1080, height: 1920, tbr: 4000 },
   ];
-  assert.equal(pickVideoFormatForTest(formats, 1080).width, 1080, '应选到 1080x1920');
-  assert.equal(pickVideoFormatForTest(formats, 480).width, 480);
+  assert.equal(pickVideoFormat(formats, 1080).width, 1080, '应选到 1080x1920');
+  assert.equal(pickVideoFormat(formats, 480).width, 480);
 });
