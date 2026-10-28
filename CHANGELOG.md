@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed: a CDN that drops the connection no longer kills the whole run
+
+`--continue --retries 3` assumes a retry makes progress. Bilibili's CDN does not always agree: on one direct
+URL it handed over 65–77 % of the bytes and then closed the connection without a response, **at the same
+offset, on every retry**. Reproduced on an 88 s clip (712 KB video, 1 MB audio) — three of three attempts
+stopped between 703 KB and 832 KB of 1,072,255:
+
+    ERROR: [download] Got error: Downloaded 832627 bytes, expected 1072255 bytes. Giving up after 3 retries
+
+The same URL requested with `Range: bytes=<have>-` finished in a second. So `fetchMedia` now has a second lane:
+when the failure looks like truncation (and not a 403/404/567, where another attempt is refused just the same),
+it takes one video format and one audio format out of the `-J` output it already has, downloads both with a
+ranged resumer (`src/resume.js`), and remuxes them with `ffmpeg -c copy`.
+
+Three things it deliberately does not do:
+
+- **It does not hide the original error.** If the fallback fails for any reason, `explainYtdlpError(stderr)`
+  is raised unchanged — the real cause stays visible.
+- **It does not retry forever.** Two consecutive rounds without a single new byte ends it, so a genuinely
+  blocked URL costs seconds instead of the whole 600 s budget.
+- **It does not trust `formats[].filesize` as a length check.** Measured 272 bytes off on a 728 KB stream —
+  enough to turn a complete download into "incomplete". The server's `Content-Range` total wins when present.
+
+Measured after the change, same URL, same network: `download` → `download/direct-resume` → `done`,
+88.2 s h264 + aac, 1,829,306 bytes, identical to the manual `curl -C -` + ffmpeg result.
+
 ## [0.4.3] — 2026-10-29
 
 ### Headline: the ASR path was the weak spot

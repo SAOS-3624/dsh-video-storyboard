@@ -6,8 +6,8 @@ import { join } from 'node:path';
 
 import {
   assertFetchableUrl, discoverYtdlp, explainYtdlpError, fetchMedia, formatSelector, isHttpUrl,
-  loadVideoConfig, mediaKey, normalizeUrl, pickVideoFormat, pruneMedia, resolveAuth, resolveDirectUrl,
-  summariseInfo, unwrapSingle,
+  loadVideoConfig, looksLikeTruncation, mediaKey, normalizeUrl, pickVideoFormat, pruneMedia,
+  resolveAuth, resolveDirectUrl, summariseInfo, unwrapSingle,
   __clearDirectCache,
 } from '../src/fetch.js';
 
@@ -482,4 +482,27 @@ test('explainYtdlpError: 412 是限流，不是登录问题', () => {
   const msg = explainYtdlpError('ERROR: HTTP Error 412: Precondition Failed');
   assert.match(msg, /rate-limited/);
   assert.doesNotMatch(msg, /567/);
+});
+
+/* ------------------------------------------------- 截断续传兜底的判定 */
+
+test('looksLikeTruncation: 认得出 CDN 传一半掐断', () => {
+  // 实测原文（B 站 CDN），这两条就是这次要兜底的场景
+  assert.equal(looksLikeTruncation(
+    'ERROR: [download] Got error: Downloaded 357494 bytes, expected 612014 bytes. Giving up after 3 retries',
+  ), true);
+  assert.equal(looksLikeTruncation(
+    'ERROR: unable to download video data: <urlopen error [Errno 104] Remote end closed connection without response>',
+  ), true);
+  assert.equal(looksLikeTruncation('[download] Connection reset by peer'), true);
+  assert.equal(looksLikeTruncation('ERROR: The read operation timed out'), true);
+});
+
+test('looksLikeTruncation: 权限/风控类错误不换通道，换了也是白跑', () => {
+  assert.equal(looksLikeTruncation('ERROR: HTTP Error 403: Forbidden'), false);
+  assert.equal(looksLikeTruncation('ERROR: HTTP Error 404: Not Found'), false);
+  assert.equal(looksLikeTruncation('ERROR: HTTP Error 567: 风控'), false);
+  assert.equal(looksLikeTruncation('ERROR: HTTP Error 412: Precondition Failed'), false);
+  assert.equal(looksLikeTruncation(''), false);
+  assert.equal(looksLikeTruncation(undefined), false);
 });

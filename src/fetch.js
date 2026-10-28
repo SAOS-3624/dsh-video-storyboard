@@ -21,6 +21,7 @@ import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 import { probeVideo } from './probe.js';
+import { declaredBytes, downloadResumable, muxStreams, pickAudioFormat } from './resume.js';
 
 export const COOKIES_ENV = 'DSH_VIDEO_COOKIES';
 export const MEDIA_ENV = 'DSH_VIDEO_MEDIA_DIR';
@@ -582,7 +583,19 @@ export async function fetchMedia(input, opts = {}) {
     // **不要删目录**：yt-dlp 的 .part 是断点续传的本钱。
     // 原来这里 `rm -rf` 掉整个缓存目录，于是网络一抖就"下到一半清零、从头再来"——
     // 用户实测表现为"越下越慢"（繁星-夏夜反馈）。残留的 .part 由 pruneMedia 按时间清。
-    throw new Error(explainYtdlpError(downloaded.stderr, downloaded.code));
+    //
+    // 其次：如果失败是"传输末尾被掐断"，yt-dlp 的重试会和 CDN 死磕在同一处。
+    // 实测 `--retries 30 --continue` 三十轮都停在同一个字节数，报
+    // `Remote end closed connection without response`；同一条直链换 Range 请求
+    // 循环续传几分钟就下完了。所以这里换一条路：拿 formats 里的直链自己续。
+    if (looksLikeTruncation(downloaded.stderr)) {
+      const rescued = await rescueByDirectRange({ summary, dir, target, scanHeight, onProgress });
+      if (rescued) {
+        downloaded = { ...downloaded, code: 0 };
+        onProgress?.({ phase: 'download', rescued: 'direct-resume' });
+      }
+    }
+    if (downloaded.code !== 0) throw new Error(explainYtdlpError(downloaded.stderr, downloaded.code));
   }
   // yt-dlp 有时会把 DASH 流写成 video.f100022.mp4（格式 id 进了文件名），
   // 而不是 --merge-output-format 期望的 video.mp4。文件名不是容器判定的依据：
@@ -732,6 +745,72 @@ function directFromFormat(chosen) {
     // B 站直链带 deadline（约 2 小时）；拿不到就按 90 分钟算，宁可早重解析
     expiresAt: Number.isFinite(deadline) && deadline > 0 ? deadline * 1000 : Date.now() + 90 * 60 * 1000,
   };
+}
+
+/**
+ * yt-dlp 的失败是不是"传输末尾被掐断"这一类。
+ * 只有这一类才值得换 Range 续传；403/404/风控这类换通道也一样被拒，白花时间。
+ */
+export function looksLikeTruncation(stderr = '') {
+  if (/HTTP Error (?:401|403|404|410|412|567)/i.test(stderr)) return false;
+  return /Got error|Remote end closed|Connection (?:reset|aborted)|IncompleteRead|timed out|Downloaded \d+ bytes/i
+    .test(stderr);
+}
+
+/**
+ * 兜底：用 formats 里的直链把画面轨 / 声音轨分别 Range 续完，再 `-c copy` 封装成 video.mp4。
+ * 失败一律返回 false —— 调用方会照原样抛 yt-dlp 的错，不能把原始 stderr 盖掉。
+ */
+async function rescueByDirectRange({ summary, dir, target, scanHeight, onProgress }) {
+  const videoFormat = pickVideoFormat(summary.formats, scanHeight);
+  const videoDirect = directFromFormat(videoFormat);
+  if (!videoDirect) return false;
+  const audioFormat = pickAudioFormat(summary.formats);
+  const audioDirect = audioFormat ? directFromFormat(audioFormat) : null;
+
+  const headersFor = (d) => ({ 'User-Agent': d.userAgent, ...(d.referer ? { Referer: d.referer } : {}) });
+  const videoPath = join(dir, 'resume.video');
+  const audioPath = join(dir, 'resume.audio');
+  const outPath = join(dir, 'resume.mp4');
+
+  try {
+    onProgress?.({ phase: 'download', fallback: 'direct-resume', height: videoDirect.height });
+    await downloadResumable({
+      url: videoDirect.url,
+      dest: videoPath,
+      headers: headersFor(videoDirect),
+      expectedBytes: declaredBytes(videoFormat),
+      onProgress: ({ have, total }) => onProgress?.({ phase: 'download', fallback: 'direct-resume', have, total }),
+    });
+
+    let audio = null;
+    if (audioDirect) {
+      try {
+        await downloadResumable({
+          url: audioDirect.url,
+          dest: audioPath,
+          headers: headersFor(audioDirect),
+          expectedBytes: declaredBytes(audioFormat),
+        });
+        audio = audioPath;
+      } catch {
+        // 声音轨拿不到不该让整条链接作废：画面轨已经在手，少的只是一条音频包络
+        audio = null;
+      }
+    }
+
+    await muxStreams({ video: videoPath, audio, out: outPath });
+    const produced = await stat(outPath);
+    if (!produced.isFile() || produced.size === 0) return false;
+    await rm(target, { force: true });
+    await rename(outPath, target);
+    await rm(videoPath, { force: true });
+    await rm(audioPath, { force: true });
+    onProgress?.({ phase: 'download', fallback: 'direct-resume', bytes: produced.size });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
