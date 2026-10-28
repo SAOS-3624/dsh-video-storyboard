@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
 import { resolveInput } from './fetch.js';
 import { loadTranscriptFile } from './transcript-file.js';
-import { decideCuts, quantile, scanShots, spikeCuts, suppressClose } from './scan.js';
+import { decideCuts, scanShots, spikeCuts, suppressClose } from './scan.js';
 import { rememberSegments } from './locate.js';
 import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import { fitSegments, segmentsFromCuts, totalDur } from './segments.js';
@@ -284,8 +284,6 @@ export async function runStoryboard(opts) {
   // 改用**相对基线**再找一次（和本地中位数比），只在确实更静的时候替换。
   // 用户反馈（野生的猛龙）：纯 PPT 视频上"阈值压到 0.08 也一条都检不出来，只能退回等间隔"。
   if (!precomputed && scan.stats.length > 20) {
-    const medianScore = quantile(scan.stats.map((x) => x.score), 0.5);
-    void medianScore;   // 保留一份供日志/调参用；判定不再依赖它
     // 判据是**刀密度**，不是"画面静不静"：实测概念 PV / 沧野 / MAD 的中位分都是 0.9–1.1，
     // 和录屏素材（0.0–1.4）完全混在一起，用中位分根本分不开。
     // 能分开的是刀/秒：录屏 0.11–0.22，视频内容 0.40–0.49。
@@ -650,8 +648,6 @@ const PER_FRAME_MEAN = 30;
 export function refineCutsByWindow({
   stats, fps, coarseCuts, winStart = 0, winDur, winSec = 2, minScore = MIN_REFINE_SCORE,
 }) {
-  const span = winDur ?? (stats.length ? stats[stats.length - 1].t - winStart : 0);
-  void span;
   // 间隔要按内容选：
   //   - 普通快闪：间隔略大于一帧（1.02/fps），避免同一个镜头的相邻帧被判成两刀；
   //   - **每帧一剪**：整窗平均分很高（实测 44，普通快闪只有 12–18），这时才把间隔压到一帧以下，

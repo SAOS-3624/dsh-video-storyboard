@@ -218,6 +218,3 @@ export function isOwned() {
   return Boolean(ownedChild?.pid);
 }
 
-export function __pendingPid() {
-  return ownedChild?.pid ?? null;
-}
