@@ -1,106 +1,32 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.3] — 2026-10-29
 
-### 头条：ASR 这三个 bug 是本轮最大的一块
+### Headline: the ASR path was the weak spot
 
-三条都来自真实用户，都是"明明能用却被我们自己的规则挡住"：
+Three failures, all reported by users within a day, all the same shape — **something we could have known was
+treated as something we could not**:
 
-1. **本机 ASR 被强制要 key**（0.4.2 修，@小观棋 报）—— 自己跑的 FunASR 不校验 Authorization，
-   却被 `if (!key) return null` 一刀切跳过。本机地址现在不要求 key。
-2. **服务只启不停**（0.4.1/0.4.2，用户三次死机的根因）—— 常驻吃 6.8 GB 提交额。
-   现在按需拉起、10 分钟无新对话就请它退出，服务端另有 30 分钟空闲自退兜底。
-3. **长片扫描期间被空闲计时器关掉**（本轮修）—— 计时器在"上一次运行结束"时设的，
-   新一次运行扫描超过窗口就会白丢一次冷启动（30 秒）。运行入口即续命。
+1. **A local service was gated on a key it never checks.** `if (!key) return null` skipped transcription for
+   anyone running FunASR on their own machine, where `Authorization` is not even looked at.
+2. **The service started and was never stopped.** It sat at ~6.8 GB of commit charge and took the host down
+   three times during a video edit. It is now started on demand and asked to leave when the run ends.
+3. **A long scan could kill it mid-run.** The idle timer was armed at the *end* of a run, so a run that spent
+   longer than the window scanning found the endpoint gone.
 
-### Fixed
+The runtime also moved from FunASR to **sherpa-onnx** (cold start 30 s → 5 s, 2.1 GB → 500 MB), and the model
+got newer — `paraformer-zh-2024-03-09` fixes homophones that previously needed a hotword.
 
-- **`manage.start` pointing at a `.py` file silently did nothing.** Spawning a script on Windows is not a
-  command, so the service never came up and every run reported `asr-failed · ECONNREFUSED` — looking like
-  "auto-start is broken". `start` is now normalised: a `.py` path is wrapped with the interpreter from the
-  sibling `.venv` (falling back to `python`), so both `"D:/asr-local/server-sherpa.py"` and
-  `[python.exe, server-sherpa.py]` work.
+### Added
 
-- **Hotwords were global, which makes them a negative bias on the wrong subject.** A list tuned for a lens
-  review (像差 焦段 光圈) was still being applied to a materials-science lecture. `video_storyboard` now takes
-  a per-call `hotwords` that overrides `asr.json`, the cache key includes it, and the README says plainly that
-  the global list is a default, not a policy.
+- **Hotwords: a word list that biases decoding, so homophones stop winning.** `"hotwords": "像差 焦段 光圈"`
+  in `asr.json`, sent as a `hotword` form field. seaco_paraformer supports it natively. Measured on a lens
+  review: *"也就是所谓的**相差**"* → *"也就是所谓的**像差**"* with one word added, no other change.
 
-- **A login-gated video was read anyway, and the result was presented as if complete.** When Bilibili hides
-  the subtitle list from anonymous requests (`need_login_subtitle: true`), the pipeline used to report
-  "no subtitle" and move on — so the model ended up reading burned-in text off the pixels and calling it a
-  transcript.
+  This matters more than swapping models: the transcription was already fluent, the misses were homophones
+  (像差/相差) that no general model resolves without knowing the subject.
 
-  Now the site's own flags (`need_login_subtitle`, `is_upower_*`) are carried through as `needLogin`, and both
-  the probe output and the storyboard manifest say so plainly:
-
-  ```
-  !! NEEDS LOGIN — this site hides subtitles from anonymous requests (auth=anonymous).
-     Do NOT guess the dialogue from burned-in text or scenes.
-     Ask the user for cookies before trusting any transcript…
-  ```
-
-  The point is to stop and ask, not to produce a confident answer from a source we never had.
-
-- **A console window popped up on every conversation, spewing `'wo' is not recognized`.** Two causes:
-  the ASR service was launched through `start-asr.cmd`, which allocates a console when the spawner is a GUI
-  app, and that `.cmd` had been rewritten with **LF line endings** (plus Chinese comments) — cmd.exe then
-  executed fragments of the `REM` lines as commands.
-
-  `manage.start` now accepts an array (`[exe, ...args]`) and the default config uses it, spawning
-  `python.exe server-sherpa.py` directly with `windowsHide` — no console, no batch parsing. `start-asr.cmd`
-  was rewritten with CRLF and ASCII-only text for the cases where a human runs it by hand.
-
-- **Stale cookies silently capped quality at 480p.** Reported against BV1HHns6oE4G: the manifest said the source
-  had no 1080p, while the browser clearly did. Measured with the user's own `bili-cookies.txt`:
-
-  ```
-  with cookies:      [480, 360]
-  without cookies:   [1080, 720, 480, 360]
-  ```
-
-  An expired or low-privilege `SESSDATA` makes Bilibili hand back a *shorter* format list — the plugin then
-  believed it and reported "no 1080p source", which was true of the request and false about the video.
-
-  Both the probe and the download path now go through one `probeSummary()`: when cookies are configured and
-  the result caps at ≤720p, it probes once more anonymously and keeps whichever list is taller, recording
-  why (`cookies 只允许 480p，匿名反而能拿到 1080p —— SESSDATA 可能过期…`). Verified: that URL now reports
-  max 1080, `zoomTarget` 1080 and a 1080p direct link.
-
-- **Bilibili's HTTP 567 now says what it is and tries once more.** 567 is their risk control, not a format
-  problem — most often a video that needs a signed-in session (1080P+, 会员/付费) or a rate-limit. Before, the
-  message was yt-dlp's raw text, which reads like a plugin bug.
-
-  **Docs gap this exposed**: `docs/SETUP.md` had a full cookies walkthrough all along, but the README — the
-  page people actually land on — never mentioned cookies at all. There is now a "needs a signed-in video"
-  section there: when it is needed, the three steps with Cookie-Editor, both config paths, the local-file
-  alternative, and the reminder that `SESSDATA` is a login credential.
-
-  Now: one automatic retry with a browser User-Agent, `Referer: https://www.bilibili.com/`, and
-  `--sleep-requests 1` (the retry only fires on 567/412, never on permanent errors); if it still fails, the
-  error names both ways out — a cookies.txt, or download the file and pass a local path. `--retries 3
-  --fragment-retries 5` also went into the base args, since CDN hiccups are routine.
-
-### Performance
-
-- **Transcription now runs while the scan runs.** It only needs the silence positions (from the 1–3 s audio
-  pass), not the cut points, so it was always safe to start early — it just never was. A 21-minute screen
-  recording went **202 s → 89 s** (scan 82 s, transcription finished inside it, frames 3.4 s). A 5-minute
-  window: 31.7 s with `transcript` at 0.03 s, i.e. fully overlapped.
-
-  Two things broke on the way and are fixed: the transcript block moved ahead of a `let asrLife` declaration
-  (`Cannot access before initialization`, which silently turned the first measurement into `asr-failed` while
-  still showing a fast time), and the block's `textInSilence` had to be returned rather than captured.
-
-- **Frame extraction runs in parallel.** Nine cells used to be nine sequential ffmpeg calls (each one seeks
-  and decodes a single frame). The loop is now plan → concurrent extract → assemble in order, at
-  `frameConcurrency` (default half the cores, capped at 8). Measured on a 90 s clip with 9 cells: **13.3 s at
-  1, 8.0 at 3, 6.5 at 5, 4.0 at 8**; whole run 18.0 → 12.2 s with transcription on. Cell order and the
-  sub-tiled fast-cut cells are unchanged (verified visually).
-
-  `result.timing` now carries per-phase seconds (`audio`/`scan`/`transcript`/`frames`) so the next slow
-  report can start from numbers instead of guesses. Caveat: part of the 202 → 89 s is the OS file cache
-  warming between the two runs — the honest structural gain is the ~58 s of transcription, not 113 s.
+  Server-side: `start-asr.cmd` now takes `ASR_BACKEND=sherpa|funasr`; `sherpa` is the default.
 
 ### Changed
 
@@ -116,29 +42,81 @@
 
   Hotwords still work on the `funasr` backend (`ASR_BACKEND=funasr` in `start-asr.cmd`); on sherpa they are
   ignored and the `terms` table is the fallback.
-
-### Added
-
-- **Hotwords: a word list that biases decoding, so homophones stop winning.** `"hotwords": "像差 焦段 光圈"`
-  in `asr.json`, sent as a `hotword` form field. seaco_paraformer supports it natively. Measured on a lens
-  review: *"也就是所谓的**相差**"* → *"也就是所谓的**像差**"* with one word added, no other change.
-
-  This matters more than swapping models: the transcription was already fluent, the misses were homophones
-  (像差/相差) that no general model resolves without knowing the subject.
-
-  Server-side: `start-asr.cmd` now takes `ASR_BACKEND=sherpa|funasr`; `sherpa` is the default.
+- **The idle window is now 10 minutes, and the backstop moved to 30.** Cold start costs 30 s, so a 2-minute
+  window meant re-paying it constantly. The rule is now literally "10 minutes after the last run, with no new
+  run in between, stop it". `manage.idleMs` still overrides per machine. The server's own `ASR_IDLE_EXIT_S`
+  went from 600 s to 1800 s — a backstop must be *longer* than the caller's timer, otherwise it closes an
+  instance that is still in use.
 
 ### Fixed
 
+- **`manage.start` pointing at a `.py` file silently did nothing.** Spawning a script on Windows is not a
+  command, so the service never came up and every run reported `asr-failed · ECONNREFUSED` — looking like
+  "auto-start is broken". `start` is now normalised: a `.py` path is wrapped with the interpreter from the
+  sibling `.venv` (falling back to `python`), so both `"D:/asr-local/server-sherpa.py"` and
+  `[python.exe, server-sherpa.py]` work.
+- **Hotwords were global, which makes them a negative bias on the wrong subject.** A list tuned for a lens
+  review (像差 焦段 光圈) was still being applied to a materials-science lecture. `video_storyboard` now takes
+  a per-call `hotwords` that overrides `asr.json`, the cache key includes it, and the README says plainly that
+  the global list is a default, not a policy.
+- **A login-gated video was read anyway, and the result was presented as if complete.** When Bilibili hides
+  the subtitle list from anonymous requests (`need_login_subtitle: true`), the pipeline used to report
+  "no subtitle" and move on — so the model ended up reading burned-in text off the pixels and calling it a
+  transcript.
+
+  Now the site's own flags (`need_login_subtitle`, `is_upower_*`) are carried through as `needLogin`, and both
+  the probe output and the storyboard manifest say so plainly:
+
+  ```
+  !! NEEDS LOGIN — this site hides subtitles from anonymous requests (auth=anonymous).
+     Do NOT guess the dialogue from burned-in text or scenes.
+     Ask the user for cookies before trusting any transcript…
+  ```
+
+  The point is to stop and ask, not to produce a confident answer from a source we never had.
+- **A console window popped up on every conversation, spewing `'wo' is not recognized`.** Two causes:
+  the ASR service was launched through `start-asr.cmd`, which allocates a console when the spawner is a GUI
+  app, and that `.cmd` had been rewritten with **LF line endings** (plus Chinese comments) — cmd.exe then
+  executed fragments of the `REM` lines as commands.
+
+  `manage.start` now accepts an array (`[exe, ...args]`) and the default config uses it, spawning
+  `python.exe server-sherpa.py` directly with `windowsHide` — no console, no batch parsing. `start-asr.cmd`
+  was rewritten with CRLF and ASCII-only text for the cases where a human runs it by hand.
+- **Stale cookies silently capped quality at 480p.** Reported against BV1HHns6oE4G: the manifest said the source
+  had no 1080p, while the browser clearly did. Measured with the user's own `bili-cookies.txt`:
+
+  ```
+  with cookies:      [480, 360]
+  without cookies:   [1080, 720, 480, 360]
+  ```
+
+  An expired or low-privilege `SESSDATA` makes Bilibili hand back a *shorter* format list — the plugin then
+  believed it and reported "no 1080p source", which was true of the request and false about the video.
+
+  Both the probe and the download path now go through one `probeSummary()`: when cookies are configured and
+  the result caps at ≤720p, it probes once more anonymously and keeps whichever list is taller, recording
+  why (`cookies 只允许 480p，匿名反而能拿到 1080p —— SESSDATA 可能过期…`). Verified: that URL now reports
+  max 1080, `zoomTarget` 1080 and a 1080p direct link.
+- **Bilibili's HTTP 567 now says what it is and tries once more.** 567 is their risk control, not a format
+  problem — most often a video that needs a signed-in session (1080P+, 会员/付费) or a rate-limit. Before, the
+  message was yt-dlp's raw text, which reads like a plugin bug.
+
+  **Docs gap this exposed**: `docs/SETUP.md` had a full cookies walkthrough all along, but the README — the
+  page people actually land on — never mentioned cookies at all. There is now a "needs a signed-in video"
+  section there: when it is needed, the three steps with Cookie-Editor, both config paths, the local-file
+  alternative, and the reminder that `SESSDATA` is a login credential.
+
+  Now: one automatic retry with a browser User-Agent, `Referer: https://www.bilibili.com/`, and
+  `--sleep-requests 1` (the retry only fires on 567/412, never on permanent errors); if it still fails, the
+  error names both ways out — a cookies.txt, or download the file and pass a local path. `--retries 3
+  --fragment-retries 5` also went into the base args, since CDN hiccups are routine.
 - **A partial download was wiped on failure, so every retry started from zero.** On a flaky connection the
   media directory was removed (`rm -rf`) whenever yt-dlp exited non-zero — including the `.part` file that is
   the whole point of resuming. Reported as "下到一半直接清零重新开始，而且下得更慢". Now the directory is
   kept and `--continue` is explicit; stale parts are pruned by age instead.
-
 - **Progressive streams were never tried, so every Bilibili download was a DASH pair plus a merge.** The
   selector jumped straight to `bv*+ba`. It now tries `b[height<=N]` (one file, no merge) first and falls back
   to DASH — the scan copy only needs 360p, and a single stream is both faster and less to write.
-
 - **A slide deck that "looks the same on every page" produced no cuts at all.** With an absolute threshold,
   a page turn that only changes a few characters scores 3–8 and disappears under any sane floor, so the
   result fell back to equal intervals. Very static films (median score < 3 **and** fewer than 0.1 cuts/s) now
@@ -154,17 +132,6 @@
 
   An e2e test builds exactly that fixture (a block appearing at t=2 on an otherwise still frame) and asserts
   the cut is found — the guard for "the function exists, the unit test is green, and nothing calls it".
-
-### Changed
-
-- **The idle window is now 10 minutes, and the backstop moved to 30.** Cold start costs 30 s, so a 2-minute
-  window meant re-paying it constantly. The rule is now literally "10 minutes after the last run, with no new
-  run in between, stop it". `manage.idleMs` still overrides per machine. The server's own `ASR_IDLE_EXIT_S`
-  went from 600 s to 1800 s — a backstop must be *longer* than the caller's timer, otherwise it closes an
-  instance that is still in use.
-
-### Fixed
-
 - **A long scan could let the idle timer shut the service down mid-run.** The timer is set when a run ends,
   so a *new* run that spends more than `idleMs` scanning (before it ever asks for a transcript) would find the
   endpoint dead and pay the 30 s cold start again. Any new run now renews the lease at entry, and the timer is
@@ -173,13 +140,27 @@
   The failure mode was a wasted restart, never a wrong result: the endpoint is probed before transcribing, and
   a dead one is started before the request goes out.
 
+### Performance
+
+- **Transcription now runs while the scan runs.** It only needs the silence positions (from the 1–3 s audio
+  pass), not the cut points, so it was always safe to start early — it just never was. A 21-minute screen
+  recording went **202 s → 89 s** (scan 82 s, transcription finished inside it, frames 3.4 s). A 5-minute
+  window: 31.7 s with `transcript` at 0.03 s, i.e. fully overlapped.
+
+  Two things broke on the way and are fixed: the transcript block moved ahead of a `let asrLife` declaration
+  (`Cannot access before initialization`, which silently turned the first measurement into `asr-failed` while
+  still showing a fast time), and the block's `textInSilence` had to be returned rather than captured.
+- **Frame extraction runs in parallel.** Nine cells used to be nine sequential ffmpeg calls (each one seeks
+  and decodes a single frame). The loop is now plan → concurrent extract → assemble in order, at
+  `frameConcurrency` (default half the cores, capped at 8). Measured on a 90 s clip with 9 cells: **13.3 s at
+  1, 8.0 at 3, 6.5 at 5, 4.0 at 8**; whole run 18.0 → 12.2 s with transcription on. Cell order and the
+  sub-tiled fast-cut cells are unchanged (verified visually).
+
+  `result.timing` now carries per-phase seconds (`audio`/`scan`/`transcript`/`frames`) so the next slow
+  report can start from numbers instead of guesses. Caveat: part of the 202 → 89 s is the OS file cache
+  warming between the two runs — the honest structural gain is the ~58 s of transcription, not 113 s.
+
 ### 为什么"相对基线"之前没生效
-
-`spikeCuts()` 是 9adba94 就写好的，单测也一直是绿的 —— 但 `pipeline.js` **从来没有调用过它**。
-函数躺在 scan.js 里六个小时，纯 PPT 视频照样一条切点都找不到。这和 0.4.1 里 `video_locate` 漏 import
-是同一类错误：**代码存在、测试通过、路径没接上**。
-
-现在两处都有端到端测试守着（`e2e: 极静素材`、`locate.execute` 实际调用），这类"没接线"会红。
 
 ## [0.4.2] — 2026-10-28
 

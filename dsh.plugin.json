@@ -1,7 +1,7 @@
 {
   "name": "dsh-video-storyboard",
   "description": "Scene-aware storyboard tool for DeepSeek Harness: one addressable grid per video, with an index the model can cite.",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "entry": {
     "name": "dsh-video-storyboard",
     "inject": [

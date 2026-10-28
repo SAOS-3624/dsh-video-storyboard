@@ -177,6 +177,10 @@ video_storyboard({ input: "D:/video/xxx.mp4" })
 
 ## 字幕与 ASR（怎么让它"听懂"）
 
+> 想看**完整可用的配置**（目录结构、asr.json / video.json 全文、实测数字、排障对照）：
+> **[docs/CONFIG.zh.md](docs/CONFIG.zh.md)**。
+
+
 转写是**可选**的：不配也能出图，只是清单里没有台词。
 
 ### 优先级（第一个能用的赢）

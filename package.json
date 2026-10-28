@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-storyboard",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Scene-aware storyboard for DeepSeek Harness: one addressable grid per video (numbered cells, timestamps, transcript, audio envelope) so a text-only agent can look at the video itself instead of being told a summary.",
   "keywords": [
     "dsh",
