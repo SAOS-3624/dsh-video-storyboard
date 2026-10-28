@@ -80,6 +80,29 @@ export function cleanEnvValue(v) {
   return t;
 }
 
+/** 云端（非本机）且没给 key —— 这一种情况才必然跳过。`transcribe()` 的门就是这一句。 */
+export function needsCloudKey(baseUrl, key) {
+  return !key && !isLoopback(baseUrl);
+}
+
+/** 这次调用实际会用的 key：undefined = 走 env / asr.json；显式值（含 null / ''）= 调用方说了算。 */
+export function effectiveAsrKey(cfg = ASR_DEFAULTS, apiKey) {
+  return apiKey === undefined
+    ? cleanEnvValue(process.env[cfg.keyEnv]) || cfg.fileKey
+    : apiKey;
+}
+
+/**
+ * 这次调用会不会真的转写。
+ *
+ * 判据不能只看"有没有 key"：0.4.1 起本机服务（127.0.0.1 / localhost / [::1] / 0.0.0.0）按设计
+ * **不需要 key**，只看 key 就会把"本机 ASR 正在跑"误判成"没配 → 不会转写"。所以必须和
+ * `transcribe()` 的门用同一句话，否则清单与实际行为会朝反方向偏差。
+ */
+export function canTranscribe(cfg = ASR_DEFAULTS, apiKey) {
+  return !needsCloudKey(cfg.baseUrl, effectiveAsrKey(cfg, apiKey));
+}
+
 export function resolveAsrConfig(env = process.env) {
   const file = readConfigFile(env);
   const envBaseUrl = cleanEnvValue(env.DSH_ASR_BASE_URL);
@@ -168,14 +191,11 @@ export async function transcribe({
   timeoutMs = 180_000,
 } = {}) {
   // undefined = 走 env/文件；显式传 null 或 '' = 明确不要 key（测试与"关掉 ASR"都用这个）
-  const key = apiKey === undefined
-    ? cleanEnvValue(process.env[ASR_DEFAULTS.keyEnv]) || ASR_DEFAULTS.fileKey
-    : apiKey;
+  const key = effectiveAsrKey(ASR_DEFAULTS, apiKey);
   // **本机服务不该强制要 key**：自己跑的 FunASR / whisper.cpp / faster-whisper 服务
   // 通常不校验 Authorization，逼用户填一个假 key 只会让"能不能用"取决于文档写没写清。
   // 云端才必须 key（没有它必然 401）。
-  const local = isLoopback(baseUrl);
-  if (!key && !local) return null;                 // 云端没配 key：跳过，不报错
+  if (needsCloudKey(baseUrl, key)) return null;    // 云端没配 key：跳过，不报错
 
   // 抽成 16k 单声道 wav（16k 是 ASR 的通用采样率，体积也可控）
   const args = [ffmpegPath, '-hide_banner', '-v', 'error', '-nostdin'];
@@ -350,7 +370,7 @@ export async function transcribeLong(options = {}) {
   const all = [];
   let model = null;
   let language = null;
-  let ran = 0;                                    // 真正跑起来的片数（没配 key 时会是 0）
+  let ran = 0;                                    // 真正跑起来的片数（云端没配 key 时会是 0）
   for (const win of windows) {
     const part = await transcribe({ ...rest, start: win.from, end: win.to });
     if (!part) continue;
@@ -359,12 +379,13 @@ export async function transcribeLong(options = {}) {
     language = part.language ?? language;
     all.push(...part.segments);
   }
-  // 一片都没跑起来（没配 key）→ 返回 null，让上层走"没有 ASR"这条分支。
-  // 不能返回空壳：那样清单会写 "ASR ran and found no speech"，而实际上根本没跑。
-  if (ran === 0) return null;
-  // 多窗口时每一段都可能因为「没配 key / 纯音乐」返回 null；若这里仍返回非 null 的空壳，
-  // 上层会把空壳当成"有 ASR、只是没听清"，在清单里写 transcript="asr" 并附"可能听错"，
-  // 模型于是以为自己拿到了台词依据。`empty` 让上层能区分「跑了但没结果」。
+  // 一片都没跑起来 → 分两种，不能混为一谈：
+  //  - 云端没配 key：ASR 根本没发生过 → null，上层走"没跑"分支；
+  //  - 配了 key（或本机服务）却没听到任何字：那是**真的**"跑了但没结果" → 交给 `empty`，
+  //    上层会写 asr-empty。绝不能反过来把"没跑"写成"跑了没听到话"（0.4.2 之前就是这么写的）。
+  // 判据用**这次实际要发的地址**：调用方可以显式给 baseUrl（本机服务走这条路）。
+  const target = { ...ASR_DEFAULTS, baseUrl: rest.baseUrl ?? ASR_DEFAULTS.baseUrl };
+  if (ran === 0 && !canTranscribe(target, rest.apiKey)) return null;
   const merged = mergeSegments(all);
   return { segments: merged, model, language, chunks: windows.length, empty: merged.length === 0 };
 }

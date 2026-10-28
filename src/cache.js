@@ -99,11 +99,16 @@ export async function pruneCache({ dir = cacheDir(), maxBytes = MAX_CACHE_BYTES 
 /**
  * 包一层：命中就读，未命中就执行并写回。fails-open —— 缓存坏掉最多是"慢一点"，
  * 绝不能让分镜失败。
+ *
+ * producer 返回 null/undefined 时**原样返回**，不包成 `{cached:false}`：`{...null}` 出来的是
+ * 一个 **truthy 的空壳对象**，调用方写 `if (result)` 就会把自己骗过去 —— ASR 一条都没跑，
+ * 清单却写 "ASR ran and found no speech"（真实的假消息）。这类"什么都没做"的结果也不写缓存。
  */
 export async function withCache(key, producer, opts = {}) {
   const hit = await readCache(key, opts);
   if (hit?.value) return { ...hit.value, cached: true };
   const value = await producer();
+  if (value === null || value === undefined) return value;
   await writeCache(key, { value }, opts);
   return { ...value, cached: false };
 }

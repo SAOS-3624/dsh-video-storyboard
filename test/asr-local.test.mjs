@@ -16,8 +16,8 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import {
-  applyTermMap, chunkWindows, describeAsrTarget, filterSuspectSegments, mergeSegments,
-  resolveAsrConfig, transcribe, transcribeLong,
+  applyTermMap, canTranscribe, chunkWindows, describeAsrTarget, filterSuspectSegments, mergeSegments,
+  needsCloudKey, resolveAsrConfig, transcribe, transcribeLong,
 } from '../src/asr.js';
 import { DEFAULT_FFMPEG } from '../src/probe.js';
 
@@ -154,6 +154,45 @@ test('ASR 客户端：本机服务没配 key 也会真的去请求（不要求�
     /./,
     '应该尝试连接（然后失败），而不是提前 return null',
   );
+});
+
+/**
+ * 这两条锁的是**同一个判据的两侧**：`canTranscribe()` 必须和 `transcribe()` 的门同源。
+ * 只看 key 的实现会把"本机服务正在跑"误判成"不会转写"，而那正好和事实相反 ——
+ * 清单会说"没配 key、不会转写"，调用却真的发出去了。0.4.1 起本机服务不需要 key，
+ * 所以判据只能是"有 key 或 baseUrl 指向本机"。
+ */
+test('canTranscribe / needsCloudKey: 判据必须和 transcribe() 的门一致', () => {
+  const cloud = { baseUrl: 'https://api.example.com/v1', keyEnv: '__NO_SUCH_ENV__' };
+  const local = { baseUrl: 'http://127.0.0.1:8000/v1', keyEnv: '__NO_SUCH_ENV__' };
+
+  assert.equal(needsCloudKey(cloud.baseUrl, undefined), true);
+  assert.equal(needsCloudKey(local.baseUrl, undefined), false);
+
+  assert.equal(canTranscribe(cloud, undefined), false, '云端无 key → 不会转写');
+  assert.equal(canTranscribe(cloud, 'k'), true);
+  assert.equal(canTranscribe(local, undefined), true, '本机服务无 key 也会真的发请求');
+  assert.equal(canTranscribe(local, null), true, '显式 null 只是"别查 env"，本机仍然能跑');
+});
+
+test('transcribeLong: 本机服务没 key 时返回 empty 而不是 null（真的跑了、只是没听到话）', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-asr-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeAudio(dir);
+
+  // 服务在跑，只是返回 0 段 —— 术语上属于"跑了、没听到话"，不能报成"没跑"
+  const fake = await startFakeAsr(() => ({ json: { text: '', segments: [] } }));
+  t.after(() => fake.close());
+
+  const r = await transcribeLong({
+    input: file, start: 0, end: 12, maxChunk: 45,
+    baseUrl: fake.baseUrl, apiKey: null, model: 'fake-asr',
+  });
+  assert.ok(r, '本机服务确实被调用了，不该返回 null');
+  assert.equal(r.empty, true, 'empty 才是"跑了但没结果"的正确表达');
+  assert.equal(fake.seen.length, 1, '必须真的发出了请求');
+  assert.equal(fake.seen[0].auth, undefined, '本机服务不该带 Authorization');
 });
 
 

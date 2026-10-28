@@ -244,6 +244,21 @@ test('formatManifest: asr-empty 说明"没有台词"而不是"字幕坏了"', ()
   assert.ok(!/may be misheard/.test(text), '没有台词时不该出现"可能听错"的免责句');
 });
 
+/**
+ * no-key 和 asr-empty 是两件事，必须在清单里分得开：
+ * asr-empty = "真的听了，没听到话"；no-key = "压根没听"。
+ * 合并成一句就会让模型把"没配 key"读成"这视频没有台词"（0.4.2 之前的实际行为）。
+ */
+test('formatManifest: no-key 说"没跑"，且不许出现"跑了没听到话"', () => {
+  const r = makeResult({ cells: 4 });
+  r.transcript = { source: 'no-key', segments: 0 };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /NOT attempted/);
+  assert.match(text, /needs a key and none is configured/);
+  assert.ok(!/ASR ran and found no speech/.test(text), '没跑就不能说"跑了没听到话"');
+  assert.ok(!/may be misheard/.test(text), '没跑就不该出现"可能听错"');
+});
+
 /* ---------------------------------------------------------------- 多图落盘命名 */
 
 test('withSheetSuffix: 任何扩展名都不会互相覆盖', () => {

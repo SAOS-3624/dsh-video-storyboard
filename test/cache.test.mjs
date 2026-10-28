@@ -61,6 +61,27 @@ test('withCache: 第二次不调 producer', async () => {
   });
 });
 
+/**
+ * 这条是 ASR 假消息的**根因**：`{...null}` 出来的是一个 truthy 空壳对象，
+ * 调用方 `if (result)` 永远成立。修在缓存层，而不是在每个调用点各自防守 ——
+ * 任何 producer 返回 null 的地方都受益。
+ */
+test('withCache: producer 返回 null 时如实返回 null，不包成空壳也不写缓存', async () => {
+  await withTemp(async (dir) => {
+    let calls = 0;
+    const producer = async () => { calls += 1; return null; };
+
+    const first = await withCache('k-null', producer, { dir });
+    assert.equal(first, null, '返回值必须是 null（调用方靠它判断"什么都没做"）');
+    assert.ok(!first, '旧实现返回的是 truthy 的 {cached:false}，`if (result)` 会骗过调用方');
+
+    const second = await withCache('k-null', producer, { dir });
+    assert.equal(second, null);
+    assert.equal(calls, 2, '"什么都没做"不该进缓存，否则第二次会命中一个空壳');
+    assert.equal(await readCache('k-null', { dir }), null);
+  });
+});
+
 test('pruneCache: 超预算时删最旧的', async () => {
   await withTemp(async (dir) => {
     for (let i = 0; i < 5; i++) {

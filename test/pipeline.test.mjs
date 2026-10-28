@@ -259,6 +259,73 @@ test('formatProbe: 长片给两种读法并标明剧透，短片不啰嗦', asyn
   assert.ok(short.split('\n').length <= 3, `短片文本应很短，实得 ${short.split('\n').length} 行`);
 });
 
+test('formatProbe: 有字幕轨时不提 ASR（字幕轨免费又最准）', async () => {
+  const { formatProbe } = await import('../src/pipeline.js');
+  const text = await formatProbe({
+    width: 1920, height: 1080, fps: 24, aspect: 16 / 9, rotation: 0,
+    videoCodec: 'h264', container: 'mp4', hasAudio: true, audioCodec: 'aac',
+    hasSubtitle: true, path: 'a.mp4', duration: 300,
+  });
+  assert.ok(!/transcription is OFF/.test(text), '有字幕轨就不该抱怨 ASR');
+});
+
+/**
+ * 没配 key 时的 probe 必须**提前说清楚转写不会发生**，否则模型会照 "must come from ASR"
+ * 那句话推断"台词马上就来了"，最后拿到一个静默的空清单 —— 中间没有任何一步告诉它原因。
+ */
+test('formatProbe: 没有字幕轨又没配 key 时必须直说"转写不会发生"', async () => {
+  const { formatProbe } = await import('../src/pipeline.js');
+  const prevKey = process.env.DSH_ASR_KEY;
+  const prevBase = process.env.DSH_ASR_BASE_URL;
+  delete process.env.DSH_ASR_KEY;
+  delete process.env.DSH_ASR_BASE_URL;
+  try {
+    const text = await formatProbe({
+      width: 1920, height: 1080, fps: 24, aspect: 16 / 9, rotation: 0,
+      videoCodec: 'h264', container: 'mp4', hasAudio: true, audioCodec: 'aac',
+      hasSubtitle: false, path: 'a.mp4', duration: 300,
+    });
+    assert.match(text, /transcription is OFF/);
+    assert.match(text, /NOT attempted/);
+  } finally {
+    if (prevKey !== undefined) process.env.DSH_ASR_KEY = prevKey;
+    if (prevBase !== undefined) process.env.DSH_ASR_BASE_URL = prevBase;
+  }
+});
+
+test('manifest: 没配 ASR key 时报"没跑"，而不是"没有台词"', { skip: !hasFfmpeg }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tr-nokey-'));
+  try {
+    // 带音轨、无字幕轨的素材：有声音，但云端没配 key —— 旧逻辑会写 "ASR ran and found no speech"
+    const out = join(dir, 'a.mp4');
+    await run(DEFAULT_FFMPEG, ['-hide_banner', '-v', 'error', '-y',
+      '-f', 'lavfi', '-i', 'color=c=0x203040:s=320x180:r=25:d=3',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-shortest', out]);
+
+    const prevKey = process.env.DSH_ASR_KEY;
+    const prevBase = process.env.DSH_ASR_BASE_URL;
+    delete process.env.DSH_ASR_KEY;
+    delete process.env.DSH_ASR_BASE_URL;
+    let r;
+    try {
+      r = await runStoryboard({ input: out, cells: 2, cache: false, asrKey: null });
+    } finally {
+      if (prevKey !== undefined) process.env.DSH_ASR_KEY = prevKey;
+      if (prevBase !== undefined) process.env.DSH_ASR_BASE_URL = prevBase;
+    }
+
+    assert.equal(r.transcript.source, 'no-key');
+    const text = formatManifest(r);
+    assert.match(text, /NOT attempted/);
+    assert.ok(!/ASR ran and found no speech/.test(text), '没跑就不能说"跑了没听到话"');
+    assert.ok(!/may be misheard/.test(text), '没跑就不该出现"可能听错"');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 /* ---------------------------------------------------------------- 外挂转写 */
 
 test('transcriptFile: 给了转写就不跑 ASR，没有音轨也能用', { skip: !hasFfmpeg }, async () => {

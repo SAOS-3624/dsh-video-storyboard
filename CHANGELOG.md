@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **No-key runs no longer claim ASR listened and found no speech.** When the cloud backend had no key, the
+  cache wrapper turned the `null` "not attempted" result into a truthy empty object, so the manifest said
+  `asr-empty` — "ASR ran and found no speech" — even though no request was sent. `withCache` now preserves
+  `null`/`undefined` and does not cache it; the key/local gate is shared by `transcribe()` and the manifest,
+  and a new `no-key` source says explicitly that transcription was **not attempted**. This is separate from
+  `asr-empty` (it really ran and returned zero segments), which still means "ran, heard nothing".
+
 ## [0.4.3] — 2026-10-29
 
 ### Headline: the ASR path was the weak spot
