@@ -32,6 +32,14 @@
   the concept PV stayed at 44 (the guard is what keeps it from doubling — without the rate condition it went
   44 → 88).
 
+  The absolute floor is 4, measured: on a 320×180 capture, changing ~3.5 % of the frame peaks at **5.7** and
+  ~8 % at **11.8** — both under any sane threshold (12–15), while a still frame's noise floor is 0.0–1.5.
+  Below ~1.5 % area the change is 1.6 and nothing can call that a cut; that limit is documented rather than
+  papered over.
+
+  An e2e test builds exactly that fixture (a block appearing at t=2 on an otherwise still frame) and asserts
+  the cut is found — the guard for "the function exists, the unit test is green, and nothing calls it".
+
 ### Changed
 
 - **The idle window is now 10 minutes, and the backstop moved to 30.** Cold start costs 30 s, so a 2-minute
@@ -49,6 +57,14 @@
 
   The failure mode was a wasted restart, never a wrong result: the endpoint is probed before transcribing, and
   a dead one is started before the request goes out.
+
+### 为什么"相对基线"之前没生效
+
+`spikeCuts()` 是 9adba94 就写好的，单测也一直是绿的 —— 但 `pipeline.js` **从来没有调用过它**。
+函数躺在 scan.js 里六个小时，纯 PPT 视频照样一条切点都找不到。这和 0.4.1 里 `video_locate` 漏 import
+是同一类错误：**代码存在、测试通过、路径没接上**。
+
+现在两处都有端到端测试守着（`e2e: 极静素材`、`locate.execute` 实际调用），这类"没接线"会红。
 
 ## [0.4.2] — 2026-10-28
 

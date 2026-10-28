@@ -409,3 +409,30 @@ test('e2e: 平铺格不写 t_frame，清单也不出现 frame@', async (t) => {
   const text = formatManifest(r);
   assert.ok(!/frame@/.test(text), '平铺格不该写 frame@');
 });
+
+/**
+ * 极静素材的回归守卫。
+ *
+ * 这条测试是"函数写了但没接线"这类错误的护栏：spikeCuts 在 9adba94 就写好了、单测也绿，
+ * 但 pipeline 从来没调用它 —— 于是纯 PPT 视频一条切点都找不到（用户实测）。
+ * 这里造一段"几乎不动、只在第 2 秒出现一个小方块"的素材：绝对阈值看不见，相对基线能看见。
+ */
+test('e2e: 极静素材（PPT 型）也能找到那一刀', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-static-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const out = join(dir, 'static.mp4');
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  await promisify(execFile)('ffmpeg', [
+    '-hide_banner', '-v', 'error', '-y',
+    '-f', 'lavfi', '-i', 'color=c=0x101010:s=320x180:r=25:d=6',
+    // 第 2 秒出现一块约 8% 的画面（相当于 PPT 上换了一段字）。
+    // 实测这一档峰值只有 ~12 分，绝对阈值 12~15 会漏；相对基线能看见。
+    '-vf', "drawbox=x=160:y=80:w=90:h=50:color=0xffee66:t=fill:enable='gte(t,2)'",
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', out,
+  ]);
+  const r = await runStoryboard({ input: out, cells: 2, encode: false, transcript: 'off', cache: false });
+  assert.ok(r.cuts.length >= 1, `极静素材上的小改动应该被抓到，实得 ${r.cuts.length} 刀`);
+  assert.ok(r.cuts.some((c) => Math.abs(c.t - 2) < 0.6), `切点应落在 2 秒附近，实得 ${r.cuts.map((c) => c.t.toFixed(2))}`);
+});

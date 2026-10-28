@@ -177,7 +177,9 @@ export async function runStoryboard(opts) {
     // 只放开第一个会误伤——实测概念 PV 的中位数也低（大量静止帧），一放开就 44 → 88 刀。
     const perSec = cuts.length / Math.max(1, winDur);
     if (medianScore < 3 && perSec < 0.1) {
-      const spikes = suppressClose(spikeCuts(scan.stats, { k: 4, minAbs: 5, halfWindow: 12 }), scanGap);
+      // minAbs 4：实测 320×180 上"改一块约 3.5% 的画面"峰值只有 5.7 分、7.8% 才 11.8 分 ——
+      // 绝对阈值 12~15 全都漏；而静止画面的噪声底只有 0.0–1.5，4 分足够把噪声挡在外面。
+      const spikes = suppressClose(spikeCuts(scan.stats, { k: 4, minAbs: 4, halfWindow: 12 }), scanGap);
       if (spikes.length > cuts.length) cuts = spikes;
     }
   }
