@@ -918,6 +918,11 @@ export function formatRemoteProbe(remote) {
     ? `available: ${remote.heights.map((h) => `${h}p`).join(', ')} (max ${remote.maxHeight}p)`
     : 'available: no video formats reported');
   lines.push(`auth: ${remote.auth}${remote.auth === 'anonymous' ? ' (resolution not guaranteed)' : ''}`);
+  if (Array.isArray(remote.needLogin) && remote.needLogin.length > 0) {
+    lines.push(`!! NEEDS LOGIN — this site hides ${remote.needLogin.includes('subtitle') ? 'subtitles' : 'the stream'}` +
+      ` from anonymous requests. Ask the user for cookies.txt first; without it the transcript will be` +
+      ` missing or guessed from pixels.`);
+  }
 
   const dur = Number(remote.duration) || 0;
   if (dur > 1200) {
@@ -1094,6 +1099,19 @@ export function formatManifest(result, {
     if (s.auth === 'anonymous') {
       lines.push('warning: scanned anonymously, so the resolution was not guaranteed. ' +
         'Configure cookies to get a predictable source tier.');
+    }
+    // 站点明确说"登录才给"的时候，不能装作读过 —— 要打断用户去要 cookies。
+    const gates = Array.isArray(s.needLogin) ? s.needLogin : [];
+    if (gates.length > 0) {
+      const what = gates.includes('subtitle') && gates.includes('paywalled')
+        ? 'subtitles and the paid stream are'
+        : gates.includes('subtitle') ? 'subtitles are' : 'the stream is';
+      lines.push(`!! NEEDS LOGIN — this site hides ${what} from anonymous requests ` +
+        `(auth=${s.auth}). Do NOT guess the dialogue from burned-in text or scenes.`);
+      lines.push('   Ask the user for cookies before trusting any transcript: export cookies.txt from the ' +
+        'browser and point "cookies" in ~/.dsh/video.json at it (README, "needs a signed-in video"). ' +
+        'If the user cannot provide one, say so explicitly rather than presenting a partial transcript ' +
+        'as complete.');
     }
   }
   if (result.frameFallbacks) {

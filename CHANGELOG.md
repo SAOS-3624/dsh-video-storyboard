@@ -15,6 +15,22 @@
 
 ### Fixed
 
+- **A login-gated video was read anyway, and the result was presented as if complete.** When Bilibili hides
+  the subtitle list from anonymous requests (`need_login_subtitle: true`), the pipeline used to report
+  "no subtitle" and move on — so the model ended up reading burned-in text off the pixels and calling it a
+  transcript.
+
+  Now the site's own flags (`need_login_subtitle`, `is_upower_*`) are carried through as `needLogin`, and both
+  the probe output and the storyboard manifest say so plainly:
+
+  ```
+  !! NEEDS LOGIN — this site hides subtitles from anonymous requests (auth=anonymous).
+     Do NOT guess the dialogue from burned-in text or scenes.
+     Ask the user for cookies before trusting any transcript…
+  ```
+
+  The point is to stop and ask, not to produce a confident answer from a source we never had.
+
 - **A console window popped up on every conversation, spewing `'wo' is not recognized`.** Two causes:
   the ASR service was launched through `start-asr.cmd`, which allocates a console when the spawner is a GUI
   app, and that `.cmd` had been rewritten with **LF line endings** (plus Chinese comments) — cmd.exe then

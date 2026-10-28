@@ -300,3 +300,23 @@ test('formatManifest: 没有细扫时不该出现这一行', () => {
   const text = formatManifest(r, { maxChars: 200_000 });
   assert.ok(!/re-read at one-frame/.test(text));
 });
+
+test('清单：站点说"要登录"时必须让模型去要 cookies，而不是自己猜台词', () => {
+  const r = makeResult();
+  r.source = {
+    kind: 'url', url: 'https://www.bilibili.com/video/BVxxx', auth: 'anonymous',
+    scanHeight: 360, scanActual: 360, maxAvailable: 480, zoomTarget: 480,
+    needLogin: ['subtitle'],
+  };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /NEEDS LOGIN/, '必须有一段醒目的登录提示');
+  assert.match(text, /Ask the user for cookies/i, '必须明确要求去问用户要 cookies');
+  assert.match(text, /Do NOT guess the dialogue/i, '必须禁止从画面猜台词');
+});
+
+test('清单：没有登录门槛时不该出现这条提示', () => {
+  const r = makeResult();
+  r.source = { kind: 'url', url: 'https://x/y', auth: 'anonymous', scanHeight: 360, scanActual: 360 };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.doesNotMatch(text, /NEEDS LOGIN/);
+});

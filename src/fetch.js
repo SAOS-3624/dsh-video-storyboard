@@ -336,12 +336,18 @@ export function summariseInfo(info) {
   const video = formats.filter((f) => f && f.vcodec && f.vcodec !== 'none');
   const heights = [...new Set(video.map((f) => Number(f[HEIGHT_KEYS[0]])).filter((h) => Number.isFinite(h) && h > 0))]
     .sort((a, b) => a - b);
+  // 站点自己说了"登录才给"的字段（B 站实测会返回 need_login_subtitle / is_upower_*）。
+  // 这些不是"没有"，是"不登录不给" —— 必须区分开，否则清单会把"要登录"说成"这视频没有"。
+  const loginGates = [];
+  if (info?.need_login_subtitle === true) loginGates.push('subtitle');
+  if (info?.is_upower_exclusive === true || info?.is_upower_play === true) loginGates.push('paywalled');
   return {
     title: typeof info?.title === 'string' ? info.title : null,
     duration: Number.isFinite(Number(info?.duration)) ? Number(info.duration) : null,
     heights,
     maxHeight: heights.length > 0 ? heights.at(-1) : null,
     formats,
+    loginGates,
   };
 }
 
@@ -640,6 +646,9 @@ export async function fetchMedia(input, opts = {}) {
     title: summary.title,
     duration: summary.duration,
     auth: authKind,
+    // 站点自己声明的登录门槛（subtitle / paywalled）—— 清单据此要求用户提供 cookies
+    ...(Array.isArray(summary.loginGates) && summary.loginGates.length > 0
+      ? { needLogin: summary.loginGates } : {}),
     // 只有"匿名 + 确实拿不到目标档"才说一句。匿名但够高清时闭嘴 ——
     // 早期版本无条件报错，实测把"匿名本来就有 1080P"的视频也拦了，纯属帮倒忙。
     ...((authKind === 'anonymous' && zoomTarget < zoomHeight) || authNote
@@ -845,6 +854,8 @@ export async function probeUrl(input, opts = {}) {
     heights: summary.heights,
     maxHeight: summary.maxHeight,
     auth: authKind,
+    ...(Array.isArray(summary.loginGates) && summary.loginGates.length > 0
+      ? { needLogin: summary.loginGates } : {}),
     ...(warning ? { authWarning: warning } : {}),
   };
 }
