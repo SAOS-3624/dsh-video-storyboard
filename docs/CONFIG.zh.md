@@ -114,3 +114,73 @@ POST /shutdown                  → 返回后退出（不支持也行，插件�
 | `HTTP Error 567` | B 站风控（常伴"要登录"） | 导出 cookies.txt，或直接喂本地文件 |
 | 说有 1080p 却只给 480p | cookies 过期会**降低**可见清晰度 | 插件会自动改探匿名并提示你重导 |
 | 清单写 `!! NEEDS LOGIN` | 站点把字幕藏在登录后面 | 给 cookies；给不了就明说，不要从画面猜台词 |
+
+---
+
+## 9. 发版流程（踩过的坑，写给下一个维护者）
+
+这个仓库的 git 网络很不稳定，所以发版有一半时间花在"怎么把提交推上去"上。
+
+### 9.1 `git push` 经常失败，但 `api.github.com` 一直通
+
+```
+schannel: server closed abruptly (missing close_notify)
+CONNECT tunnel failed, response 502
+```
+
+重试几次通常能过；过不去就走 API 建提交。**但注意下面这条。**
+
+### 9.2 API 推送会生成**不同 SHA 的提交**
+
+同样的内容，API 建的 commit 和本地 commit 是两个对象：
+
+```
+local  HEAD : 5f13ff8
+remote main : 5116756   ← 内容相同，SHA 不同
+```
+
+后果有两个：
+
+- **标签要用远端 SHA 建**。用本地 SHA 会得到
+  `422 Object does not exist`——那个对象在远端根本不存在。
+- **绝对不要在 API 推送后执行 `git reset --hard origin/main`**。
+  如果 `git fetch` 刚好失败，`origin/main` 还是旧 ref，`reset --hard` 会把本地提交**全部冲掉**。
+
+> 真事：发 0.4.3 时就这么干过，本地 5 个提交（含配置文档）瞬间消失，
+> 靠 `git reflog` + `git reset --hard 5f13ff8` 才捞回来。
+> **出事第一反应是 `git reflog`，不是重新写代码。**
+
+### 9.3 打标签
+
+```bash
+git tag -a v0.4.3 -m "..."      # annotated
+git push origin v0.4.3          # 网络不好时也会失败
+```
+
+- 用 API `PATCH /git/refs/tags/...` 改 **annotated tag** 会 422（要传 peel 后的 commit）；
+- 改用 `POST /git/refs` 建**轻量标签**，指向**远端**的 commit SHA 即可；
+- 想保留 annotated tag，就先 `git tag -d` 重建，再 `git push origin <tag>`。
+
+### 9.4 CI 跑在 Linux 上，别把平台写死
+
+一次真事故：断言里写 `/python(\.exe)?$/` —— Windows 叫 `python.exe`，Linux 叫 `python3`，
+本地全绿、CI 全红。**路径分隔符、解释器名、行尾，三样都要按平台想一遍。**
+
+### 9.5 发布顺序
+
+```
+1. 测试 + check-syntax 全绿
+2. 版本号（package.json / dsh.plugin.json）
+3. CHANGELOG 整理（别留 Unreleased）
+4. 提交 → 推到 GitHub（必要时走 API，记住 §9.2）
+5. 打 tag（用远端 SHA）
+6. GitHub Release
+7. npm publish
+8. 复查：npm dist-tags 与 latest release 都指到新版本
+```
+
+### 9.6 隐私
+
+发文档时把真实路径换成示例：`D:/asr-local` → `D:/asr`，
+`.secrets/bili-cookies.txt` → `D:/cookies/bili-cookies.txt`。
+**cookies 文件本身永远不要进仓库**（里面有 SESSDATA，等同登录凭证）。
