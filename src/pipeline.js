@@ -427,9 +427,10 @@ export async function runStoryboard(opts) {
         sheet: si + 1,
         t_start: +a.toFixed(3),
         t_end: +b.toFixed(3),
-        t_frame: +frame.t.toFixed(3),
+        // 平铺格的画面是 k² 个瞬间，不存在“这一格的取帧时刻”；
+        // 不写 t_frame，清单就不会给出误导性的 frame@。
+        ...(sub > 1 ? { sub } : { t_frame: +frame.t.toFixed(3) }),
         ...(cellCuts > 0 ? { cuts: cellCuts } : {}),
-        ...(sub > 1 ? { sub } : {}),
         ...(frame.sharp !== undefined ? { sharp: +frame.sharp.toFixed(1) } : {}),
         ...(text?.text ? { text: text.text, charsPerSec: text.charsPerSec } : {}),
       });
@@ -633,20 +634,42 @@ export function refineCutsByWindow({
  * 把一格摊成 k×k：取 k² 个等距子帧，拼回一张 cellW×cellH 的图。
  * 子帧用 `mode:'mid'`（不做 3 候选锐度挑选）—— 一格里要取 9~16 张，再挑三倍会让这一步变成瓶颈。
  */
-async function extractSubTile({ input, remote, a, b, k, cellW, cellH, ffmpegPath }) {
+export async function extractSubTile({
+  input, remote, a, b, k, cellW, cellH, ffmpegPath, extract = extractFrameRaw,
+}) {
   const tileW = Math.floor(cellW / k);
   const tileH = Math.floor(cellH / k);
   const n = k * k;
   const tiles = [];
+  let fellBack = false;
+
   for (let i = 0; i < n; i++) {
     const at = a + (b - a) * ((i + 0.5) / n);
-    const t = await extractFrameRaw({
-      input: remote?.url ?? input, at, dur: 0, cellW: tileW, cellH: tileH,
-      ffmpegPath, http: remote ? { headers: remote.headers } : undefined, mode: 'mid',
+    const grab = (src, http) => extract({
+      input: src, at, dur: 0, cellW: tileW, cellH: tileH,
+      ffmpegPath, http, mode: 'mid',
     });
-    tiles.push(t.buffer);
+    let frame;
+    if (remote?.uri) {
+      try {
+        frame = await grab(remote.uri, remote.http);
+      } catch {
+        // 高清直链可能过期/被 CDN 拒绝：单个子帧回落本地，
+        // 不让整张图失败，同时把 via 带回上层计入 frameFallbacks。
+        frame = await grab(input, undefined);
+        fellBack = true;
+      }
+    } else {
+      frame = await grab(input, undefined);
+    }
+    tiles.push(frame.buffer);
   }
-  return { buffer: tileSubFrames(tiles, k, cellW, cellH), t: a + (b - a) / 2 };
+
+  return {
+    buffer: tileSubFrames(tiles, k, cellW, cellH),
+    t: a + (b - a) / 2,
+    via: fellBack ? 'local-fallback' : (remote?.uri ? 'remote' : 'local'),
+  };
 }
 
 /** 把结果编码成 PNG 落盘（CLI 用；插件走附件服务，不落盘） */

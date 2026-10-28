@@ -6,8 +6,8 @@ import { join } from 'node:path';
 
 import {
   assertFetchableUrl, discoverYtdlp, explainYtdlpError, fetchMedia, formatSelector, isHttpUrl,
-  loadVideoConfig, mediaKey, normalizeUrl, pruneMedia, resolveAuth, resolveDirectUrl,
-  summariseInfo, unwrapSingle,
+  loadVideoConfig, mediaKey, normalizeUrl, pickVideoFormat, pruneMedia, resolveAuth, resolveDirectUrl,
+  shortEdge, summariseInfo, unwrapSingle,
   __clearDirectCache,
 } from '../src/fetch.js';
 
@@ -177,16 +177,21 @@ if (process.env.FAKE_FAIL === '1') {
   process.exit(1);
 }
 if (args.includes('-J')) {
-  console.log(JSON.stringify({
-    title: 'fake video', duration: 60,
-    filesize_approx: 1024 * 1024,
-    formats: [
-      { vcodec: 'none', acodec: 'mp4a', url: 'https://cdn/audio.m4a' },
-      { vcodec: 'avc1', height: 360, tbr: 300, url: 'https://cdn/v360.mp4', http_headers: { Referer: 'https://www.bilibili.com/' } },
-      { vcodec: 'avc1', height: 720, tbr: 900, url: 'https://cdn/v720.mp4' },
-      { vcodec: 'avc1', height: 1080, tbr: 1500, url: 'https://cdn/v1080.mp4?deadline=1793121239' },
-    ],
-  }));
+  const formats = process.env.FAKE_VERTICAL
+    ? [
+        { vcodec: 'none', acodec: 'mp4a', url: 'https://cdn/audio.m4a' },
+        { vcodec: 'avc1', width: 360, height: 640, tbr: 300, url: 'https://cdn/v360.mp4' },
+        { vcodec: 'avc1', width: 480, height: 852, tbr: 600, url: 'https://cdn/v480.mp4' },
+        { vcodec: 'avc1', width: 720, height: 1280, tbr: 1200, url: 'https://cdn/v720.mp4' },
+        { vcodec: 'avc1', width: 1080, height: 1920, tbr: 2400, url: 'https://cdn/v1080.mp4' },
+      ]
+    : [
+        { vcodec: 'none', acodec: 'mp4a', url: 'https://cdn/audio.m4a' },
+        { vcodec: 'avc1', height: 360, tbr: 300, url: 'https://cdn/v360.mp4', http_headers: { Referer: 'https://www.bilibili.com/' } },
+        { vcodec: 'avc1', height: 720, tbr: 900, url: 'https://cdn/v720.mp4' },
+        { vcodec: 'avc1', height: 1080, tbr: 1500, url: 'https://cdn/v1080.mp4?deadline=1793121239' },
+      ];
+  console.log(JSON.stringify({ title: 'fake video', duration: 60, filesize_approx: 1024 * 1024, formats }));
   process.exit(0);
 }
 const outAt = args.indexOf('-o');
@@ -453,6 +458,39 @@ test('fetchMedia: 匿名且源只到 360p 时，既标 degraded 也说明是匿�
     assert.deepEqual(source.degraded, ['source-max-360p']);
     assert.match(source.authWarning, /anonymous/);
   } finally {
+    await h.cleanup();
+  }
+});
+
+test('shortEdge/pickVideoFormat: 竖屏按短边选 1080，不按长边 height 过滤', () => {
+  const formats = [
+    { vcodec: 'avc1', width: 360, height: 640, tbr: 300, url: 'v360' },
+    { vcodec: 'avc1', width: 480, height: 852, tbr: 600, url: 'v480' },
+    { vcodec: 'avc1', width: 720, height: 1280, tbr: 1200, url: 'v720' },
+    { vcodec: 'avc1', width: 1080, height: 1920, tbr: 2400, url: 'v1080' },
+  ];
+  assert.deepEqual(formats.map(shortEdge), [360, 480, 720, 1080]);
+  assert.equal(pickVideoFormat(formats, 1080).width, 1080);
+  assert.equal(pickVideoFormat(formats, 480).width, 480);
+  assert.equal(shortEdge({ height: 720 }), 720, '缺 width 时退回 height');
+  assert.equal(pickVideoFormat([], 1080), null);
+});
+
+test('fetchMedia: 竖屏清单按短边，1080×1920 不再被 height<=1080 排除', async () => {
+  const h = await makeHarness();
+  const prev = process.env.FAKE_VERTICAL;
+  process.env.FAKE_VERTICAL = '1';
+  try {
+    const r = await fetchMedia('https://example.com/vertical', {
+      ytdlp: h.ytdlp, env: h.env, cookies: h.cookies, scanHeight: 360, zoomHeight: 1080,
+    });
+    assert.equal(r.source.scanActual, 360);
+    assert.equal(r.source.maxAvailable, 1080);
+    assert.equal(r.source.zoomTarget, 1080);
+    assert.deepEqual(r.source.availableHeights, [640, 852, 1280, 1920]);
+    assert.equal(r.frameSource.height, 1920, '竖屏 height 是长边，实际选中 1080×1920');
+  } finally {
+    if (prev === undefined) delete process.env.FAKE_VERTICAL; else process.env.FAKE_VERTICAL = prev;
     await h.cleanup();
   }
 });

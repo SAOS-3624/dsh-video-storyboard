@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- URL-backed fast cells now tile from the high-resolution `frameSource.uri` (with its
+  `userAgent`/`referer` headers) instead of silently reading the local 360p copy. A failed
+  remote tile falls back per tile and is counted in `frameFallbacks`.
+- Portrait `video_zoom` now picks and reports by the **short edge**. A 1080×1920 source is no longer
+  excluded by `height<=1080` and mistakenly reported as 1080p while actually reading 480×852.
+- Tiled cells no longer emit `frame@`: their picture is k² moments, not one sampled frame.
+
 ## [0.4.0] — 2026-10-28
 
 The release where fast cuts finally count. Three things were true before this version and are not any more:

@@ -524,9 +524,10 @@ export async function fetchMedia(input, opts = {}) {
   if (zoomDirect) rememberDirect(normalized, zoomHeight, zoomDirect);
 
   // ---- 空间检查（下载前，按估算大小拒绝，不静默降质）
-  const wantHeight = summary.heights.length > 0
-    ? summary.heights.filter((h) => h <= scanHeight).at(-1) ?? summary.heights[0]
-    : null;
+  // 竖屏格式的 height 是长边；清单里的清晰度按短边说，才和 res/用户直觉一致。
+  const scanChosen = pickVideoFormat(summary.formats, scanHeight);
+  const scanActual = scanChosen ? shortEdge(scanChosen) : null;
+  const maxAvailable = summary.formats.reduce((max, f) => Math.max(max, shortEdge(f)), 0) || summary.maxHeight;
   const wanted = Number.isFinite(Number(info?.filesize_approx))
     ? Number(info.filesize_approx)
     : null;
@@ -542,7 +543,7 @@ export async function fetchMedia(input, opts = {}) {
 
   // ---- 下载
   await mkdir(dir, { recursive: true });
-  onProgress?.({ phase: 'download', height: wantHeight });
+  onProgress?.({ phase: 'download', height: scanActual });
   const dlArgs = [
     '-f', formatSelector(scanHeight),
     // 按"短边"就近取：竖屏视频的 res 是宽（360/480/720），不是 height。
@@ -595,10 +596,10 @@ export async function fetchMedia(input, opts = {}) {
     await rename(candidates[0].path, target);
     st = await stat(target);
   }
-  // 目标清晰度：请求的和实际能给的取小 —— 这正是"片源判断"要留在清单里的东西
-  const zoomTarget = summary.heights.length > 0
-    ? Math.min(zoomHeight, summary.maxHeight ?? zoomHeight)
-    : zoomHeight;
+  // 目标清晰度：用实际选中的那条轨，而不是从 maxHeight（长边）倒推。
+  const zoomTarget = zoomChosen
+    ? Math.min(zoomHeight, shortEdge(zoomChosen))
+    : (summary.heights.length > 0 ? Math.min(zoomHeight, summary.maxHeight ?? zoomHeight) : zoomHeight);
 
   const source = {
     kind: 'url',
@@ -606,8 +607,8 @@ export async function fetchMedia(input, opts = {}) {
     cached: false,
     bytes: st.size,
     scanHeight,
-    scanActual: wantHeight,
-    maxAvailable: summary.maxHeight,
+    scanActual,
+    maxAvailable,
     availableHeights: summary.heights,
     zoomTarget,
     title: summary.title,
@@ -616,7 +617,7 @@ export async function fetchMedia(input, opts = {}) {
     // 只有"匿名 + 确实拿不到目标档"才说一句。匿名但够高清时闭嘴 ——
     // 早期版本无条件报错，实测把"匿名本来就有 1080P"的视频也拦了，纯属帮倒忙。
     ...(auth.kind === 'anonymous' && zoomTarget < zoomHeight ? { authWarning: auth.warning } : {}),
-    ...(zoomTarget < zoomHeight ? { degraded: [`source-max-${summary.maxHeight ?? '?'}p`] } : {}),
+    ...(zoomTarget < zoomHeight ? { degraded: [`source-max-${maxAvailable ?? '?'}p`] } : {}),
   };
 
   // 落一份元信息，让"第二次看同一条链接"不用再解析（-J 要 2.4 s）。
@@ -671,14 +672,29 @@ export function __clearDirectCache() {
   directCache.clear();
 }
 
-/** 从 yt-dlp 的 formats 里挑一条不超过 height 的最好画面轨 */
-function pickVideoFormat(formats, height) {
+/** 短边：横屏就是 height，竖屏是 width；缺一边时退回 height。 */
+export function shortEdge(format) {
+  const w = Number(format?.width);
+  const h = Number(format?.height);
+  if (Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0) return Math.min(w, h);
+  return Number.isFinite(h) && h > 0 ? h : 0;
+}
+
+/**
+ * 从 yt-dlp 的 formats 里挑一条不超过 height 的最好画面轨。
+ * 比较的是**短边**，不是 height：竖屏 1080×1920 的 height=1920，
+ * 按长边过滤会把它排除，只剩 480×852。
+ */
+export function pickVideoFormat(formats, height) {
   const video = formats.filter((f) => f.vcodec && f.vcodec !== 'none');
   if (video.length === 0) return null;
+  const cap = Number.isFinite(height) && height > 0 ? height : Infinity;
   const below = video
-    .filter((f) => !f.height || f.height <= height)
-    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0) || (b.tbr ?? 0) - (a.tbr ?? 0));
-  return below[0] ?? [...video].sort((a, b) => (a.height ?? 0) - (b.height ?? 0))[0];
+    .map((f) => ({ f, edge: shortEdge(f) }))
+    .filter(({ edge }) => edge === 0 || edge <= cap)
+    .sort((a, b) => b.edge - a.edge || (b.f.tbr ?? 0) - (a.f.tbr ?? 0));
+  if (below.length > 0) return below[0].f;
+  return [...video].sort((a, b) => shortEdge(a) - shortEdge(b) || (b.tbr ?? 0) - (a.tbr ?? 0))[0];
 }
 
 function directFromFormat(chosen) {

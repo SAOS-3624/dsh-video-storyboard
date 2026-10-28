@@ -385,3 +385,44 @@ test('chooseSubGrid: 镜头少到不值得摊时保持整格', async () => {
   const { chooseSubGrid } = await import('../src/pipeline.js');
   assert.equal(chooseSubGrid({ shots: 2, dur: 1, cellW: 499, cellH: 278 }), 1);
 });
+
+test('extractSubTile: 高清直链用 uri + http，失败才回落本地并标记', async () => {
+  const { extractSubTile } = await import('../src/pipeline.js');
+  const calls = [];
+  const fake = async (opts) => {
+    calls.push(opts);
+    if (opts.input === 'https://cdn/high.mp4' && calls.length === 1) throw new Error('403');
+    return { buffer: Buffer.alloc(opts.cellW * opts.cellH * 3, 7), t: opts.at };
+  };
+  const r = await extractSubTile({
+    input: 'local.mp4',
+    remote: { uri: 'https://cdn/high.mp4', http: { userAgent: 'UA', referer: 'https://ref' } },
+    a: 0, b: 2, k: 2, cellW: 40, cellH: 40, extract: fake,
+  });
+  // 第 1 次远程失败后本格回落本地，后 3 格继续用远程：共 5 次抽取。
+  assert.equal(calls.length, 5);
+  assert.equal(calls[0].input, 'https://cdn/high.mp4');
+  assert.deepEqual(calls[0].http, { userAgent: 'UA', referer: 'https://ref' });
+  assert.equal(calls[1].input, 'local.mp4');
+  assert.equal(calls[1].http, undefined);
+  assert.equal(calls[2].input, 'https://cdn/high.mp4');
+  assert.equal(r.via, 'local-fallback');
+  assert.equal(r.buffer.length, 40 * 40 * 3);
+});
+
+test('e2e: 平铺格不写 t_frame，清单也不出现 frame@', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeFixture(dir);
+  const cuts = Array.from({ length: 9 }, (_, i) => ({ t: 0.2 + i * 0.2, score: 50 }));
+  const r = await runStoryboard({
+    input: file, from: 0, to: 2, cells: 1, encode: false,
+    precomputed: { cuts, summary: { p90: 50 }, threshold: 5 },
+  });
+  const cell = r.sheets[0].cells[0];
+  assert.ok(cell.sub >= 2, '这一格应被摊开');
+  assert.equal(cell.t_frame, undefined, '平铺格没有单一取帧时刻');
+  const text = formatManifest(r);
+  assert.ok(!/frame@/.test(text), '平铺格不该写 frame@');
+});
