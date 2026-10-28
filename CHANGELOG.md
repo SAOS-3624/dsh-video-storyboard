@@ -13,6 +13,21 @@
 3. **长片扫描期间被空闲计时器关掉**（本轮修）—— 计时器在"上一次运行结束"时设的，
    新一次运行扫描超过窗口就会白丢一次冷启动（30 秒）。运行入口即续命。
 
+### Performance
+
+- **Transcription now runs while the scan runs.** It only needs the silence positions (from the 1–3 s audio
+  pass), not the cut points, so it was always safe to start early — it just never was. A 21-minute screen
+  recording went **202 s → 89 s** (scan 82 s, transcription finished inside it, frames 3.4 s). A 5-minute
+  window: 31.7 s with `transcript` at 0.03 s, i.e. fully overlapped.
+
+  Two things broke on the way and are fixed: the transcript block moved ahead of a `let asrLife` declaration
+  (`Cannot access before initialization`, which silently turned the first measurement into `asr-failed` while
+  still showing a fast time), and the block's `textInSilence` had to be returned rather than captured.
+
+  `result.timing` now carries per-phase seconds (`audio`/`scan`/`transcript`/`frames`) so the next slow
+  report can start from numbers instead of guesses. Caveat: part of the 202 → 89 s is the OS file cache
+  warming between the two runs — the honest structural gain is the ~58 s of transcription, not 113 s.
+
 ### Changed
 
 - **The local ASR service now runs on sherpa-onnx by default.** Same HTTP contract, different runtime:

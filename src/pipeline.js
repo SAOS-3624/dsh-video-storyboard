@@ -139,6 +139,114 @@ export async function runStoryboard(opts) {
   const winEnd = Math.min(info.duration, Number(to) > 0 ? Number(to) : info.duration);
   const winDur = Math.max(0.2, winEnd - winStart);
 
+  // 分阶段计时：只有真跑的时候才知道慢在哪。结果里带 timing，不额外开销（Date.now 级别）
+  // 本地 ASR 的生命周期句柄：只有"我们拉起来的"那个才会在结束时被停。
+  // 必须声明在转写块之前 —— 转写现在跑在扫描之前（并行），拿不到后面声明的变量。
+  let asrLife = null;
+
+  const timing = {};
+  let _t = Date.now();
+  const mark = (name) => { timing[name] = ((Date.now() - _t) / 1000); _t = Date.now(); };
+
+  // ---- 音频测量（零模型：响度 + 静音）。先做，因为静音位置要用来切 ASR 请求。
+  const needAudio = info.hasAudio && !textOnly && (audioStrip !== false || transcript !== 'off');
+  const audio = needAudio
+    ? await analyzeAudio({ input, ffmpegPath, start: winStart, end: winStart + winDur })
+    : null;
+  const stripAudio = audioStrip !== false ? audio : null;
+  const silences = audio?.silences ?? [];
+  // 声音事件：突然变响/突然安静。画面没动但事情发生的时刻，只能靠它抓到。
+  // 口播片里"每句话的停顿"都会触发，所以**只用最突出的若干个**参与格位加权
+  // （全部 90 多个事件铺上去等于把密度曲线压平），清单里也按强度排序展示。
+  const allEvents = audio ? detectOnsets(audio) : [];
+  mark('audio');
+
+  // 转写在**扫描的同时**跑：它只依赖音频静音位置，不依赖切点。
+  // 21 分钟教程实测：扫描 133s、转写 58s，串起来 202s；并行后只等较慢的那个。
+  const transcriptP = (async () => {
+    let transcriptInfo = null;
+    if (transcriptFile) {
+      // 显式给了转写就只用它：不查字幕轨、不跑 ASR。
+      // 接 B 站时这一步最省 —— 字幕本来就有，没必要再识别一遍（10 分钟口播省 60–120 秒）。
+      // 也**不跑幻觉过滤**：那是给 ASR 兜底的，用户递进来的文件按可信处理。
+      try {
+        const loaded = await loadTranscriptFile(transcriptFile);
+        const { segments: fixed, replaced } = applyTermMap(loaded.segments, resolveAsrConfig().terms);
+        transcriptInfo = {
+          ...(replaced > 0 ? { termsFixed: replaced } : {}),
+          source: fixed.length > 0 ? 'file' : 'file-empty',
+          model: `file:${loaded.format}`,
+          segments: fixed,
+          suspect: 0,
+          suspectDetail: [],
+        };
+      } catch (error) {
+        transcriptInfo = {
+          segments: [],
+          source: 'file-failed',
+          error: String(error?.message ?? error).slice(0, 300),
+        };
+      }
+    } else if (transcript !== 'off' && info.hasAudio) {
+      const subtitle = info.hasSubtitle
+        ? await extractSubtitleTrack({ input, ffmpegPath })
+        : null;
+      if (subtitle) {
+        transcriptInfo = { segments: subtitle, source: 'subtitle', model: 'embedded' };
+      } else {
+        try {
+          // 切片调用：单次请求过长会让时间码整体压早（实测 299s 压早 13s）。
+          // 结果按 (文件, 窗口, 后端, 切片长度) 缓存 —— 否则 textOnly 分页每翻一页都要重跑 ASR。
+          const asrKey = await cacheKey({
+            input, start: winStart, end: winStart + winDur,
+            threshold: `asr|${ASR_DEFAULTS.baseUrl}|${ASR_DEFAULTS.model}|${asrMaxChunk}|${transcript}`,
+          });
+          // 本地 ASR 可能要临时拉起（用完就停）—— 只在 asr.json 配了 manage.start 时才托管
+          const asrCfg = resolveAsrConfig();
+          asrLife = await ensureAsr({ baseUrl: asrCfg.baseUrl, config: asrCfg, spawnImpl: spawn })
+            .catch((e) => { if (process.env.DSH_ASR_DEBUG) console.error('[asr-lifecycle]', e.message); return null; });
+          const asr = await withCache(asrKey, () => transcribeLong({
+            input, ffmpegPath, start: winStart, end: winStart + winDur,
+            silences, maxChunk: asrMaxChunk,
+          }), { enabled: cache });
+          if (asr) {
+            // 音乐段的幻觉句会命中多个格子、被复制好几遍，先过滤（结果里报出来，不静默丢）
+            const { kept, dropped } = filterSuspectSegments(asr.segments);
+            // 用户词典校正（确定性替换，替换次数会报出来）
+            const { segments: fixed, replaced } = applyTermMap(kept, resolveAsrConfig().terms);
+            transcriptInfo = {
+              ...(replaced > 0 ? { termsFixed: replaced } : {}),
+              ...asr,
+              // 空结果（没配 key / 整片纯音乐）不该自称 asr —— 见 PR #3
+              source: asr.empty || fixed.length === 0 ? 'asr-empty' : 'asr',
+              segments: fixed,
+              suspect: dropped.length,
+              suspectDetail: dropped.slice(0, 3).map((d) => ({
+                from: +d.from.toFixed(2), to: +d.to.toFixed(2),
+                charsPerSec: d.charsPerSec, reason: d.reason,
+              })),
+            };
+          }
+        } catch (error) {
+          transcriptInfo = {
+            segments: [],
+            source: 'asr-failed',
+            // 把真实原因带出来 —— 只写 "ASR call failed" 会让每次故障都得重新猜
+            error: `${explainFetchError(error).slice(0, 300)}  [${describeAsrTarget()}]`,
+          };
+        }
+      }
+    } else if (transcript !== 'off' && !info.hasAudio) {
+      transcriptInfo = { segments: [], source: 'no-audio' };
+    }
+    // 一致性检查：台词落在"被判静音"的区间里 = 两种可能，轻声被吞了，或者 ASR 编的。
+    const textInSilence = transcriptInfo?.source === 'asr'
+      ? countTextInSilence(transcriptInfo.segments, silences)
+      : 0;
+
+    return { transcriptInfo, textInSilence };
+  })();
+
   // 扫描结果按 (文件, 窗口, 阈值策略) 缓存：storyboard 之后的 zoom 能直接复用
   const key = cache ? await cacheKey({ input, start: winStart, end: winStart + winDur, threshold }) : null;
   // precomputed：批量模式下全片已经扫过一次，窗口直接复用那份切点与摘要，
@@ -158,10 +266,9 @@ export async function runStoryboard(opts) {
       minGap: scanGap, ffmpegPath, onProgress,
     }), { enabled: cache });
   if (cache && !scan.cached && !precomputed) await pruneCache();
+  mark('scan');
 
   // ---- 爆点细扫（见 refineBurstCuts 注释：粗扫看不见 0.35s 以下的刀）
-  // 本地 ASR 的生命周期句柄：只有"我们拉起来的"那个才会在结束时被停
-  let asrLife = null;
   // **运行一开始就续命**。上一次运行结束时设的 idleMs 计时器，会在这一次运行的扫描阶段到点，
   // 把服务关掉 —— 等这次终于到转录那一步又得重新拉起（白等 30 秒）。续命一次就避免这种浪费。
   if (isOwned()) keepAlive();
@@ -193,99 +300,10 @@ export async function runStoryboard(opts) {
     refinedBursts = r.refined;
   }
 
-  // ---- 音频测量（零模型：响度 + 静音）。先做，因为静音位置要用来切 ASR 请求。
-  const needAudio = info.hasAudio && !textOnly && (audioStrip !== false || transcript !== 'off');
-  const audio = needAudio
-    ? await analyzeAudio({ input, ffmpegPath, start: winStart, end: winStart + winDur })
-    : null;
-  const stripAudio = audioStrip !== false ? audio : null;
-  const silences = audio?.silences ?? [];
-  // 声音事件：突然变响/突然安静。画面没动但事情发生的时刻，只能靠它抓到。
-  // 口播片里"每句话的停顿"都会触发，所以**只用最突出的若干个**参与格位加权
-  // （全部 90 多个事件铺上去等于把密度曲线压平），清单里也按强度排序展示。
-  const allEvents = audio ? detectOnsets(audio) : [];
 
   // ---- 台词：显式文件 > 字幕轨 > ASR；三者都没有就静默跳过（绝不让分镜失败）
-  let transcriptInfo = null;
-  if (transcriptFile) {
-    // 显式给了转写就只用它：不查字幕轨、不跑 ASR。
-    // 接 B 站时这一步最省 —— 字幕本来就有，没必要再识别一遍（10 分钟口播省 60–120 秒）。
-    // 也**不跑幻觉过滤**：那是给 ASR 兜底的，用户递进来的文件按可信处理。
-    try {
-      const loaded = await loadTranscriptFile(transcriptFile);
-      const { segments: fixed, replaced } = applyTermMap(loaded.segments, resolveAsrConfig().terms);
-      transcriptInfo = {
-        ...(replaced > 0 ? { termsFixed: replaced } : {}),
-        source: fixed.length > 0 ? 'file' : 'file-empty',
-        model: `file:${loaded.format}`,
-        segments: fixed,
-        suspect: 0,
-        suspectDetail: [],
-      };
-    } catch (error) {
-      transcriptInfo = {
-        segments: [],
-        source: 'file-failed',
-        error: String(error?.message ?? error).slice(0, 300),
-      };
-    }
-  } else if (transcript !== 'off' && info.hasAudio) {
-    const subtitle = info.hasSubtitle
-      ? await extractSubtitleTrack({ input, ffmpegPath })
-      : null;
-    if (subtitle) {
-      transcriptInfo = { segments: subtitle, source: 'subtitle', model: 'embedded' };
-    } else {
-      try {
-        // 切片调用：单次请求过长会让时间码整体压早（实测 299s 压早 13s）。
-        // 结果按 (文件, 窗口, 后端, 切片长度) 缓存 —— 否则 textOnly 分页每翻一页都要重跑 ASR。
-        const asrKey = await cacheKey({
-          input, start: winStart, end: winStart + winDur,
-          threshold: `asr|${ASR_DEFAULTS.baseUrl}|${ASR_DEFAULTS.model}|${asrMaxChunk}|${transcript}`,
-        });
-        // 本地 ASR 可能要临时拉起（用完就停）—— 只在 asr.json 配了 manage.start 时才托管
-        const asrCfg = resolveAsrConfig();
-        asrLife = await ensureAsr({ baseUrl: asrCfg.baseUrl, config: asrCfg, spawnImpl: spawn })
-          .catch((e) => { if (process.env.DSH_ASR_DEBUG) console.error('[asr-lifecycle]', e.message); return null; });
-        const asr = await withCache(asrKey, () => transcribeLong({
-          input, ffmpegPath, start: winStart, end: winStart + winDur,
-          silences, maxChunk: asrMaxChunk,
-        }), { enabled: cache });
-        if (asr) {
-          // 音乐段的幻觉句会命中多个格子、被复制好几遍，先过滤（结果里报出来，不静默丢）
-          const { kept, dropped } = filterSuspectSegments(asr.segments);
-          // 用户词典校正（确定性替换，替换次数会报出来）
-          const { segments: fixed, replaced } = applyTermMap(kept, resolveAsrConfig().terms);
-          transcriptInfo = {
-            ...(replaced > 0 ? { termsFixed: replaced } : {}),
-            ...asr,
-            // 空结果（没配 key / 整片纯音乐）不该自称 asr —— 见 PR #3
-            source: asr.empty || fixed.length === 0 ? 'asr-empty' : 'asr',
-            segments: fixed,
-            suspect: dropped.length,
-            suspectDetail: dropped.slice(0, 3).map((d) => ({
-              from: +d.from.toFixed(2), to: +d.to.toFixed(2),
-              charsPerSec: d.charsPerSec, reason: d.reason,
-            })),
-          };
-        }
-      } catch (error) {
-        transcriptInfo = {
-          segments: [],
-          source: 'asr-failed',
-          // 把真实原因带出来 —— 只写 "ASR call failed" 会让每次故障都得重新猜
-          error: `${explainFetchError(error).slice(0, 300)}  [${describeAsrTarget()}]`,
-        };
-      }
-    }
-  } else if (transcript !== 'off' && !info.hasAudio) {
-    transcriptInfo = { segments: [], source: 'no-audio' };
-  }
-  // 一致性检查：台词落在"被判静音"的区间里 = 两种可能，轻声被吞了，或者 ASR 编的。
-  const textInSilence = transcriptInfo?.source === 'asr'
-    ? countTextInSilence(transcriptInfo.segments, silences)
-    : 0;
 
+  const { transcriptInfo, textInSilence } = await transcriptP;
   const relSegments = (transcriptInfo?.segments ?? [])
     .map((seg) => ({ ...seg, from: seg.from - winStart, to: seg.to - winStart }))
     .filter((seg) => seg.to > 0 && seg.from < winDur);
@@ -355,6 +373,7 @@ export async function runStoryboard(opts) {
   };
 
   // 两条路：自适应按密度分配格位（快切区多给格），否则退回"并段到 k 格"
+  mark('transcript');
   const relCuts = cuts.map((c) => c.t - winStart);
   // 让 video_locate 能直接复用这次的转写，省掉一次 ASR
   if (transcriptInfo?.segments?.length) rememberSegments(input, transcriptInfo.segments);
@@ -500,6 +519,7 @@ export async function runStoryboard(opts) {
     from: winStart, to: winStart + winDur, cells: cellRanges.length, cuts: cuts.length,
   }).catch(() => {});
 
+  mark('frames');
   // 本次运行结束：如果是我们拉起的本地 ASR，安排它空闲后自动退出
   // （own 的才停 —— 别人启动的实例无权杀，杀了会打断正在用它的任务）
   if (asrLife?.owned || isOwned()) {
@@ -508,6 +528,7 @@ export async function runStoryboard(opts) {
   }
 
   return {
+    timing,
     info,
     provenance,
     window: { from: winStart, to: winStart + winDur, duration: winDur },
