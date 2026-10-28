@@ -53,6 +53,26 @@ Auto grid comes from motion p90 first, then two corrections:
 | `textOnly` page after the first call | **0.8 s** |
 | scan throughput | 22–47× realtime (1080p, decode-bound) |
 
+## How the token numbers are counted
+
+Two different currencies get added up above, and they are not measured the same way:
+
+- **Images.** The host charges a flat **384 tokens per image result**, whatever it contains — a 9-cell grid
+  and a 16-cell grid cost the same. So `sheets × 384` is the image bill, and putting more cells on one sheet
+  is the whole point: 16 cells in one image is 384 tokens, not 16 × 384.
+- **The text index.** This one is ordinary text and is paid by length: roughly **1.3–1.8 Chinese characters
+  per token**, quoted here as `chars ÷ 1.5`. It only matters at the margins (`detail`, `cellRange`) — the
+  index of a 16-cell sheet is ~1–2 k characters, i.e. a few hundred tokens.
+- **Nothing else is billed.** `video_probe` reads container headers and costs no image tokens; scanning
+  (the expensive part in wall-clock time) is local ffmpeg work and costs no tokens at all.
+
+`docs/BASELINE.md` reports wall-clock and tokens separately for this reason: the scan is what makes the tool
+feel slow, and the tokens are what makes it cheap to run repeatedly.
+
+Reproduce on your own footage with `npm run bench -- <file|url>` (it prints both tables and can dump JSON):
+
+    node scripts/bench.mjs lecture.mp4 --json bench-lecture.json
+
 ## What 88 frames buys on a 2 h 35 m film
 
 On a feature-length file, 64 cells covers 0.04 % of ~220 000 frames. That is enough to judge structure,
