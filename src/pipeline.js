@@ -13,7 +13,7 @@ import { resolveInput } from './fetch.js';
 import { loadTranscriptFile } from './transcript-file.js';
 import { decideCuts, scanShots, suppressClose } from './scan.js';
 import { rememberSegments } from './locate.js';
-import { ensureAsr, scheduleStop } from './asr-lifecycle.js';
+import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import { fitSegments, segmentsFromCuts, totalDur } from './segments.js';
 import { bestLayout, groupByCount, suggest, PLAN_THRESHOLDS } from './plan.js';
 import { findBursts, planCellRanges } from './density.js';
@@ -162,6 +162,9 @@ export async function runStoryboard(opts) {
   // ---- 爆点细扫（见 refineBurstCuts 注释：粗扫看不见 0.35s 以下的刀）
   // 本地 ASR 的生命周期句柄：只有"我们拉起来的"那个才会在结束时被停
   let asrLife = null;
+  // **运行一开始就续命**。上一次运行结束时设的 idleMs 计时器，会在这一次运行的扫描阶段到点，
+  // 把服务关掉 —— 等这次终于到转录那一步又得重新拉起（白等 30 秒）。续命一次就避免这种浪费。
+  if (isOwned()) keepAlive();
   let cuts = scan.cuts;
   let refinedBursts = [];
   if (refineBursts && !precomputed && !textOnly) {
@@ -479,7 +482,7 @@ export async function runStoryboard(opts) {
 
   // 本次运行结束：如果是我们拉起的本地 ASR，安排它空闲后自动退出
   // （own 的才停 —— 别人启动的实例无权杀，杀了会打断正在用它的任务）
-  if (asrLife?.owned) {
+  if (asrLife?.owned || isOwned()) {
     const c = resolveAsrConfig();
     scheduleStop({ owned: true, config: c, baseUrl: c.baseUrl });
   }

@@ -211,6 +211,11 @@ export function __resetLifecycle() {
   ownedChild = null;
 }
 
+/** 当前是否有"我们拉起的"实例还活着（用于运行开始时决定要不要续命） */
+export function isOwned() {
+  return Boolean(ownedChild?.pid);
+}
+
 export function __pendingPid() {
   return ownedChild?.pid ?? null;
 }

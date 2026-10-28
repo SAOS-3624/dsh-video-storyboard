@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { __resetLifecycle, ensureAsr, keepAlive, lifecycleConfig, portOf, probeEndpoint, scheduleStop, stopViaHttp } from '../src/asr-lifecycle.js';
+import { __resetLifecycle, ensureAsr, isOwned, keepAlive, lifecycleConfig, portOf, probeEndpoint, scheduleStop, stopViaHttp } from '../src/asr-lifecycle.js';
 
 test('lifecycleConfig: 没配 manage.start 就不托管', () => {
   assert.equal(lifecycleConfig({}), null);
@@ -93,4 +93,28 @@ test('stopViaHttp: 服务支持 /shutdown 时返回 true，拒绝时返回 false
   assert.equal(bad, false);
   const dead = await stopViaHttp('http://127.0.0.1:8000/v1', { fetchImpl: async () => { throw new Error('down'); } });
   assert.equal(dead, false);
+});
+
+test('isOwned: 只有我们拉起的实例才算自己拥有', async () => {
+  __resetLifecycle();
+  assert.equal(isOwned(), false);
+
+  let n = 0;
+  await ensureAsr({
+    baseUrl: 'http://127.0.0.1:8000/v1',
+    config: { manage: { start: 'x.cmd', waitMs: 3000 } },
+    // probeEndpoint 会先试 /health 再试 /v1/models，所以前两次都失败才算端点没起
+    fetchImpl: async () => { n += 1; if (n <= 2) throw new Error('down'); return { ok: true }; },
+    spawnImpl: () => ({ pid: 777, unref() {} }),
+  });
+  assert.equal(isOwned(), true, '拉起之后应该被记为"我们拥有的"');
+
+  __resetLifecycle();
+  await ensureAsr({
+    baseUrl: 'http://127.0.0.1:8000/v1',
+    config: { manage: { start: 'x.cmd' } },
+    fetchImpl: async () => ({ ok: true }),
+    spawnImpl: () => { throw new Error('should not spawn'); },
+  });
+  assert.equal(isOwned(), false, '别人已经在跑，不该记成我们拥有');
 });

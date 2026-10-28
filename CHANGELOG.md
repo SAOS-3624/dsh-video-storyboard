@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **A long scan could let the idle timer shut the service down mid-run.** The timer is set when a run ends,
+  so a *new* run that spends more than `idleMs` scanning (before it ever asks for a transcript) would find the
+  endpoint dead and pay the 30 s cold start again. Any new run now renews the lease at entry, and the timer is
+  re-armed on exit even when that run never touched ASR.
+
+  The failure mode was a wasted restart, never a wrong result: the endpoint is probed before transcribing, and
+  a dead one is started before the request goes out.
+
 ## [0.4.2] — 2026-10-28
 
 0.4.1 shipped a broken tool and a key requirement nobody could justify. Both reported within an hour.
