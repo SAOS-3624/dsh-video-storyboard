@@ -137,12 +137,21 @@ cell 3 (r1c3) = 00:33.29-00:47.08  cuts 10  16 frames (4×4)
 
 ### 我们用的是哪个模型
 
-| 场景 | 模型 | 说明 |
-|---|---|---|
-| **本机** | FunASR **`paraformer-zh`** + **`fsmn-vad`** + **`ct-punc`** | 中文、带标点、CPU 可跑；三个模型一起约 6.8 GB 提交额 |
-| **云端默认** | SiliconFlow **`FunAudioLLM/SenseVoiceSmall`** | 自带标点、多语种，按量计费 |
+| 后端 | 模型 | 冷启动 | 体积 | 标点 | 热词 |
+|---|---|---|---|---|---|
+| **sherpa（默认）** | `paraformer-zh-2024-03-09`（int8）+ `ct-transformer` 标点 + `silero-vad` | **约 5 秒** | 500 MB | 另加载 onnx 模型 | ❌ 无接口 |
+| **funasr（可选）** | `seaco_paraformer_large` + `fsmn-vad` + `ct-punc` | 约 30 秒 | 2.1 GB | 内置 | ✅ |
+| 云端 | `FunAudioLLM/SenseVoiceSmall` / `whisper-1` … | 0（联网） | — | 视服务而定 | 视服务而定 |
 
-`model` 字段可以改成任何 OpenAI 兼容转写接口认的模型名（`whisper-1`、`whisper-large-v3`、`paraformer-zh` …）。
+**为什么默认是 sherpa**：2024 版 paraformer 比旧版准（实测「像差」不加热词就对），而且冷启动 30 秒 → 5 秒、
+内存 6.8 GB → 不到 1 GB。代价是它在 sherpa 运行时里**没有热词接口**，同音字只能靠 `terms` 表后处理。
+
+**什么时候切回 funasr**：你的片子里专有名词多、热词列表很长（比如人名一堆），热词的收益大过 30 秒启动成本时。
+
+```json
+// ~/.dsh/asr.json 里加一行即可切后端（重启服务生效）
+{ "model": "paraformer-zh-2024-03-09" }   // 在 start-asr.cmd 里设 ASR_BACKEND=funasr 则走另一套
+```
 
 ### 配置 A：本机服务（免费、不联网）
 
@@ -151,20 +160,28 @@ cell 3 (r1c3) = 00:33.29-00:47.08  cuts 10  16 frames (4×4)
 ```json
 {
   "baseUrl": "http://127.0.0.1:8000/v1",
-  "model": "paraformer-zh",
+  "model": "paraformer-zh-2024-03-09",
   "language": "zh",
+  "hotwords": "像差 焦段 光圈",
   "manage": {
     "start": "D:/asr-local/start-asr.cmd",
-    "idleMs": 600000,
-    "waitMs": 180000
+    "idleMs": 5000,
+    "waitMs": 60000
   }
 }
 ```
 
 - **本机地址不需要 `key`**（`127.0.0.1` / `localhost` / `[::1]`）。自己跑的服务一般不校验 Authorization，插件不会再逼你填一个假 key。
 - `manage` 是生命周期托管：调用时端点不通就拉起；**最后一次运行结束后 `idleMs` 内没有新运行**，就请它自己退出（走服务的 `POST /shutdown`）。
-- **默认 `idleMs` 是 10 分钟**。冷启动要 30 秒，把窗口设太短等于每次都要重付这 30 秒 —— 想省内存可以调小（比如剪视频时 60000），想少重启可以调大。
-- 冷启动 **30 秒**（模型加载），之后每次调用不再等。
+
+**`idleMs` 要按后端设，两者差 100 倍**：
+
+| 后端 | 建议 `idleMs` | 理由 |
+|---|---|---|
+| sherpa | **5000**（5 秒） | 冷启动只要 5 秒，随用随关，内存立刻还回去 |
+| funasr | **600000**（10 分钟） | 冷启动 30 秒，关太早等于每次重付；关太晚又占着 6.8 GB |
+
+  `hotwords` 只对 funasr 后端有效 —— sherpa 的 paraformer 没有热词接口，同音字请写进 `terms`。
 
 服务端要满足两个约定：
 
@@ -219,6 +236,26 @@ DSH_ASR_KEY        DSH_ASR_KEY_ENV
 ```
 
 > 桌面版 DSH 的进程环境由启动器决定，`setx` 设的变量宿主读不到 —— **优先用 `asr.json`**。
+
+### 热词（比换模型更有效）
+
+识别错同音字时，**不要先想着换模型** —— 通用模型不知道你片子在讲什么。
+
+```json
+"hotwords": "像差 焦段 光圈 沧野 玄学"
+```
+
+空格分隔，交给 paraformer 解码时做偏置。实测（镜头评测视频）：
+
+```
+加之前：也就是所谓的相差。
+加之后：也就是所谓的像差。
+```
+
+只加了一个词，别的一个没动。专有名词、人名、领域术语都该放这里。
+
+> 需要服务端支持：`seaco_paraformer` 原生支持；自己搭服务时认 `hotword` 表单字段即可
+> （不认这个字段的服务会忽略它，不会报错）。
 
 ### 术语校正
 

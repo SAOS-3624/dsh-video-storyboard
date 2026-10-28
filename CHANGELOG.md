@@ -13,6 +13,21 @@
 3. **长片扫描期间被空闲计时器关掉**（本轮修）—— 计时器在"上一次运行结束"时设的，
    新一次运行扫描超过窗口就会白丢一次冷启动（30 秒）。运行入口即续命。
 
+### Changed
+
+- **The local ASR service now runs on sherpa-onnx by default.** Same HTTP contract, different runtime:
+  **cold start 30 s → 5 s** (measured through the plugin, model load alone 1.9 s), models **2.1 GB → 500 MB**,
+  no torch. The model also got newer: `paraformer-zh-2024-03-09` gets 「像差」 right without any hotword,
+  where the old one needed one.
+
+  What it costs: sherpa's paraformer has **no timestamp output and no hotword interface**. Timestamps are
+  rebuilt by running VAD (silero) over the audio and recognizing each speech run, then splitting sentences by
+  punctuation and distributing the run's duration by character count — honest to about a second, and the
+  first version (hard-cutting every 15 s) **dropped words at the seams**, so the runs are no longer cut.
+
+  Hotwords still work on the `funasr` backend (`ASR_BACKEND=funasr` in `start-asr.cmd`); on sherpa they are
+  ignored and the `terms` table is the fallback.
+
 ### Added
 
 - **Hotwords: a word list that biases decoding, so homophones stop winning.** `"hotwords": "像差 焦段 光圈"`
@@ -21,6 +36,8 @@
 
   This matters more than swapping models: the transcription was already fluent, the misses were homophones
   (像差/相差) that no general model resolves without knowing the subject.
+
+  Server-side: `start-asr.cmd` now takes `ASR_BACKEND=sherpa|funasr`; `sherpa` is the default.
 
 ### Fixed
 
