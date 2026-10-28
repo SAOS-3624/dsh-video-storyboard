@@ -82,6 +82,8 @@ export async function apply(ctx) {
       minGap: args.minGap ?? 1.2,
       transcript: args.transcript ?? 'auto',
       transcriptFile: args.transcriptFile,
+      // 这一次的热词（覆盖 asr.json）。学科不对时的负偏置，比不传更糟。
+      ...(typeof args.hotwords === 'string' ? { hotwords: args.hotwords } : {}),
       sourceHash: args.sourceHash === true,
       textOnly: args.textOnly === true,
       detail: args.detail ?? 'med',

@@ -16,9 +16,30 @@
  * 我们无权杀 —— 杀了会把正在用它的任务打断。
  */
 
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
 const SHELL_EXE = 'cmd.exe';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * `start` 写成 `.py` 时补上解释器。
+ *
+ * 真实事故：`"start": "D:/asr-local/server-sherpa.py"` —— Windows 上直接 spawn 一个 .py 什么也不会发生，
+ * 于是每次转写都是 ECONNREFUSED，看起来像"自启没成功"。这里按 <脚本目录>/.venv 找解释器，找不到用 PATH 里的。
+ */
+function resolveScriptStart(start) {
+  if (typeof start !== 'string' || !/\.py$/i.test(start)) return start;
+  const dir = dirname(start);
+  const candidates = process.platform === 'win32'
+    ? [join(dir, '.venv', 'Scripts', 'python.exe')]
+    : [join(dir, '.venv', 'bin', 'python')];
+  for (const py of candidates) {
+    if (existsSync(py)) return [py, start];
+  }
+  return [process.platform === 'win32' ? 'python' : 'python3', start];
+}
 
 /** 从 asr.json 的配置里取出生命周期设置（没有就返回 null，表示不托管） */
 export function lifecycleConfig(config = {}) {
@@ -27,7 +48,8 @@ export function lifecycleConfig(config = {}) {
   // start 可以是字符串（.cmd/.exe）或数组（[exe, ...args]）。
   // **数组更干净**：Windows 上起 .cmd 会闪一个控制台窗口，而且批处理对行尾/编码很敏感
   // （LF 行尾会让 cmd.exe 把注释片段当命令执行 —— 实测弹出一屏 "'wo' 不是内部或外部命令"）。
-  const start = Array.isArray(m.start) ? m.start.map(String) : String(m.start);
+  const raw = Array.isArray(m.start) ? m.start.map(String) : String(m.start);
+  const start = resolveScriptStart(raw);
   return {
     start,
     stop: m.stop ? String(m.stop) : null,

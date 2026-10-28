@@ -86,6 +86,12 @@ export function storyboardToolSpec() {
           '[{from,to,text}] / Bilibili {body:[{from,to,content}]}). When given, the subtitle track ' +
           'and ASR are both skipped — use this when the site already has captions.',
       },
+      hotwords: {
+        type: 'string',
+        description: 'Space-separated terms to bias this run\'s transcription (e.g. "位错 滑移 柏氏矢量"). ' +
+          'Overrides asr.json for this call only. Use it when the subject has its own vocabulary — a global ' +
+          'list from another subject is a negative bias, not a neutral default.',
+      },
       scanHeight: {
         type: 'integer',
         description: 'For http(s) links: which resolution to download for scanning (default 360). ' +

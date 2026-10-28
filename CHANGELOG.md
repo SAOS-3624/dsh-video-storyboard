@@ -15,6 +15,17 @@
 
 ### Fixed
 
+- **`manage.start` pointing at a `.py` file silently did nothing.** Spawning a script on Windows is not a
+  command, so the service never came up and every run reported `asr-failed · ECONNREFUSED` — looking like
+  "auto-start is broken". `start` is now normalised: a `.py` path is wrapped with the interpreter from the
+  sibling `.venv` (falling back to `python`), so both `"D:/asr-local/server-sherpa.py"` and
+  `[python.exe, server-sherpa.py]` work.
+
+- **Hotwords were global, which makes them a negative bias on the wrong subject.** A list tuned for a lens
+  review (像差 焦段 光圈) was still being applied to a materials-science lecture. `video_storyboard` now takes
+  a per-call `hotwords` that overrides `asr.json`, the cache key includes it, and the README says plainly that
+  the global list is a default, not a policy.
+
 - **A login-gated video was read anyway, and the result was presented as if complete.** When Bilibili hides
   the subtitle list from anonymous requests (`need_login_subtitle: true`), the pipeline used to report
   "no subtitle" and move on — so the model ended up reading burned-in text off the pixels and calling it a

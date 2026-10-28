@@ -141,3 +141,13 @@ test('ensureAsr: 数组形式按 [exe, ...args] 起进程，且隐藏窗口', as
   assert.deepEqual(calls[0].args, ['srv.py']);
   assert.equal(calls[0].opts.windowsHide, true, '必须隐藏窗口，否则会弹一个 cmd 黑框');
 });
+
+test('lifecycleConfig: start 直接写成 .py 时自动补解释器（否则 spawn 什么也不会发生）', () => {
+  const c = lifecycleConfig({ manage: { start: 'D:/asr-local/server-sherpa.py' } });
+  assert.ok(Array.isArray(c.start), '.py 应该被包成 [python, script]');
+  assert.equal(c.start.length, 2);
+  assert.match(c.start[0], /python(\.exe)?$/i);
+  assert.equal(c.start[1], 'D:/asr-local/server-sherpa.py');
+  // 非 .py 保持原样
+  assert.equal(lifecycleConfig({ manage: { start: 'x.cmd' } }).start, 'x.cmd');
+});

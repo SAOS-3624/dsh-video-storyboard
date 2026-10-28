@@ -106,6 +106,9 @@ export async function runStoryboard(opts) {
     fetchOptions = null,
     audioStrip = true,
     asrMaxChunk = 45,
+    // 热词按**这一次**覆盖全局：材料视频该传「位错 滑移 柏氏矢量」，口播摄影片传「像差 焦段」。
+    // 全局 asr.json 里的那份是默认值，不是铁律 —— 学科不对时它对识别是负偏置。
+    hotwords,
     cache = true,
     textOnly = false,
     precomputed = null,
@@ -204,7 +207,7 @@ export async function runStoryboard(opts) {
           // 结果按 (文件, 窗口, 后端, 切片长度) 缓存 —— 否则 textOnly 分页每翻一页都要重跑 ASR。
           const asrKey = await cacheKey({
             input, start: winStart, end: winStart + winDur,
-            threshold: `asr|${ASR_DEFAULTS.baseUrl}|${ASR_DEFAULTS.model}|${asrMaxChunk}|${transcript}`,
+            threshold: `asr|${ASR_DEFAULTS.baseUrl}|${ASR_DEFAULTS.model}|${asrMaxChunk}|${transcript}|${hotwords ?? ''}`,
           });
           // 本地 ASR 可能要临时拉起（用完就停）—— 只在 asr.json 配了 manage.start 时才托管
           const asrCfg = resolveAsrConfig();
@@ -213,6 +216,7 @@ export async function runStoryboard(opts) {
           const asr = await withCache(asrKey, () => transcribeLong({
             input, ffmpegPath, start: winStart, end: winStart + winDur,
             silences, maxChunk: asrMaxChunk,
+            ...(hotwords !== undefined ? { hotwords } : {}),
           }), { enabled: cache });
           if (asr) {
             // 音乐段的幻觉句会命中多个格子、被复制好几遍，先过滤（结果里报出来，不静默丢）
