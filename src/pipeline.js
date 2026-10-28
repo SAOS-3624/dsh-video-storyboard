@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process';
 import { probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
 import { resolveInput } from './fetch.js';
 import { loadTranscriptFile } from './transcript-file.js';
-import { decideCuts, scanShots, suppressClose } from './scan.js';
+import { decideCuts, quantile, scanShots, spikeCuts, suppressClose } from './scan.js';
 import { rememberSegments } from './locate.js';
 import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import { fitSegments, segmentsFromCuts, totalDur } from './segments.js';
@@ -166,6 +166,22 @@ export async function runStoryboard(opts) {
   // 把服务关掉 —— 等这次终于到转录那一步又得重新拉起（白等 30 秒）。续命一次就避免这种浪费。
   if (isOwned()) keepAlive();
   let cuts = scan.cuts;
+
+  // ---- 极静素材（PPT / 代码录屏 / 固定机位）：绝对阈值会漏掉"只改了几个像素"的翻页。
+  // 这类素材的分数中位数接近 0，一页 PPT 换页可能只有 3–8 分，压在任何合理绝对阈值下面。
+  // 改用**相对基线**再找一次（和本地中位数比），只在确实更静的时候替换。
+  // 用户反馈（野生的猛龙）：纯 PPT 视频上"阈值压到 0.08 也一条都检不出来，只能退回等间隔"。
+  if (!precomputed && scan.stats.length > 20) {
+    const medianScore = quantile(scan.stats.map((x) => x.score), 0.5);
+    // 两个条件都要：画面确实很静（中位分 < 3）**且**绝对阈值几乎没找到刀（< 0.1 刀/秒）。
+    // 只放开第一个会误伤——实测概念 PV 的中位数也低（大量静止帧），一放开就 44 → 88 刀。
+    const perSec = cuts.length / Math.max(1, winDur);
+    if (medianScore < 3 && perSec < 0.1) {
+      const spikes = suppressClose(spikeCuts(scan.stats, { k: 4, minAbs: 5, halfWindow: 12 }), scanGap);
+      if (spikes.length > cuts.length) cuts = spikes;
+    }
+  }
+
   let refinedBursts = [];
   if (refineBursts && !precomputed && !textOnly) {
     const r = refineCutsByWindow({ stats: scan.stats, coarseCuts: cuts, fps: info.fps, winStart, winDur });

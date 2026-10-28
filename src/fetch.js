@@ -352,6 +352,17 @@ export function unwrapSingle(info, url) {
 /** 选出"能覆盖到 h 的最省参数"的格式串。B 站是 DASH，所以必须是 bv*+ba。 */
 export function formatSelector(height, { withAudio = true } = {}) {
   const cap = Number.isFinite(height) && height > 0 ? `[height<=${Math.round(height)}]` : '';
+  // **优先渐进式单文件**（B 站的 `b`）：一个文件、不用合流，比 `bv*+ba` 快得多，也省一次落盘。
+  // 渐进式最高一般只到 720p，但扫描只用 360p，够；拿不到再退回 DASH。
+  if (!cap) return withAudio ? 'bv*+ba/b' : 'bv*/b';
+  return withAudio
+    ? `b${cap}/bv*${cap}+ba/b${cap}/bv*+ba/b`
+    : `b${cap}/bv*${cap}/bv*/b`;
+}
+
+/** 旧的选法，保留给测试对照：只走 DASH 优先 */
+function dashFirstSelector(height, { withAudio = true } = {}) {
+  const cap = Number.isFinite(height) && height > 0 ? `[height<=${Math.round(height)}]` : '';
   // **末尾必须留一个不带筛选的兜底**。竖屏视频在 yt-dlp 里是 360x640 / 480x852 ——
   // `height` 是长边，`height<=480` 一个都匹配不到，整条链路直接报
   // "Requested format is not available"（实测 BV1BjxM69EHh 就是这样挂的）。
@@ -550,6 +561,8 @@ export async function fetchMedia(input, opts = {}) {
     // 按"短边"就近取：竖屏视频的 res 是宽（360/480/720），不是 height。
     ...(Number.isFinite(scanHeight) && scanHeight > 0 ? ['-S', `res:${Math.round(scanHeight)}`] : []),
     '--no-warnings', '--no-playlist', '--no-progress',
+    // 断点续传：网络抖了下次接着下，而不是从头再来
+    '--continue',
     '--merge-output-format', 'mp4',
     '-o', join(dir, 'video.%(ext)s'),
   ];
@@ -558,7 +571,9 @@ export async function fetchMedia(input, opts = {}) {
 
   const downloaded = await run(tool, dlArgs, { timeoutMs: 600_000 });
   if (downloaded.code !== 0) {
-    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    // **不要删目录**：yt-dlp 的 .part 是断点续传的本钱。
+    // 原来这里 `rm -rf` 掉整个缓存目录，于是网络一抖就"下到一半清零、从头再来"——
+    // 用户实测表现为"越下越慢"（繁星-夏夜反馈）。残留的 .part 由 pruneMedia 按时间清。
     throw new Error(explainYtdlpError(downloaded.stderr, downloaded.code));
   }
   // yt-dlp 有时会把 DASH 流写成 video.f100022.mp4（格式 id 进了文件名），

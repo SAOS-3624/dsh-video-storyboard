@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### 头条：ASR 这三个 bug 是本轮最大的一块
+
+三条都来自真实用户，都是"明明能用却被我们自己的规则挡住"：
+
+1. **本机 ASR 被强制要 key**（0.4.2 修，@小观棋 报）—— 自己跑的 FunASR 不校验 Authorization，
+   却被 `if (!key) return null` 一刀切跳过。本机地址现在不要求 key。
+2. **服务只启不停**（0.4.1/0.4.2，用户三次死机的根因）—— 常驻吃 6.8 GB 提交额。
+   现在按需拉起、10 分钟无新对话就请它退出，服务端另有 30 分钟空闲自退兜底。
+3. **长片扫描期间被空闲计时器关掉**（本轮修）—— 计时器在"上一次运行结束"时设的，
+   新一次运行扫描超过窗口就会白丢一次冷启动（30 秒）。运行入口即续命。
+
+### Fixed
+
+- **A partial download was wiped on failure, so every retry started from zero.** On a flaky connection the
+  media directory was removed (`rm -rf`) whenever yt-dlp exited non-zero — including the `.part` file that is
+  the whole point of resuming. Reported as "下到一半直接清零重新开始，而且下得更慢". Now the directory is
+  kept and `--continue` is explicit; stale parts are pruned by age instead.
+
+- **Progressive streams were never tried, so every Bilibili download was a DASH pair plus a merge.** The
+  selector jumped straight to `bv*+ba`. It now tries `b[height<=N]` (one file, no merge) first and falls back
+  to DASH — the scan copy only needs 360p, and a single stream is both faster and less to write.
+
+- **A slide deck that "looks the same on every page" produced no cuts at all.** With an absolute threshold,
+  a page turn that only changes a few characters scores 3–8 and disappears under any sane floor, so the
+  result fell back to equal intervals. Very static films (median score < 3 **and** fewer than 0.1 cuts/s) now
+  re-read with the relative-baseline detector (`spikeCuts`), which compares each frame with its local
+  neighbourhood instead of a global number. Measured: a slide where a small block appears went 0 → 1 cut;
+  the concept PV stayed at 44 (the guard is what keeps it from doubling — without the rate condition it went
+  44 → 88).
+
 ### Changed
 
 - **The idle window is now 10 minutes, and the backstop moved to 30.** Cold start costs 30 s, so a 2-minute

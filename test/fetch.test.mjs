@@ -53,14 +53,16 @@ test('mediaKey: 清晰度不同 → 键不同', () => {
 /* ---------------------------------------------------------------- 格式选择 */
 
 test('formatSelector: B 站是 DASH，必须 bv*+ba 而不是 b', () => {
-  assert.equal(formatSelector(360), 'bv*[height<=360]+ba/b[height<=360]/bv*+ba/b');
-  assert.equal(formatSelector(1080, { withAudio: false }), 'bv*[height<=1080]/b[height<=1080]/bv*/b');
+  // 渐进式单文件优先（快、不用合流），拿不到再退 DASH
+  assert.equal(formatSelector(360), 'b[height<=360]/bv*[height<=360]+ba/b[height<=360]/bv*+ba/b');
+  assert.equal(formatSelector(1080, { withAudio: false }), 'b[height<=1080]/bv*[height<=1080]/bv*/b');
   assert.equal(formatSelector(0), 'bv*+ba/b');
 });
 
 test('formatSelector: 末尾必须留无筛选兜底（竖屏 height 是长边，会一个都匹配不到）', () => {
   // 9:16 视频在 yt-dlp 里是 360x640 / 480x852：height<=480 匹配不到任何格式
   assert.ok(formatSelector(480).endsWith('/bv*+ba/b'));
+  assert.ok(formatSelector(480).startsWith('b[height<=480]'), '先试渐进式');
   assert.ok(formatSelector(480, { withAudio: false }).endsWith('/bv*/b'));
 });
 
