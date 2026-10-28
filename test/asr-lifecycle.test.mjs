@@ -146,7 +146,8 @@ test('lifecycleConfig: start 直接写成 .py 时自动补解释器（否则 spa
   const c = lifecycleConfig({ manage: { start: 'D:/asr-local/server-sherpa.py' } });
   assert.ok(Array.isArray(c.start), '.py 应该被包成 [python, script]');
   assert.equal(c.start.length, 2);
-  assert.match(c.start[0], /python(\.exe)?$/i);
+  // 解释器在不同平台上叫 python / python.exe / python3 —— 只要求它是个 python
+  assert.match(c.start[0], /python(3|\.exe)?$/i, `unexpected interpreter: ${c.start[0]}`);
   assert.equal(c.start[1], 'D:/asr-local/server-sherpa.py');
   // 非 .py 保持原样
   assert.equal(lifecycleConfig({ manage: { start: 'x.cmd' } }).start, 'x.cmd');
