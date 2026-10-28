@@ -24,6 +24,12 @@
   (`Cannot access before initialization`, which silently turned the first measurement into `asr-failed` while
   still showing a fast time), and the block's `textInSilence` had to be returned rather than captured.
 
+- **Frame extraction runs in parallel.** Nine cells used to be nine sequential ffmpeg calls (each one seeks
+  and decodes a single frame). The loop is now plan → concurrent extract → assemble in order, at
+  `frameConcurrency` (default half the cores, capped at 8). Measured on a 90 s clip with 9 cells: **13.3 s at
+  1, 8.0 at 3, 6.5 at 5, 4.0 at 8**; whole run 18.0 → 12.2 s with transcription on. Cell order and the
+  sub-tiled fast-cut cells are unchanged (verified visually).
+
   `result.timing` now carries per-phase seconds (`audio`/`scan`/`transcript`/`frames`) so the next slow
   report can start from numbers instead of guesses. Caveat: part of the 202 → 89 s is the OS file cache
   warming between the two runs — the honest structural gain is the ~58 s of transcription, not 113 s.

@@ -6,6 +6,7 @@
  */
 
 import { writeFile } from 'node:fs/promises';
+import { cpus } from 'node:os';
 import { spawn } from 'node:child_process';
 
 import { probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
@@ -91,6 +92,10 @@ export async function runStoryboard(opts) {
     // 快闪素材要把这个调小才数得出镜头数，否则 3 秒 18 镜会被压成 4 刀。
     scanGap = 0.35,
     refineBursts = true,
+    // 取帧并发数：每路 ffmpeg 只解一帧，互不依赖。实测 9 格 90 秒片：
+    // 1 路 13.3s / 3 路 8.0s / 5 路 6.5s / 8 路 4.0s（这台 16 核）。
+    // 默认取核数一半、上限 8 —— 弱机或机械盘上不会把 IO 打死。
+    frameConcurrency = Math.min(8, Math.max(2, Math.floor(cpus().length / 2))),
     adaptive = true,
     pick = 'sharp',
     burn = 'index',
@@ -452,9 +457,11 @@ export async function runStoryboard(opts) {
     // 摊格子要额外取 k²−1 帧（4×4 就是 15 次 ffmpeg）。整张图最多多取 32 帧，
     // 否则一支全是快闪的片子会变成"每格取 16 张"，渲染时间翻十几倍。
     let subBudget = 32;
+    // ---- 取帧：先算完所有格子的参数，再并发取帧，最后按顺序组装。
+    // 原来是一格一格 await（9 格串行，短视频里占 60% 的时间）。ffmpeg 每次只解一帧，
+    // 彼此没有依赖，并发 3 路就能把这部分压掉一半以上。
+    const plan = [];
     for (const [gi, { from: a, to: b }] of group.entries()) {
-      index += 1;
-      // 这一格里切了几刀 —— 快闪蒙太奇的"速度"就是这个数字，模型不用自己数刻度
       const cellCutList = cuts.filter((c) => c.t >= a && c.t < b);
       const cellCuts = cellCutList.length;
       const cutScore = cellCuts > 0
@@ -463,17 +470,26 @@ export async function runStoryboard(opts) {
       let sub = chooseSubGrid({ shots: cellCuts + 1, cellW, cellH, dur: b - a, cutScore });
       while (sub > 1 && sub * sub - 1 > subBudget) sub -= 1;   // 预算不够就降档，降不下去就整格
       if (sub > 1) subBudget -= sub * sub - 1;
-      let frame;
+      plan.push({ gi, a, b, cellCuts, sub });
+    }
+
+    const _ex0 = Date.now();
+    const shots = await mapPool(plan, frameConcurrency, async ({ a, b, sub }) => {
       if (sub > 1) {
         // 快闪格：摊成 k×k，一张图交代 k² 个瞬间（token 不变）
-        frame = await extractSubTile({
+        return extractSubTile({
           input, remote: remoteFrame, a, b, k: sub, cellW, cellH, ffmpegPath,
         });
-      } else {
-        frame = await extractFrameWithFallback({
-          input, remote: remoteFrame, at: a, dur: b - a, cellW, cellH, ffmpegPath, pick,
-        });
       }
+      return extractFrameWithFallback({
+        input, remote: remoteFrame, at: a, dur: b - a, cellW, cellH, ffmpegPath, pick,
+      });
+    });
+
+    timing.extract = (timing.extract ?? 0) + (Date.now() - _ex0) / 1000;
+    for (const [ki, { gi, a, b, cellCuts, sub }] of plan.entries()) {
+      index += 1;
+      const frame = shots[ki];
       if (frame.via === 'local-fallback') fallbacks += 1;
       frames.push({ buffer: frame.buffer, index });
       const text = aligned[gi] ?? null;
@@ -482,7 +498,7 @@ export async function runStoryboard(opts) {
         sheet: si + 1,
         t_start: +a.toFixed(3),
         t_end: +b.toFixed(3),
-        // 平铺格的画面是 k² 个瞬间，不存在“这一格的取帧时刻”；
+        // 平铺格的画面是 k² 个瞬间，不存在"这一格的取帧时刻"；
         // 不写 t_frame，清单和 evidence 都不会给出误导性的 frame@。
         ...(sub > 1 ? { sub } : { t_frame: +frame.t.toFixed(3) }),
         ...(cellCuts > 0 ? { cuts: cellCuts } : {}),
@@ -698,6 +714,24 @@ export function refineCutsByWindow({
  * 把一格摊成 k×k：取 k² 个等距子帧，拼回一张 cellW×cellH 的图。
  * 子帧用 `mode:'mid'`（不做 3 候选锐度挑选）—— 一格里要取 9~16 张，再挑三倍会让这一步变成瓶颈。
  */
+/**
+ * 固定并发数的 map：保持输出顺序，任何一个失败就整体失败（取帧失败不能静默跳过，否则图会缺格）。
+ * 为什么不用 Promise.all：一次起 16 个 ffmpeg 会把机械硬盘打到爬行，也会把内存顶上去。
+ */
+async function mapPool(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const n = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: n }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  }));
+  return out;
+}
+
 async function extractSubTile({ input, remote, a, b, k, cellW, cellH, ffmpegPath }) {
   const tileW = Math.floor(cellW / k);
   const tileH = Math.floor(cellH / k);
