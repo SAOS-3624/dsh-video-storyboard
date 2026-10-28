@@ -470,3 +470,16 @@ test('pickVideoFormat: 竖屏按短边选，不会被 height 卡掉 1080x1920', 
   assert.equal(pickVideoFormat(formats, 1080).width, 1080, '应选到 1080x1920');
   assert.equal(pickVideoFormat(formats, 480).width, 480);
 });
+
+test('explainYtdlpError: 567 要说清是 B 站风控，并给出两条出路', () => {
+  const msg = explainYtdlpError('ERROR: unable to download video data: HTTP Error 567: ');
+  assert.match(msg, /risk control/, '必须说清这不是插件的锅');
+  assert.match(msg, /cookies/i, '给 cookies 这条路');
+  assert.match(msg, /local path/i, '给本地文件这条路');
+});
+
+test('explainYtdlpError: 412 是限流，不是登录问题', () => {
+  const msg = explainYtdlpError('ERROR: HTTP Error 412: Precondition Failed');
+  assert.match(msg, /rate-limited/);
+  assert.doesNotMatch(msg, /567/);
+});

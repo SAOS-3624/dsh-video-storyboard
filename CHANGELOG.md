@@ -13,6 +13,17 @@
 3. **长片扫描期间被空闲计时器关掉**（本轮修）—— 计时器在"上一次运行结束"时设的，
    新一次运行扫描超过窗口就会白丢一次冷启动（30 秒）。运行入口即续命。
 
+### Fixed
+
+- **Bilibili's HTTP 567 now says what it is and tries once more.** 567 is their risk control, not a format
+  problem — most often a video that needs a signed-in session (1080P+, 会员/付费) or a rate-limit. Before, the
+  message was yt-dlp's raw text, which reads like a plugin bug.
+
+  Now: one automatic retry with a browser User-Agent, `Referer: https://www.bilibili.com/`, and
+  `--sleep-requests 1` (the retry only fires on 567/412, never on permanent errors); if it still fails, the
+  error names both ways out — a cookies.txt, or download the file and pass a local path. `--retries 3
+  --fragment-retries 5` also went into the base args, since CDN hiccups are routine.
+
 ### Performance
 
 - **Transcription now runs while the scan runs.** It only needs the silence positions (from the 1–3 s audio

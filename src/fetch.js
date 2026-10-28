@@ -301,6 +301,12 @@ export function explainYtdlpError(stderr, code = 1) {
     return 'this video needs a signed-in session. Export cookies.txt and set DSH_VIDEO_COOKIES ' +
       '(or "cookies" in ~/.dsh/video.json) — SESSDATA may also have expired. See docs/SETUP.md.';
   }
+  if (/HTTP Error 567/i.test(text)) {
+    return 'Bilibili refused this request (HTTP 567) — that is their risk control, not a plugin bug. ' +
+      'It usually means the video needs a signed-in session (1080P+, 会员/付费, or a fresh rate-limit). ' +
+      'Fix: export cookies.txt and point DSH_VIDEO_COOKIES at it, or download the file yourself and pass a ' +
+      'local path. Anonymous 360P usually still works on ordinary videos.';
+  }
   if (/HTTP Error 412/i.test(text)) {
     return 'HTTP 412: the site rate-limited this request. Wait a moment and retry.';
   }
@@ -563,13 +569,30 @@ export async function fetchMedia(input, opts = {}) {
     '--no-warnings', '--no-playlist', '--no-progress',
     // 断点续传：网络抖了下次接着下，而不是从头再来
     '--continue',
+    // CDN 抖动很常见（B 站尤其），默认只重试 10 次整包，分片不重试
+    '--retries', '3', '--fragment-retries', '5',
     '--merge-output-format', 'mp4',
     '-o', join(dir, 'video.%(ext)s'),
   ];
   if (auth.cookiesPath) dlArgs.push('--cookies', auth.cookiesPath);
   dlArgs.push(url);
 
-  const downloaded = await run(tool, dlArgs, { timeoutMs: 600_000 });
+  let downloaded = await run(tool, dlArgs, { timeoutMs: 600_000 });
+
+  // B 站风控（567）/ 限流（412）：带浏览器头 + Referer 再试一次。
+  // 不去猜它的风控算法，只给它一眼看得出是"浏览器在看网页"的请求。
+  if (downloaded.code !== 0 && /HTTP Error (?:567|412)/i.test(downloaded.stderr ?? '')) {
+    const retryArgs = dlArgs.slice(0, -1).concat([
+      '--add-header', 'Referer:https://www.bilibili.com/',
+      '--user-agent',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/124.0.0.0 Safari/537.36',
+      '--sleep-requests', '1',
+      dlArgs[dlArgs.length - 1],
+    ]);
+    downloaded = await run(tool, retryArgs, { timeoutMs: 600_000 });
+  }
+
   if (downloaded.code !== 0) {
     // **不要删目录**：yt-dlp 的 .part 是断点续传的本钱。
     // 原来这里 `rm -rf` 掉整个缓存目录，于是网络一抖就"下到一半清零、从头再来"——
