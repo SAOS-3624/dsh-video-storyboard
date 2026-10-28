@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.4.4] — 2026-10-29
+
+### Fixed: a CDN that drops the connection no longer kills the whole run
+
+(Same content as the entry below, now released: ranged resume in `src/resume.js`, a truncation-only fallback
+in `src/fetch.js`, and `Content-Range` as the length check instead of `formats[].filesize`.)
+
+### Added: `npm run bench`
+
+`scripts/bench.mjs` reproduces the cost table on your own footage — probe time, scan time, cached second
+call, zoom, png bytes, manifest length, and the resulting token split. JSON output for before/after diffs:
+
+    node scripts/bench.mjs own-clip.mp4 --json before.json
+
+### Added: the host contract actually runs in CI
+
+`test/contract.test.mjs` self-skips when no local DSH install is found, so for the first release the one
+thing that can break an install — `ctx.tools.register()` rejecting our schema — was never executed in CI.
+A dedicated `contract` job now installs the published `@deepseek-ai/dsh-tools` from npm and runs the test
+against it.
+
+### Docs: how the token numbers are counted
+
+`docs/BASELINE.md` now states the accounting rule behind "384 tokens": the host charges per image result,
+not per cell, and the text index is billed by length at roughly 1.3–1.8 Chinese characters per token.
+
+
 ## [Unreleased]
 
 ### Fixed: a CDN that drops the connection no longer kills the whole run
