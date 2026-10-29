@@ -72,3 +72,41 @@ test('wait 默认关闭：不传就立刻返回', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+
+test('waitForVideo: 一直没视频就超时返回，并说清等了多少秒', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'waitv-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    const d = {
+      ...deps(() => 0),
+      probe: async () => ({ ok: true, sessions: [] }),
+      readBrowser: async () => null,
+    };
+    const t0 = Date.now();
+    const r = await runWatchPass({ waitForVideo: true, maxWaitSec: 5 }, d);
+    const sec = (Date.now() - t0) / 1000;
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-video-timeout');
+    assert.ok(r.waitedSec >= 4, `应至少等了 4 秒，实得 ${r.waitedSec}`);
+    assert.match(r.text, /waited \d+s/);
+    assert.ok(sec >= 4 && sec < 15, `实际耗时 ${sec}s`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('没有 waitForVideo 时立刻返回，不挂住', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'waitv2-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    const d = { ...deps(() => 0), probe: async () => ({ ok: true, sessions: [] }), readBrowser: async () => null };
+    const t0 = Date.now();
+    const r = await runWatchPass({}, d);
+    assert.equal(r.reason, 'no-video');
+    assert.ok((Date.now() - t0) / 1000 < 3);
+    assert.match(r.text, /waitForVideo/, '要告诉模型可以改成等着');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -535,6 +535,12 @@ export function watchToolSpec() {
         type: 'boolean',
         description: 'Stop the background watch loop (it wakes the session on its own). Idempotent.',
       },
+      waitForVideo: {
+        type: 'boolean',
+        description: 'If nothing is playing yet, block until a video appears (browser tab or OS media '
+          + 'session), then continue. IMPORTANT: tell the user you are waiting BEFORE calling - this call '
+          + 'cannot speak while it blocks. It reports how long it waited.',
+      },
       wait: {
         type: 'boolean',
         description: 'Block this call until the batch is actually due, then return the segment. This is the '

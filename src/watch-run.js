@@ -148,16 +148,64 @@ export async function runWatchPass(args, deps) {
     }
   }
   if (!input) {
-    const p0 = await probe();
+    let p0 = await probe();
     activeSession = p0.ok ? pickSession(p0.sessions, {}) : null;
-    if (!activeSession?.title) {
+
+    // ---- 等视频出现（waitForVideo）
+    // 用户常常先叫一声、再去开视频。与其立刻失败让他再叫一次，不如在这里挂着等，
+    // 并且**把等待的结果说清楚**（等了多少秒、有没有等到）。
+    // 注意：工具调用中途没法说话，所以"我在等"这句必须由模型在调用**之前**说 ——
+    // 这一点写在工具描述和 manifest 的 guidance 里。
+    let waitedVideoSec = 0;
+    if (!activeSession?.title && args.waitForVideo === true) {
+      const cap = Math.min(600, Math.max(10, Number(args.maxWaitSec) || 120));
+      const deadline = Date.now() + cap * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        waitedVideoSec += 2;
+        const bv = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
+        if (bv?.url) {
+          if (/^https?:/i.test(bv.url)) {
+            input = bv.url;
+            resolved = { input: bv.url, matchedBy: 'browser-url' };
+          } else if (fileUrlToPath(bv.url)) {
+            input = fileUrlToPath(bv.url);
+            resolved = { input, matchedBy: 'browser-file' };
+          }
+          if (input) break;
+        }
+        p0 = await probe();
+        activeSession = p0.ok ? pickSession(p0.sessions, {}) : null;
+        if (activeSession?.title) break;
+      }
+      if (!input && !activeSession?.title) {
+        return {
+          ok: false,
+          waitedSec: waitedVideoSec,
+          reason: 'no-video-timeout',
+          text: `I waited ${waitedVideoSec}s and no video appeared `
+            + '(no browser tab holding a <video>, no OS media session).\n'
+            + 'Tell the user you are still waiting and that you will pick it up when it starts; '
+            + 'call again with waitForVideo: true when they say it is playing.',
+          images: [],
+        };
+      }
+    }
+
+    if (!activeSession?.title && !input) {
       return {
         ok: false,
+        reason: 'no-video',
         text: `no video is playing right now (${p0.error ?? 'no active media session'}).\n`
-          + 'Play something, or pass input yourself (path or link).',
+          + 'Play something, or pass input yourself (path or link). '
+          + 'If you would rather wait for them to start it, call again with waitForVideo: true — '
+          + 'but say you are waiting first: this call stays silent while it blocks.',
         images: [],
       };
     }
+
+    // 已经有 input（从浏览器读到了地址）就不用再解析标题
+    if (!input) {
     // 记住上一次为这个标题找到的源：搜索接口会限流，重复搜没意义，也慢（11 秒）。
     const cachedInput = stateEarly.sources?.[titleKey(activeSession.title)];
     if (cachedInput) {
@@ -198,6 +246,7 @@ export async function runWatchPass(args, deps) {
       };
     }
     input = resolved.input;
+    }
   }
 
   // ---- 1. 播放位置
