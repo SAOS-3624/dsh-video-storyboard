@@ -160,9 +160,12 @@ export async function runWatchPass(args, deps) {
     if (!activeSession?.title && args.waitForVideo === true) {
       const cap = Math.min(600, Math.max(10, Number(args.maxWaitSec) || 120));
       const deadline = Date.now() + cap * 1000;
+      const tWait = Date.now();
+      // **快慢两档**：浏览器读一次 CDP 是毫秒级，SMTC 要起一个 python 进程（最慢能到几秒）。
+      // 以前两者绑在同一个 2 秒节拍里，等于每个节拍都在等 python —— 用户视频都播半分钟了，
+      // 这边还在"等视频出现"。现在浏览器 300ms 一次，SMTC 2 秒一次且超时收到 1.5 秒。
+      let lastProbeAt = 0;
       while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2000));
-        waitedVideoSec += 2;
         const bv = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
         if (bv?.url) {
           if (looksLikeVideoUrl(bv.url) && /^https?:/i.test(bv.url)) {
@@ -174,9 +177,16 @@ export async function runWatchPass(args, deps) {
           }
           if (input) break;
         }
-        p0 = await probe();
-        activeSession = p0.ok ? pickSession(p0.sessions, {}) : null;
-        if (activeSession?.title) break;
+        if (Date.now() - lastProbeAt >= 2000) {
+          lastProbeAt = Date.now();
+          // eslint-disable-next-line no-await-in-loop
+          p0 = await probe({ timeoutMs: 1500 });
+          activeSession = p0.ok ? pickSession(p0.sessions, {}) : null;
+          if (activeSession?.title) break;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, 300));
+        waitedVideoSec = Math.round((Date.now() - tWait) / 1000);
       }
       if (!input && !activeSession?.title) {
         return {
@@ -536,6 +546,7 @@ export async function runWatchPass(args, deps) {
   // 好处：完全不依赖 sessionController.prompt（那个能不能用还没验证过）。
   // 代价：等待期间这个会话被占着，用户插话要等它返回。
   let waitedSec = 0;
+  const tWaitStart = Date.now();
   let alreadyDelivered = false;
   if (!d.due && args.wait === true) {
     const capSec = Math.min(600, Math.max(5, Number(args.maxWaitSec) || 180));
@@ -548,7 +559,8 @@ export async function runWatchPass(args, deps) {
       const posNow = np ? np.pos : (Number.isFinite(cursor) ? cursor + waitedSec : null);
       if (posNow !== null) {
         cursor = posNow;
-        waitedSec = +(waitedSec + 2).toFixed(1);
+        // 按真实经过时间算，不按"每拍 +2 秒"——轮询频率改了，拍数就不等于秒数
+        waitedSec = +((Date.now() - tWaitStart) / 1000).toFixed(1);
         const nd = deliveryState({ cursor, segment: segStart, size, lead });
         // 同一段已经交过一次就别再交：用户刚看完 00:00–01:00，
         // 再等到 00:59 把同一段塞给他一次，看起来像卡住了。
@@ -566,8 +578,8 @@ export async function runWatchPass(args, deps) {
         if (cursor < segStart) break;            // 用户倒回到上一段去了，别干等
         if (np?.paused) break;                   // 暂停了就别挂着了，让用户能说话
       }
-      await new Promise((r) => setTimeout(r, 2000));
-      if (np === null) waitedSec += 2;           // 没有浏览器读数时按墙钟推进
+      await new Promise((r) => setTimeout(r, 500));
+      waitedSec = +((Date.now() - tWaitStart) / 1000).toFixed(1);   // 没有浏览器读数也按墙钟推进
     }
   }
 
@@ -576,7 +588,7 @@ export async function runWatchPass(args, deps) {
   // 去重判断 `segStart !== lastDelivered` 就会把它挡掉，一直挂到封顶也不交 ——
   // 表现是这一段被推迟到**再下一次**调用才交出去（迟到一段，而不是重复一段）。
   // 记账必须发生在真正交付的那条分支里（见下方第 4 步）。
-  const waitNote = waitedSec > 0 ? ` · waited ${waitedSec}s` : '';
+  const waitNote = waitedSec > 0 ? ` · waited ${Math.round(waitedSec)}s` : '';
 
   // 这一段已经交过一次（lastDelivered 命中）：不重复塞，也不继续挂着等
   if (!d.due && alreadyDelivered) {

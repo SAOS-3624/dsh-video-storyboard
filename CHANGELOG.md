@@ -17,6 +17,13 @@
 
 ### Changed
 
+- **Finding the video is polled fast, and probing SMTC is not on the same clock.** The wait loop used to
+  sleep two seconds and *then* spawn the SMTC python probe, so one check could cost 2 s + the probe's own
+  latency — the user could already be 30 s into the video while it still insisted nothing was playing.
+  The browser (CDP, milliseconds) is now polled every 300 ms; SMTC every 2 s with a 1.5 s timeout. The
+  delivery wait and the speaking script dropped from 2 s / 1.2 s to 500 ms, so a line or an image lands
+  within half a second of its cue. Waiting time is now measured from the clock instead of counted in ticks.
+
 - **The look-ahead is measured from the playhead, not from the segment start** (`windowFor()`). Counting
   segments only guarantees five minutes when the user is at a boundary; a 60 s batch plus a 120 s batch
   is three minutes of coverage no matter how it is counted. The window now extends until

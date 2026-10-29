@@ -187,3 +187,31 @@ test('没有 waitForVideo 时立刻返回，不挂住', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('waitForVideo: 视频一出现就认出来（不再 2 秒一拍地等）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'waitvideo-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    let reads = 0;
+    const d = {
+      ...deps(() => 100),
+      browserPort: 1,
+      autoLaunch: false,
+      // 前两次读不到，第三次才出现 —— 以前一次要等 2 秒，现在 300ms 一拍
+      readBrowser: async () => {
+        reads += 1;
+        return reads >= 3
+          ? { url: 'https://www.bilibili.com/video/BV1xx411c7mD/', pos: 5, dur: 600, paused: false }
+          : null;
+      },
+      probe: async () => ({ ok: true, sessions: [] }),
+    };
+    const t0 = Date.now();
+    const r = await runWatchPass({ waitForVideo: true, maxWaitSec: 20, segment: 120 }, d);
+    const sec = (Date.now() - t0) / 1000;
+    assert.equal(r.ok, true, '认出视频后应继续');
+    assert.ok(sec < 3, `应该一秒内认出，实得 ${sec}s`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
