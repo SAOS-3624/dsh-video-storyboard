@@ -535,6 +535,12 @@ export function watchToolSpec() {
         type: 'boolean',
         description: 'Stop the background watch loop (it wakes the session on its own). Idempotent.',
       },
+      testWake: {
+        type: 'boolean',
+        description: 'Try to wake this session once, right now, and report exactly what happened '
+          + '(session id, whether sessionController exists, whether prompt succeeded). Use it to check the wake '
+          + 'path end to end without waiting for a due point.',
+      },
       statusOnly: {
         type: 'boolean',
         description: 'Return the loop state only (position, confidence, why it did or did not speak) without '

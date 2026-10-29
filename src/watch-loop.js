@@ -46,6 +46,9 @@ const loop = {
   askedAt: 0,
   noSourceSince: 0,
   dur: null,
+  lastWake: null,
+  wakeFails: 0,
+  logs: [],
   lastProbeAt: 0,
   lastReason: '',
   ticker: null,
@@ -65,6 +68,10 @@ export function loopStatus() {
     confidence: est?.confidence ?? 'none',
     staleMs: est ? est.staleMs : null,
     reason: loop.lastReason,
+    lastWake: loop.lastWake,
+    wakeFails: loop.wakeFails,
+    positionSource: loop.positionSource ?? null,
+    log: loop.logs.slice(-8),
   };
 }
 
@@ -103,6 +110,10 @@ export function startWatchLoop({
   // 但仿真用倍速跑，倍速越高越要读得勤，否则一整段会在两次采样之间被跳过。
   const probeEveryMs = deps.probeEveryMs ?? PROBE_EVERY_MS;
   const build = deps.build ?? null;
+  const note = (msg) => {
+    loop.logs.push(`${new Date().toTimeString().slice(0, 8)} ${msg}`);
+    if (loop.logs.length > 20) loop.logs.shift();
+  };
   // 浏览器里有 video 元素时，`currentTime` 是**毫秒级真值**，比 SMTC 的稀疏刷新可靠得多。
   // 拿不到（没开调试端口）就退回 SMTC，不报错。
   const readBrowser = deps.readBrowser ?? ((o) => readBrowserPosition(o));
@@ -114,14 +125,34 @@ export function startWatchLoop({
     return { ok: false, reason: 'no-segments' };
   }
 
-  stopWatchLoop('restart');
-
   // 批次表：开头短、逐段加长、最后稳定到 segment。
   // 传了 segments 就用它推断等长档（保持旧调用方/测试的行为）；传了 ramp 就走阶梯。
   const seedSize = Number(segment) > 0
     ? Number(segment)
     : (segments?.[0] ? Number(segments[0].to) - Number(segments[0].from) : Number(size) || 120);
   const plan = makePlan({ segment: seedSize, ramp: ramp ?? null });
+
+  // **同一个源 + 同一张批次表 → 接着跑，不要重开。**
+  // 之前每次工具调用都 stopWatchLoop('restart')，于是：① 已说过的段（spoken）被清空；
+  // ② 正在等的那一段被新表重切、原时间点消失。用户看到的就是"说要 04:45 开口，结果 05:45 才说"。
+  const samePlan = loop.active
+    && loop.input === input
+    && loop.sessionId === sessionId
+    && loop.plan
+    && loop.plan.segment === plan.segment
+    && JSON.stringify(loop.plan.ramp) === JSON.stringify(plan.ramp);
+  if (samePlan) {
+    loop.ctx = ctx;
+    loop.depth = Math.max(1, Number(depth) || loop.depth);
+    if (Number.isFinite(cursor)) {
+      loop.anchor = makeAnchor({ pos: cursor, dur: loop.dur, status, updated: Date.now() }, Date.now());
+    }
+    note('resumed (same input + same batch plan)');
+    return { ok: true, resumed: true, ...loopStatus() };
+  }
+
+  // 走到这里说明是新的一段陪看（换源或换批次表）：停掉旧的，重建状态
+  stopWatchLoop('restart');
 
   Object.assign(loop, {
     active: true,
@@ -196,7 +227,7 @@ export function startWatchLoop({
               }
               if (refreshed && Math.abs(driftSec) > 5) {
                 // 刷新给出的真值和我们的外推差得多：中间暂停/缓冲过。不惩罚，用新锚点重算。
-                loop.log(`[watch] re-anchored, drift ${driftSec}s`);
+                note(`re-anchored, drift ${driftSec}s`);
               }
               loop.anchor = anchor;
             } else {
@@ -240,9 +271,9 @@ export function startWatchLoop({
             try {
               await build(next.from);
               loop.built.add(next.from);
-              loop.log(`[watch] built ${Math.round(next.from)}s in ${((Date.now() - t) / 1000).toFixed(1)}s`);
+              note(`built ${Math.round(next.from)}s in ${((Date.now() - t) / 1000).toFixed(1)}s`);
             } catch (e) {
-              loop.log(`[watch] build ${Math.round(next.from)}s failed: ${String(e?.message ?? e).slice(0, 80)}`);
+              note(`build ${Math.round(next.from)}s failed: ${String(e?.message ?? e).slice(0, 80)}`);
             } finally {
               loop.building = null;
             }
@@ -314,7 +345,14 @@ export function startWatchLoop({
         ? `${head}\n你之前写好的那句：「${line}」\n直接说这句就行；觉得不对就调 video_watch 看一眼再改。`
         : `${head}\n调 video_watch 拿这一段的画面，然后只说一句。`;
       const w = await wake(loop.ctx, { sessionId: loop.sessionId, text });
-      loop.log(`[watch] wake ${r.segment}s (${r.confidence}) → ${w.ok ? 'ok' : w.reason}`);
+      loop.lastWake = { at: new Date().toTimeString().slice(0, 8), ok: Boolean(w?.ok), reason: w?.reason ?? null, segment: r.segment };
+      if (!w?.ok) {
+        loop.wakeFails += 1;
+        // **叫不醒要能看出来**：之前这里只写进 log，而 log 被调用方传成了空函数，
+        // 于是"loop 在跑、位置也对、就是没人说话"完全查不出来。
+        loop.lastReason = 'wake-failed';
+      }
+      note(`wake ${r.segment}s (${r.confidence}) → ${w?.ok ? 'ok' : w?.reason ?? 'failed'}`);
     },
   });
 

@@ -285,12 +285,15 @@ export async function runWatchPass(args, deps) {
   // ---- 顺手把**下一段**也建好（后台，不阻塞本次返回）
   // 用户的抱怨是"回复晚了十秒"，而这十秒里大部分是"到点才去建这一段"。
   // 提前一段建好，到点时那次调用就是命中了。
-  const nextStart = segStart + size;
+  // **下一段要用批次表算**：阶梯里第 3 段是 3 分钟，不是"当前段长再复制一份"。
+  // 之前按 size 硬加，于是提示写 03:00–05:00、调度实际排在 03:00–06:00 —— 用户照提示算的时间点不存在。
+  const nextSeg = plan.from(cur.index + 1, 1)[0];
+  const nextStart = nextSeg.from;
   const inRange = !Number.isFinite(activeSession?.dur) || nextStart < activeSession.dur;
-  // 预取完顺手提示：想让它"到点立刻开口"，现在就把那句写好
   const nextHint = (!inRange)
     ? ''
-    : `\n[next] ${mmss(nextStart)}–${mmss(nextStart + size)} already prefetched. `
+    : `\n[next] ${mmss(nextSeg.from)}–${mmss(nextSeg.to)} already prefetched `
+      + `(speaks near ${mmss(nextSeg.sayAt)}). `
       + 'To make it speak the instant it is due, write the line now: '
       + `video_watch({ input, lines: [{ from: ${nextStart}, text: "…" }] })`;
   // 预取已经交给陪看循环（它有"当前 + 下一个"的双缓冲节奏）。

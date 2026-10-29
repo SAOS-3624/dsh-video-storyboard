@@ -19,6 +19,7 @@ import { lookupCell } from './cells.js';
 import { DEFAULT_RAMP, DEFAULT_SEGMENT } from './batches.js';
 import { makeBuilder, runWatchPass } from './watch-run.js';
 import { loopStatus, startWatchLoop, stopWatchLoop } from './watch-loop.js';
+import { wakeSession } from './timer.js';
 import { isHttpUrl, probeUrl, resolveDirectUrl, resolveInput } from './fetch.js';
 import {
   storyboardToolSpec, zoomToolSpec, probeToolSpec, locateToolSpec, watchToolSpec,
@@ -200,6 +201,22 @@ async function registerAll(ctx) {
       if (args.stopLoop === true) return { text: JSON.stringify(stopWatchLoop('requested')), images: [] };
       // 只看钟的状态，不读进度、不出图 —— 排查"它为什么不说话"时用
       if (args.statusOnly === true) return { text: JSON.stringify(loopStatus()), images: [] };
+      // 立刻试一次唤醒，把结果原样报出来。这一条能 5 秒内回答"loop 到底叫不叫得醒我"。
+      if (args.testWake === true) {
+        const r = await wakeSession(ctx, {
+          sessionId: lastSessionId,
+          text: '[一起看] 这是一次唤醒连通性测试，收到就不用回复内容，回一句"收到"即可。',
+        });
+        return {
+          text: JSON.stringify({
+            sessionId: lastSessionId ?? null,
+            hasSessionController: Boolean(ctx?.sessionController),
+            hasPrompt: typeof ctx?.sessionController?.prompt === 'function',
+            ...r,
+          }),
+          images: [],
+        };
+      }
       if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
       // 批次表的默认值在这里定一次，工具和循环共用同一份（否则两边段边界会各算各的）
       const segment = Number(args.segment) > 0 ? Number(args.segment) : DEFAULT_SEGMENT;
