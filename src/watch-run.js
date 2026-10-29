@@ -16,7 +16,7 @@ import {
   sessionKey, WATCH_LEAD, WATCH_SEGMENT,
 } from './watch.js';
 import { describeLatency, recordLatency } from './latency.js';
-import { fileUrlToPath, readBrowserPosition } from './browser-time.js';
+import { configuredPort, fileUrlToPath, readBrowserPosition } from './browser-time.js';
 import { estimate, makeAnchor } from './position.js';
 import { resolvePlayingSource } from './resolve-playing.js';
 import { saveLines } from './watch.js';
@@ -94,7 +94,7 @@ export async function runWatchPass(args, deps) {
     saveImage, runStoryboard, formatManifest, cache = new Map(),
     probe = probePlayback,
     readBrowser = readBrowserPosition,
-    browserPort = (Number(process.env.DSH_BROWSER_DEBUG_PORT) || undefined),
+    browserPort = configuredPort() ?? undefined,
   } = deps;
   // 从"开始读进度"到"结果返回"的耗时 —— 这就是本机延迟的实测值，用来做提前量标定
   const tStart = Date.now();

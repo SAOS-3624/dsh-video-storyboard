@@ -22,6 +22,30 @@
 // （实测这台机器上 WorkBuddy 自己就占着 9222，盲连会读到它的界面）。
 const DEFAULT_PORT = 9333;
 
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+/**
+ * 从 `~/.dsh/video.json` 读端口配置。
+ *
+ * 为什么要文件而不是只认环境变量：DSH 桌面版的宿主进程 env 由启动器决定，
+ * 用户 `setx` 之后插件仍然读不到（这个坑今天已经踩过一次）。文件不依赖 env 传播。
+ *
+ *   { "browserPort": 9333 }
+ */
+export function configuredPort(env = process.env) {
+  const home = env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
+  try {
+    const cfg = JSON.parse(readFileSync(join(home, 'video.json'), 'utf8'));
+    const n = Number(cfg?.browserPort);
+    if (Number.isFinite(n) && n > 0) return n;
+    if (cfg?.browserPort === false || cfg?.browser === false) return null;
+  } catch { /* 没有配置文件就是没开 */ }
+  const fromEnv = Number(env.DSH_BROWSER_DEBUG_PORT);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : null;
+}
+
 /**
  * `file:///D:/a%20b.mp4` → `D:/a b.mp4`
  * 本地视频用浏览器打开时，页面地址就是这个视频的路径 —— 正好当 input 用，不必再问用户。

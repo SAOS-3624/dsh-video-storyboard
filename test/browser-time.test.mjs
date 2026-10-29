@@ -38,3 +38,24 @@ test('file:// 地址能还原成本地路径（本地视频用浏览器打开时
   assert.equal(fileUrlToPath(''), null);
   assert.equal(fileUrlToPath(null), null);
 });
+
+test('端口配置可以写在 ~/.dsh/video.json（桌面版读不到 setx 的 env）', async () => {
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { configuredPort } = await import('../src/browser-time.js');
+
+  const home = await mkdtemp(join(tmpdir(), 'vcfg-'));
+  try {
+    // 没有文件 + 没有 env → 没开
+    assert.equal(configuredPort({ DSH_HOME: home }), null);
+    // 文件里写了端口 → 用它
+    await writeFile(join(home, 'video.json'), JSON.stringify({ browserPort: 9444 }), 'utf8');
+    assert.equal(configuredPort({ DSH_HOME: home }), 9444);
+    // 显式关掉
+    await writeFile(join(home, 'video.json'), JSON.stringify({ browserPort: false }), 'utf8');
+    assert.equal(configuredPort({ DSH_HOME: home }), null);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});

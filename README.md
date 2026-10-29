@@ -228,10 +228,18 @@ SMTC 的刷新是稀疏的。浏览器里那个 `<video>.currentTime` 才是**�
   --remote-debugging-port=9333 --user-data-dir="%USERPROFILE%/.dsh/edge-watch"
 ```
 
-然后设环境变量（或 `video_watch({ browserPort: 9333 })`）：
+然后告诉插件端口 —— 三种写法任选（**桌面版读不到 `setx` 的环境变量，所以推荐写文件**）：
 
+```jsonc
+// ~/.dsh/video.json
+{ "browserPort": 9333 }
 ```
-DSH_BROWSER_DEBUG_PORT=9333
+
+```bash
+DSH_BROWSER_DEBUG_PORT=9333      # 或者环境变量
+```
+```js
+video_watch({ browserPort: 9333 })   // 或者单次传参
 ```
 
 > 端口别用 9222：那是 Chrome DevTools 的惯例端口，**WorkBuddy 自己就占着**（实测读到的会是它的界面）。

@@ -16,7 +16,7 @@ import {
   MAX_EXTRAPOLATE_MS, estimate, makeAnchor, shouldSpeak, updateAnchor,
 } from './position.js';
 import { startTicker, wakeSession } from './timer.js';
-import { readBrowserPosition } from './browser-time.js';
+import { configuredPort, readBrowserPosition } from './browser-time.js';
 import { consumeLine, loadLine, pickSession, probePlayback } from './watch.js';
 
 const mmss = (s) => `${String(Math.floor(Math.max(0, s) / 60)).padStart(2, '0')}:${String(Math.round(Math.max(0, s) % 60)).padStart(2, '0')}`;
@@ -101,7 +101,8 @@ export function startWatchLoop({
   // 浏览器里有 video 元素时，`currentTime` 是**毫秒级真值**，比 SMTC 的稀疏刷新可靠得多。
   // 拿不到（没开调试端口）就退回 SMTC，不报错。
   const readBrowser = deps.readBrowser ?? ((o) => readBrowserPosition(o));
-  const browserPort = deps.browserPort ?? (Number(process.env.DSH_BROWSER_DEBUG_PORT) || undefined);
+  // 端口来源：显式参数 → ~/.dsh/video.json → 环境变量（桌面版读不到 setx 的 env，所以文件优先）
+  const browserPort = deps.browserPort ?? configuredPort() ?? undefined;
   if (!sessionId) return { ok: false, reason: 'no-session-id' };
   if (!Array.isArray(segments) || segments.length === 0) return { ok: false, reason: 'no-segments' };
 
