@@ -18,9 +18,9 @@ import { createHash } from 'node:crypto';
 import { access, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 
-import { probeVideo } from './probe.js';
+import { DEFAULT_FFMPEG, probeVideo } from './probe.js';
 
 export const COOKIES_ENV = 'DSH_VIDEO_COOKIES';
 export const MEDIA_ENV = 'DSH_VIDEO_MEDIA_DIR';
@@ -367,9 +367,11 @@ export function formatSelector(height, { withAudio = true } = {}) {
   const cap = Number.isFinite(height) && height > 0 ? `[height<=${Math.round(height)}]` : '';
   // **优先渐进式单文件**（B 站的 `b`）：一个文件、不用合流，比 `bv*+ba` 快得多，也省一次落盘。
   // 渐进式最高一般只到 720p，但扫描只用 360p，够；拿不到再退回 DASH。
-  if (!cap) return withAudio ? 'bv*+ba/b' : 'bv*/b';
+  // B 站有些版本会把 video-only 的 mp4 也塞进 `b`，所以要求它必须带音轨；
+  // 拿不到就落到 `bv*+ba`（需要 ffmpeg 合流，fetchMedia 会把 DSH 的 ffmpeg 位置传给 yt-dlp）。
+  if (!cap) return withAudio ? 'bv*+ba/b[acodec!=none]' : 'bv*/b';
   return withAudio
-    ? `b${cap}/bv*${cap}+ba/b${cap}/bv*+ba/b`
+    ? `b${cap}[acodec!=none]/bv*${cap}+ba/b${cap}[acodec!=none]/bv*+ba/b`
     : `b${cap}/bv*${cap}/bv*/b`;
 }
 
@@ -464,6 +466,7 @@ async function freeBytes() {
  * @param {number} [opts.zoomHeight=1080]  只记录，供 zoom 用
  * @param {string} [opts.cookies]
  * @param {boolean} [opts.allowAnonymous=false]
+ * @param {string} [opts.ffmpegPath]  传给 yt-dlp 的 ffmpeg 路径（合流用）
  * @param {{bin:string,prefix:string[]}} [opts.ytdlp]  测试注入，正常走发现逻辑
  * @param {(p:object)=>void} [opts.onProgress]
  * @returns {Promise<{path:string, source:object}>}
@@ -474,6 +477,9 @@ export async function fetchMedia(input, opts = {}) {
     zoomHeight = 1080,
     cookies,
     allowAnonymous = false,
+    // yt-dlp 自己不会去 DSH 的 bin 目录找 ffmpeg；不告诉它路径时，DASH 的 `+ba` 合流
+    // 会静默失败，只留下 video.<id>.mp4 和 audio.<id>.m4a 两个文件。见 issue #18。
+    ffmpegPath = DEFAULT_FFMPEG,
     env = process.env,
     ytdlp,
     onProgress,
@@ -551,6 +557,8 @@ export async function fetchMedia(input, opts = {}) {
     '-f', formatSelector(scanHeight),
     // 按"短边"就近取：竖屏视频的 res 是宽（360/480/720），不是 height。
     ...(Number.isFinite(scanHeight) && scanHeight > 0 ? ['-S', `res:${Math.round(scanHeight)}`] : []),
+    // DSH 桌面版常把 ffmpeg 放在 $DSH_HOME/bin 而不进 PATH；yt-dlp 只认 PATH 或这个参数。
+    ...(isAbsolute(ffmpegPath) ? ['--ffmpeg-location', ffmpegPath] : []),
     '--no-warnings', '--no-playlist', '--no-progress',
     // 断点续传：网络抖了下次接着下，而不是从头再来
     '--continue',
@@ -631,10 +639,20 @@ export async function fetchMedia(input, opts = {}) {
   const sourceHasAudio = (summary.formats ?? []).some((f) => f.acodec && f.acodec !== 'none');
   const localInfo = await probeVideo(target).catch(() => null);
   const audioMissing = Boolean(localInfo && !localInfo.hasAudio && sourceHasAudio);
+  // 合流失败时 yt-dlp 会留下 video.<id>.mp4 + video.<id>.m4a 两个文件，而这里选了 mp4。
+  // 把原因记下来，清单才能说"装 ffmpeg"，而不是误导用户再去换 cookies。
+  const companionAudio = audioMissing
+    ? (await readdir(dir).catch(() => [])).filter((name) => {
+      if (!name.startsWith('video.') || /\.(part|ytdl|temp)$/i.test(name)) return false;
+      const ext = name.slice(name.lastIndexOf('.')).toLowerCase();
+      return AUDIO_EXTS.has(ext);
+    })
+    : [];
 
   const source = {
     kind: 'url',
     ...(audioMissing ? { audioMissing: true } : {}),
+    ...(audioMissing && companionAudio.length > 0 ? { audioMissingReason: 'unmerged-dash' } : {}),
     url,
     cached: false,
     bytes: st.size,

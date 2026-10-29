@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Bilibili DASH downloads no longer lose the audio track when ffmpeg is not on PATH.** `yt-dlp` only
+  searches PATH for ffmpeg; DSH desktop keeps ffmpeg in `$DSH_HOME/bin`, so the `bv*+ba` merge silently
+  produced a video-only mp4 beside an unmerged m4a. `fetchMedia` now passes the resolved ffmpeg path to
+  `yt-dlp` (`--ffmpeg-location`), and the combined selector requires an audio codec. If merging still
+  leaves a separate audio file, the manifest says to install ffmpeg/set `DSH_FFMPEG_PATH` instead of
+  suggesting cookies. Reported in #18.
+
 ## [0.4.4] — 2026-10-29
 
 ### Fixed
