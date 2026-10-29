@@ -16,7 +16,7 @@ import {
   MAX_EXTRAPOLATE_MS, estimate, makeAnchor, shouldSpeak, updateAnchor,
 } from './position.js';
 import { startTicker, wakeSession } from './timer.js';
-import { pickSession, probePlayback } from './watch.js';
+import { loadLine, pickSession, probePlayback } from './watch.js';
 
 const mmss = (s) => `${String(Math.floor(Math.max(0, s) / 60)).padStart(2, '0')}:${String(Math.round(Math.max(0, s) % 60)).padStart(2, '0')}`;
 
@@ -199,9 +199,13 @@ export function startWatchLoop({
 
       loop.spoken.push(r.segment);
       const seg = loop.segments.find((x) => x.from === r.segment);
-      const text = `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 这一段该说话了`
-        + `（用户大约看到 ${mmss(r.pos)}${r.confidence === 'extrapolated' ? '，按墙钟推算' : ''}）。`
-        + '调 video_watch 拿这一段的画面，然后只说一句。';
+      // 有预设台词就直接给稿子：省掉"现场想"的那 2–4 秒，也省一次看图的 token
+      const line = await loadLine(loop.input, r.segment).catch(() => null);
+      const head = `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 该说话了`
+        + `（用户大约看到 ${mmss(r.pos)}${r.confidence === 'extrapolated' ? '，按墙钟推算' : ''}）。`;
+      const text = line
+        ? `${head}\n你之前写好的那句：「${line}」\n直接说这句就行；觉得不对就调 video_watch 看一眼再改。`
+        : `${head}\n调 video_watch 拿这一段的画面，然后只说一句。`;
       const w = await wake(loop.ctx, { sessionId: loop.sessionId, text });
       loop.log(`[watch] wake ${r.segment}s (${r.confidence}) → ${w.ok ? 'ok' : w.reason}`);
     },

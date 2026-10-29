@@ -18,6 +18,7 @@ import {
 import { describeLatency, recordLatency } from './latency.js';
 import { estimate, makeAnchor } from './position.js';
 import { resolvePlayingSource } from './resolve-playing.js';
+import { saveLines } from './watch.js';
 
 // 模块级：latencyNote() 需要知道"这一轮从什么时候开始"
 let tStartForNote = Date.now();
@@ -186,6 +187,12 @@ export async function runWatchPass(args, deps) {
   const d = deliveryState({ cursor, segment: segStart, size, lead });
   const key = `${sessionKey(input)}|${segStart}`;
 
+  // ---- 1.5 预设台词：传了就存，到点由循环直接念
+  if (Array.isArray(args.lines) && args.lines.length > 0) {
+    const n = await saveLines(input, args.lines).catch(() => 0);
+    if (n > 0) note += ` · saved ${n} line(s)`;
+  }
+
   // ---- 2. 预取这一段
   let entry = cache.get(key);
   let builtMs = 0;
@@ -202,6 +209,12 @@ export async function runWatchPass(args, deps) {
   // 提前一段建好，到点时那次调用就是命中了。
   const nextStart = segStart + size;
   const inRange = !Number.isFinite(activeSession?.dur) || nextStart < activeSession.dur;
+  // 预取完顺手提示：想让它"到点立刻开口"，现在就把那句写好
+  const nextHint = (args.prefetch === false || !inRange)
+    ? ''
+    : `\n[next] ${mmss(nextStart)}–${mmss(nextStart + size)} already prefetched. `
+      + 'To make it speak the instant it is due, write the line now: '
+      + `video_watch({ input, lines: [{ from: ${nextStart}, text: "…" }] })`;
   if (args.prefetch !== false && inRange) {
     // 延后一拍再建：先把这个响应交出去，别让后台活挡住用户这一眼
     setTimeout(() => {
@@ -233,7 +246,7 @@ export async function runWatchPass(args, deps) {
       measuredAt,
       segment: segStart,
       text: `${head}\nnot yet — keep watching. I will speak near ${mmss(segStart + size - lead)}.`
-        + await latencyNote(),
+        + await latencyNote() + nextHint,
       images: [],
     };
   }
@@ -287,7 +300,7 @@ export async function runWatchPass(args, deps) {
     cursor,
     measuredAt,
     segment: segStart,
-    text: `${head}\n${guidance}${await latencyNote()}\n\n${entry.manifest}`,
+    text: `${head}\n${guidance}${await latencyNote()}${nextHint}\n\n${entry.manifest}`,
     images,
   };
 }

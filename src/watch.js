@@ -164,3 +164,36 @@ export function deliveryState({ cursor, segment, size = WATCH_SEGMENT, lead = WA
     overdue: remaining <= 0,
   };
 }
+
+/* ------------------------------------------------------------ 预设台词 */
+
+/**
+ * 预设台词：agent 提前写好"这一段该说的一句"，到点直接念，不用现场想。
+ *
+ * 为什么存在：预取解决了"建图的十秒"，但"想说什么"还要模型跑一轮（2–4 秒）。
+ * 提前写好就没有这一段延迟，而且**窗口只有 5 分钟**——中途不看了最多白写 2–3 段。
+ */
+export async function saveLines(input, lines, { env = process.env } = {}) {
+  if (!Array.isArray(lines) || lines.length === 0) return 0;
+  const st = await loadWatch(env);
+  const sk = sessionKey(input);
+  const prev = st[sk]?.lines ?? {};
+  let n = 0;
+  for (const l of lines) {
+    const from = Number(l?.from);
+    const text = String(l?.text ?? '').trim();
+    if (!Number.isFinite(from) || !text) continue;
+    prev[from] = { text: text.slice(0, 300), at: Date.now() };
+    n += 1;
+  }
+  st[sk] = { ...(st[sk] ?? {}), lines: prev, at: Date.now() };
+  await saveWatch(st, env);
+  return n;
+}
+
+/** 取某一段的预设台词（没有就 null） */
+export async function loadLine(input, from, { env = process.env } = {}) {
+  const st = await loadWatch(env);
+  const hit = st[sessionKey(input)]?.lines?.[Number(from)];
+  return hit?.text ?? null;
+}

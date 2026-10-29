@@ -532,6 +532,17 @@ export function watchToolSpec() {
         description: 'Return the loop state only (position, confidence, why it did or did not speak) without '
           + 'reading the video. Use it when you need to know why it went quiet.',
       },
+      lines: {
+        type: 'array',
+        items: { type: 'json' },
+        description: 'Pre-written lines: [{ from: <segment start in seconds>, text: "<one sentence>" }]. '
+          + 'The background loop reads the line out when that segment becomes due, so nothing has to be '
+          + 'generated at that moment. Only write them for the prefetched window (default 5 minutes).',
+      },
+      prefetch: {
+        type: 'boolean',
+        description: 'Build the next segment in the background (default true). Set false to save CPU.',
+      },
       lookahead: {
         type: 'number',
         description: 'How many seconds ahead to schedule, in seconds (default 300 = 5 minutes). '
