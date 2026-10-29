@@ -29,7 +29,7 @@ test('wait: true 会一直等到交付点再返回', async () => {
   process.env.DSH_VIDEO_CACHE_DIR = dir;
   try {
     let pos = 100;                      // 段 0–120、lead 15 → 105 就该说
-    const ticking = setInterval(() => { pos += 1; }, 200);   // 模拟播放推进
+    const ticking = setInterval(() => { pos += 3; }, 200);   // 模拟播放推进（步长给大点，别受机器负载影响）
     const t0 = Date.now();
     const r = await runWatchPass({ input: 'a.mp4', wait: true, maxWaitSec: 20, segment: 120, lead: 15 }, deps(() => pos));
     clearInterval(ticking);
