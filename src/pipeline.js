@@ -25,8 +25,8 @@ import { findBursts, planCellRanges } from './density.js';
 import { describeMemory, remember } from './memory.js';
 import { analyzeAudio, describeAudio, detectOnsets } from './audio.js';
 import {
-  ASR_DEFAULTS, alignCells, applyTermMap, describeAsrTarget, explainFetchError, extractSubtitleTrack,
-  filterSuspectSegments, resolveAsrConfig, speechCurve, transcribeLong,
+  ASR_DEFAULTS, alignCells, applyTermMap, canTranscribe, describeAsrTarget, explainFetchError,
+  extractSubtitleTrack, filterSuspectSegments, resolveAsrConfig, speechCurve, transcribeLong,
 } from './asr.js';
 import { detectSubtitleBand, OCR_MAX_ITEMS, ocrPython, readBand, shouldReplace } from './ocr.js';
 import { cacheKey, pruneCache, withCache } from './cache.js';
@@ -116,6 +116,9 @@ export async function runStoryboard(opts) {
     hotwords,
     // 用画面硬字幕校正 ASR（detail=high 时才开）：OCR 全程本地，不花 token
     ocr = false,
+    // undefined = 按 env / $DSH_HOME/asr.json 解析；显式 null = 明确不用 env/file 里的 key
+    // （云端因此变成 no-key；本机服务按设计不需要 key，仍会尝试。要彻底关掉转写用 transcript:'off'）
+    asrKey,
     cache = true,
     textOnly = false,
     precomputed = null,
@@ -179,6 +182,9 @@ export async function runStoryboard(opts) {
   // 转写在**扫描的同时**跑：它只依赖音频静音位置，不依赖切点。
   // 21 分钟教程实测：扫描 133s、转写 58s，串起来 202s；并行后只等较慢的那个。
   const transcriptP = (async () => {
+    // 这次调用到底会不会真的转写：云端没配 key 只是"跳过"的其中一种，本机服务不需要 key。
+    // 判据必须和 `transcribe()` 的门同源（见 asr.js 的 canTranscribe），否则清单会和实际行为相反。
+    const willTranscribe = () => canTranscribe(resolveAsrConfig(), asrKey);
     let transcriptInfo = null;
     if (transcriptFile) {
       // 显式给了转写就只用它：不查字幕轨、不跑 ASR。
@@ -208,11 +214,16 @@ export async function runStoryboard(opts) {
         : null;
       if (subtitle) {
         transcriptInfo = { segments: subtitle, source: 'subtitle', model: 'embedded' };
+      } else if (!willTranscribe()) {
+        // 压根不会转写（云端没配 key）—— 跟"跑了但没听懂"是两码事。
+        // 旧代码走的是 withCache → null 空壳 → asr.empty → 'asr-empty'，清单于是写
+        // "ASR ran and found no speech here"，一个字都没听过却说"这片子没人说话"。
+        transcriptInfo = { segments: [], source: 'no-key' };
       } else {
         try {
           // 切片调用：单次请求过长会让时间码整体压早（实测 299s 压早 13s）。
           // 结果按 (文件, 窗口, 后端, 切片长度) 缓存 —— 否则 textOnly 分页每翻一页都要重跑 ASR。
-          const asrKey = await cacheKey({
+          const asrCacheKey = await cacheKey({
             input, start: winStart, end: winStart + winDur,
             threshold: `asr|${ASR_DEFAULTS.baseUrl}|${ASR_DEFAULTS.model}|${asrMaxChunk}|${transcript}|${hotwords ?? ''}`,
           });
@@ -220,9 +231,10 @@ export async function runStoryboard(opts) {
           const asrCfg = resolveAsrConfig();
           asrLife = await ensureAsr({ baseUrl: asrCfg.baseUrl, config: asrCfg, spawnImpl: spawn })
             .catch((e) => { if (process.env.DSH_ASR_DEBUG) console.error('[asr-lifecycle]', e.message); return null; });
-          const asr = await withCache(asrKey, () => transcribeLong({
+          const asr = await withCache(asrCacheKey, () => transcribeLong({
             input, ffmpegPath, start: winStart, end: winStart + winDur,
-            silences, maxChunk: asrMaxChunk,
+            // apiKey 必须传：否则关掉 ASR 只能靠"没 key"，而本机服务不需要 key
+            silences, maxChunk: asrMaxChunk, apiKey: asrKey,
             ...(hotwords !== undefined ? { hotwords } : {}),
           }), { enabled: cache });
           if (asr) {
@@ -233,7 +245,8 @@ export async function runStoryboard(opts) {
             transcriptInfo = {
               ...(replaced > 0 ? { termsFixed: replaced } : {}),
               ...asr,
-              // 空结果（没配 key / 整片纯音乐）不该自称 asr —— 见 PR #3
+              // 空结果（整片纯音乐 / 服务在跑但没听到话）不该自称 asr —— 见 PR #3。
+              // "没配 key 所以没跑" 已经在上面被 willTranscribe() 分流成 no-key，走不到这里。
               source: asr.empty || fixed.length === 0 ? 'asr-empty' : 'asr',
               segments: fixed,
               suspect: dropped.length,
@@ -1022,6 +1035,14 @@ export async function formatProbe(info) {
 
   if (!info.hasAudio) lines.push('no audio track: transcript will be empty, the grid is visual only.');
   else if (!info.hasSubtitle) lines.push('no subtitle track: transcript (if any) must come from ASR.');
+  // 有内嵌字幕轨就不用 ASR（免费又最准），没音轨更没得转 —— 这两种情况都不必提 ASR 能不能跑。
+  const asrCfg = resolveAsrConfig();
+  if (info.hasAudio && !info.hasSubtitle && !canTranscribe(asrCfg)) {
+    lines.push(`transcription is OFF: this ASR backend needs a key and none is configured ` +
+      `(baseUrl ${asrCfg.baseUrl}). The storyboard will label the transcript as NOT attempted ` +
+      'instead of claiming the video has no speech. Set the key (docs/SETUP.zh.md), point baseUrl at a ' +
+      'local service, or pass transcriptFile.');
+  }
   return lines.join('\n');
 }
 
@@ -1342,6 +1363,12 @@ export function formatManifest(result, {
   }
   if (result.transcript?.source === 'asr-failed') {
     lines.push(`transcript unavailable: ${result.transcript.error ?? 'ASR call failed'}`);
+  }
+  if (result.transcript?.source === 'no-key') {
+    lines.push(`transcript: NOT attempted — this ASR backend needs a key and none is configured, so ` +
+      'nothing was listened to. This is neither "no dialogue" nor a subtitle-track failure. Set the key ' +
+      '(docs/SETUP.zh.md), point baseUrl at a local service (no key needed), or pass transcriptFile / use ' +
+      'a video with an embedded subtitle track.');
   }
   if (result.transcript?.source === 'asr-empty') {
     lines.push('transcript: ASR ran and found no speech here — treat this as a video with no dialogue ' +

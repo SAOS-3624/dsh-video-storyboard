@@ -110,7 +110,7 @@ POST /shutdown                  → 返回后退出（不支持也行，插件�
 | 现象 | 多半是什么 | 怎么办 |
 |---|---|---|
 | `asr-failed · ECONNREFUSED` | 服务没起来 | 看 `manage.start` 是否写成了 `.py`（现已自动补解释器）、端口是否被占 |
-| 转写空白但视频有说话 | 热词/模型不对，或确实没人说话 | 先看清单是 `asr-empty` 还是 `asr-failed`，两者含义不同 |
+| 转写空白但视频有说话 | 热词/模型不对，或确实没人说话 | 先看清单是 `no-key` / `asr-empty` / `asr-failed`：`no-key` = 没跑（配 key 或本机服务），`asr-empty` = 跑了但没听到话，`asr-failed` = 请求失败 |
 | `HTTP Error 567` | B 站风控（常伴"要登录"） | 导出 cookies.txt，或直接喂本地文件 |
 | 说有 1080p 却只给 480p | cookies 过期会**降低**可见清晰度 | 插件会自动改探匿名并提示你重导 |
 | 清单写 `!! NEEDS LOGIN` | 站点把字幕藏在登录后面 | 给 cookies；给不了就明说，不要从画面猜台词 |
