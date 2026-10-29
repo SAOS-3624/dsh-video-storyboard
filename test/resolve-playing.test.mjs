@@ -51,3 +51,16 @@ test('findLocalByTitle: 标题太短（<4 字）不搜，避免乱认', async ()
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('找不到时给原因，不是笼统的 null', async () => {
+  const { resolvePlayingSource, findBilibiliByTitle } = await import('../src/resolve-playing.js');
+  // 标题太短：不该去搜，直接说原因
+  const r = await findBilibiliByTitle('短片', 100);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'title-too-short');
+
+  // 整条链路：本地找不到 + B 站搜不了 → kind:'failed' 且带 reason
+  const whole = await resolvePlayingSource({ title: 'ab', duration: 100 });
+  assert.equal(whole.kind, 'failed');
+  assert.ok(typeof whole.reason === 'string' && whole.reason.length > 0);
+});

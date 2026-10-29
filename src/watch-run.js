@@ -135,7 +135,7 @@ export async function runWatchPass(args, deps) {
       resolved = { input: cachedInput, matchedBy: 'remembered' };
     } else {
       resolved = await resolvePlayingSource({ title: activeSession.title, duration: activeSession.dur });
-      if (resolved) {
+      if (resolved?.kind !== 'failed') {
         stateEarly.sources = {
           ...(stateEarly.sources ?? {}),
           [titleKey(activeSession.title)]: resolved.input,
@@ -143,13 +143,27 @@ export async function runWatchPass(args, deps) {
         await saveWatch(stateEarly);
       }
     }
-    if (!resolved) {
+    if (resolved?.kind === 'failed') {
+      // **不同的失败原因要说不同的话**：被限流和"不是 B 站"对用户是两件事，
+      // 都归成"没搜到"会让人以为工具坏了（实际是它在猜一个猜不到的源）。
+      const why = {
+        'search-blocked': 'the Bilibili search endpoint is rate-limiting me right now (412 / captcha), '
+          + 'so this is not "no such video", it is "I could not look".',
+        'no-match': 'nothing on Bilibili matches that title *and* duration, so this is most likely not a '
+          + 'Bilibili source (Douyin / WeChat Channels / YouTube look exactly like this from the outside).',
+        'no-ytdlp': 'yt-dlp is not available, so I cannot search or fetch anything by myself.',
+        'title-too-short': 'the title is too short to search for anything meaningful.',
+        'search-failed': 'the Bilibili search failed for an unknown reason.',
+      }[resolved.reason] ?? `resolution failed (${resolved.reason}).`;
       return {
         ok: false,
-        text: `you are watching "${activeSession.title}" (${Math.round(activeSession.dur)}s), but I could not`
-          + ' find the source: no local file with that name, and the Bilibili search did not turn up a match'
-          + ' with the same duration.\nSend me the link or the file path once — I will remember it for this'
-          + ' title and stop asking.',
+        reason: resolved.reason,
+        text: `you are watching "${activeSession.title}" (${Math.round(activeSession.dur)}s).\n`
+          + `${why}\n\n`
+          + 'Two ways forward, either is fine://n'
+          + '  1. paste the link or the file path — I remember it per title and stop asking;\n'
+          + '  2. start the browser with --remote-debugging-port=9222 and set DSH_BROWSER_DEBUG_PORT=9222 — '
+          + 'then I read the page URL directly and never have to guess.',
         images: [],
       };
     }

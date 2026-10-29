@@ -73,29 +73,39 @@ export async function findLocalByTitle(title, { env = process.env, maxFiles = 40
  */
 export async function findBilibiliByTitle(title, duration, { env = process.env, timeoutMs = 90_000 } = {}) {
   const q = cleanTitle(title);
-  if (!q || q.length < 4) return null;
+  if (!q || q.length < 4) return { ok: false, reason: 'title-too-short' };
   let tool;
   try {
     tool = await discoverYtdlp({ env });
   } catch {
-    return null;
+    return { ok: false, reason: 'no-ytdlp' };
   }
+  // 区分"被限流"和"真没这条"：前者换方式拿链接就行，后者说明不是 B 站源。
+  // B 站对搜索接口会直接 412 / 弹验证码，一律当成"没搜到"会误导用户。
+  let blocked = false;
   const run = (args, ms) => new Promise((resolve) => {
     execFile(tool.bin, [...(tool.prefix ?? []), ...args], { timeout: ms, maxBuffer: 8 << 20 },
-      (err, stdout) => resolve(err ? null : String(stdout ?? '')));
+      (err, stdout, stderr) => {
+        if (err) {
+          const msg = `${stderr ?? ''} ${err?.message ?? ''}`;
+          if (/41[23]|banned|captcha|risk/i.test(msg)) blocked = true;
+          return resolve(null);
+        }
+        resolve(String(stdout ?? ''));
+      });
   });
 
   // 不能加 --flat-playlist：那样连标题都没有，等于没法筛
   const listOut = await run(['--no-warnings', '-J', '--playlist-end', '5', `bilisearch5:${q}`], timeoutMs);
-  if (!listOut) return null;
+  if (!listOut) return { ok: false, reason: blocked ? 'search-blocked' : 'search-failed' };
   let list;
   try {
     list = JSON.parse(listOut);
   } catch {
-    return null;
+    return { ok: false, reason: 'search-failed' };
   }
   const entries = (list?.entries ?? []).filter((e) => e && (e.url || e.webpage_url || e.id));
-  if (entries.length === 0) return null;
+  if (entries.length === 0) return { ok: false, reason: blocked ? 'search-blocked' : 'no-match' };
 
   const key = norm(q).slice(0, 10);
   const ranked = entries
@@ -122,17 +132,22 @@ export async function findBilibiliByTitle(title, duration, { env = process.env, 
     }
     const dur = Number(one?.duration) || 0;
     if (Number.isFinite(want) && want > 0 && Math.abs(dur - want) <= 3) {
-      return { url: one.webpage_url ?? url, title: one.title ?? '', duration: dur };
+      return { ok: true, url: one.webpage_url ?? url, title: one.title ?? '', duration: dur };
     }
   }
-  return null;
+  return { ok: false, reason: blocked ? 'search-blocked' : 'no-match' };
 }
 
-/** 先本地、再 B 站。找不到就 null，由上层去问用户。 */
+/**
+ * 先本地、再 B 站。找不到时**带上原因**，别只说"没找到"——
+ * "被限流"和"根本不是 B 站"对用户来说是完全不同的两件事。
+ */
 export async function resolvePlayingSource({ title, duration, env = process.env } = {}) {
   const local = await findLocalByTitle(title, { env });
   if (local) return { kind: 'local', input: local, matchedBy: 'filename' };
   const remote = await findBilibiliByTitle(title, duration, { env });
-  if (remote) return { kind: 'url', input: remote.url, matchedBy: 'title+duration', title: remote.title };
-  return null;
+  if (remote?.ok) {
+    return { kind: 'url', input: remote.url, matchedBy: 'title+duration', title: remote.title };
+  }
+  return { kind: 'failed', reason: remote?.reason ?? 'no-match', title, duration };
 }
