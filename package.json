@@ -60,7 +60,8 @@
     "test": "node --test",
     "prepublishOnly": "npm test",
     "check": "node scripts/check-syntax.mjs",
-    "sim": "node scripts/watch-sim.mjs"
+    "sim": "node scripts/watch-sim.mjs",
+    "e2e": "node scripts/watch-e2e.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.7"
