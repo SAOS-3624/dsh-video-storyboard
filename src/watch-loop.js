@@ -16,7 +16,8 @@ import {
   MAX_EXTRAPOLATE_MS, estimate, makeAnchor, shouldSpeak, updateAnchor,
 } from './position.js';
 import { startTicker, wakeSession } from './timer.js';
-import { loadLine, pickSession, probePlayback } from './watch.js';
+import { readBrowserPosition } from './browser-time.js';
+import { consumeLine, loadLine, pickSession, probePlayback } from './watch.js';
 
 const mmss = (s) => `${String(Math.floor(Math.max(0, s) / 60)).padStart(2, '0')}:${String(Math.round(Math.max(0, s) % 60)).padStart(2, '0')}`;
 
@@ -97,6 +98,10 @@ export function startWatchLoop({
   // 但仿真用倍速跑，倍速越高越要读得勤，否则一整段会在两次采样之间被跳过。
   const probeEveryMs = deps.probeEveryMs ?? PROBE_EVERY_MS;
   const build = deps.build ?? null;
+  // 浏览器里有 video 元素时，`currentTime` 是**毫秒级真值**，比 SMTC 的稀疏刷新可靠得多。
+  // 拿不到（没开调试端口）就退回 SMTC，不报错。
+  const readBrowser = deps.readBrowser ?? ((o) => readBrowserPosition(o));
+  const browserPort = deps.browserPort ?? (Number(process.env.DSH_BROWSER_DEBUG_PORT) || undefined);
   if (!sessionId) return { ok: false, reason: 'no-session-id' };
   if (!Array.isArray(segments) || segments.length === 0) return { ok: false, reason: 'no-segments' };
 
@@ -142,29 +147,45 @@ export function startWatchLoop({
 
       if (tNow - loop.lastProbeAt >= probeEveryMs) {
         loop.lastProbeAt = tNow;
-        const p = await probe();
-        const s = p.ok ? pickSession(p.sessions ?? [], { input: loop.input }) : null;
-        if (s) {
-          if (loop.anchor) {
-            const { anchor, driftSec, refreshed, changedVideo } = updateAnchor(loop.anchor, s, tNow);
-            if (changedVideo) {
-              stopWatchLoop('video-changed');
-              return;
-            }
-            if (refreshed && Math.abs(driftSec) > 5) {
-              // 刷新给出的真值和我们的外推差得多：中间暂停/缓冲过。
-              // 不惩罚，只是用新锚点重算。
-              loop.log(`[watch] re-anchored, drift ${driftSec}s`);
-            }
+        // 1) 先问浏览器（准，但**必须显式开端口**）　2) 再问 SMTC（旧但能用）
+        // 不默认读：这台机器上 WorkBuddy 自己就占着 9222，盲读会读到它的界面元素。
+        const b = browserPort
+          ? await readBrowser({ port: browserPort }).catch(() => null)
+          : null;
+        if (b) {
+          loop.anchor = makeAnchor({
+            pos: b.pos, dur: b.dur, status: b.paused ? 5 : 4,
+            // 浏览器是刚读的，所以永远算"新鲜"
+            updated: Date.now(), title: b.title,
+          }, tNow);
+          loop.status = b.paused ? 'paused' : 'playing';
+          if (Number.isFinite(b.dur)) loop.dur = b.dur;
+          if (b.url) loop.sourceUrl = b.url;
+          loop.positionSource = 'browser';
+        } else {
+          loop.positionSource = 'smtc';
+          const p = await probe();
+          const sg = p.ok ? pickSession(p.sessions ?? [], { input: loop.input }) : null;
+          if (sg) {
+            if (loop.anchor) {
+              const { anchor, driftSec, refreshed, changedVideo } = updateAnchor(loop.anchor, sg, tNow);
+              if (changedVideo) {
+                stopWatchLoop('video-changed');
+                return;
+              }
+              if (refreshed && Math.abs(driftSec) > 5) {
+                // 刷新给出的真值和我们的外推差得多：中间暂停/缓冲过。不惩罚，用新锚点重算。
+                loop.log(`[watch] re-anchored, drift ${driftSec}s`);
+              }
               loop.anchor = anchor;
-            if (Number.isFinite(s.dur)) loop.dur = s.dur;
-          } else {
-            loop.anchor = makeAnchor(s, tNow);
-            if (Number.isFinite(s.dur)) loop.dur = s.dur;
+            } else {
+              loop.anchor = makeAnchor(sg, tNow);
+            }
+            if (Number.isFinite(sg.dur)) loop.dur = sg.dur;
           }
-          const st = await readLatency();
-          loop.aheadSec = aheadSeconds(st);
         }
+        const st = await readLatency();
+        loop.aheadSec = aheadSeconds(st);
       }
 
       if (!loop.anchor) {
@@ -253,7 +274,8 @@ export function startWatchLoop({
       loop.spoken.push(r.segment);
       const seg = loop.segments.find((x) => x.from === r.segment);
       // 有预设台词就直接给稿子：省掉"现场想"的那 2–4 秒，也省一次看图的 token
-      const line = await loadLine(loop.input, r.segment).catch(() => null);
+      // **念完就删**：取和删放一起，避免"取到了但没删"导致重看时同一句说两遍
+      const line = await consumeLine(loop.input, r.segment).catch(() => loadLine(loop.input, r.segment).catch(() => null));
       const head = `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 该说话了`
         + `（用户大约看到 ${mmss(r.pos)}${r.confidence === 'extrapolated' ? '，按墙钟推算' : ''}）。`;
       const text = line
