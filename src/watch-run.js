@@ -22,7 +22,7 @@ import {
 } from './browser-time.js';
 import { estimate, makeAnchor } from './position.js';
 import { resolvePlayingSource } from './resolve-playing.js';
-import { saveLines } from './watch.js';
+import { consumeLine, hasLine, saveLines } from './watch.js';
 
 // 模块级：latencyNote() 需要知道"这一轮从什么时候开始"
 let tStartForNote = Date.now();
@@ -79,8 +79,12 @@ async function buildSegment({ input, segStart, size, args, runStoryboard, format
     // 陪看是持续调用：让本地 ASR 活过整段，别每段都冷启动一次（实测每段多 5 s）
     asrIdleMs: size * 1000 + 30_000,
     adaptive: false,
-    cookies: args.cookies,
-    allowAnonymous: args.allowAnonymous === true,
+    // **cookies 必须塞进 fetchOptions**：runStoryboard 没有顶层 cookies 参数，
+    // 传顶层等于没传 —— 实测表现为 auth: 'anonymous'、只能拿 360p、也没有站点字幕。
+    fetchOptions: {
+      ...(args.cookies ? { cookies: args.cookies } : {}),
+      ...(args.allowAnonymous === true ? { allowAnonymous: true } : {}),
+    },
   });
   const entry = {
     png: r.sheets?.[0]?.png ?? null,
@@ -249,6 +253,121 @@ export async function runWatchPass(args, deps) {
     }
   }
 
+  // 已经交付过的段：wait 模式不能把同一段反复交出来
+  const state0 = await loadWatch();
+  const sk0 = sessionKey(input);
+  const lastDelivered = Number(state0[sk0]?.lastDelivered);
+  let deliveredNow = null;
+
+  // ---- 0.4 两种"阻塞到条件成立"的等待（模型侧的节奏由它自己掌握）
+  //
+  // 用户描述的模型循环：
+  //   看视频 → 写台词 → （可选）阻塞到某个时间点核对进度 → 阻塞到"上一段余量用完" → 再看视频 …
+  //
+  // 这两种等待都不是定时器，而是**条件**：
+  //   waitUntil    : 等到播放进度到某个秒数（用来在下一段之前核对时间）
+  //   waitForRefill: 等到台词库存低于 refillBelow 段（用来知道"该看下一段了"）
+  if (args.waitUntil !== undefined || args.waitForRefill === true) {
+    const capSec = Math.min(900, Math.max(5, Number(args.maxWaitSec) || 300));
+    const deadline = Date.now() + capSec * 1000;
+    const below = Math.max(1, Number(args.refillBelow) || 2);
+    let last = null;
+    while (Date.now() < deadline) {
+      // eslint-disable-next-line no-await-in-loop
+      const b = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
+      last = b?.pos ?? null;
+      if (b?.ended) break;
+      if (b?.paused) break;
+
+      if (args.waitForRefill === true && last !== null) {
+        const idx = plan.indexAt(last);
+        let stocked = 0;
+        for (let i = idx + 1; i <= idx + below; i += 1) {
+          const seg = plan.from(i, 1)[0];
+          if (!seg) break;
+          // eslint-disable-next-line no-await-in-loop
+          if (await hasLine(input, seg.from).catch(() => false)) stocked += 1;
+        }
+        if (stocked < below) {
+          const missing = plan.from(idx + 1, below).filter((x) => x);
+          return {
+            ok: true, reason: 'refill-needed', at: last,
+            text: `库存不足（现在 ${mmss(last)}）：${missing.map((m) => `${mmss(m.from)}–${mmss(m.to)}`).join('、')}`
+              + '\n去看画面，用 lines: [...] 补上。',
+            images: [],
+          };
+        }
+      }
+
+      if (Number.isFinite(Number(args.waitUntil)) && last !== null && last >= Number(args.waitUntil)) {
+        return {
+          ok: true, reason: 'reached', at: last,
+          text: `到 ${mmss(last)} 了（目标 ${mmss(Number(args.waitUntil))}）。`,
+          images: [],
+        };
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    return {
+      ok: true, reason: 'wait-timeout', at: last,
+      text: `等到封顶（${capSec}s）也没等到条件成立，现在 ${last !== null ? mmss(last) : '读不到位置'}。`,
+      images: [],
+    };
+  }
+
+  // ---- 0.5 逐句模式（nextLine）
+  // 一次调用只返回**一句**台词，并且阻塞到该说这句的时刻。
+  // 这样每次工具返回 = 一条真实消息，会话里能看见"它到点说了一句"，
+  // 而不是一口气把六句打印出来（那是脚本，不像陪看）。
+  if (args.nextLine === true) {
+    const everySec = Math.min(300, Math.max(3, Number(args.everySec) || 10));
+    const st = await loadWatch();
+    const key = sessionKey(input);
+    const lastAt = Number(st[key]?.lastLineAt) || 0;
+    const due = lastAt + everySec * 1000;
+    let waited = 0;
+    // 阻塞到点；中途暂停/视频结束就提前返回，让模型能说话
+    while (Date.now() < due) {
+      await new Promise((r) => setTimeout(r, 1000));
+      waited += 1;
+      const b = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
+      if (b?.paused) break;
+      if (b?.ended) break;
+      if (waited > 600) break;
+    }
+    const b = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
+    const pos = b?.pos ?? null;
+    const plan2 = plan;
+    const seg = pos !== null ? plan2.segmentAt(pos) : { from: 0, to: 0 };
+    const line = await consumeLine(input, seg.from).catch(() => null);
+
+    // **必须重新读一次状态再写**：consumeLine 内部已经保存过（把队列推进了一格），
+    // 如果拿上面那份旧 st 覆盖回去，队列会退回原样 —— 表现就是同一句被反复返回。
+    const st2 = await loadWatch();
+    st2[key] = { ...(st2[key] ?? {}), lastLineAt: Date.now(), at: Date.now() };
+    await saveWatch(st2).catch(() => {});
+
+    if (!line) {
+      return {
+        ok: true,
+        speaking: false,
+        reason: 'no-line',
+        text: `[${pos !== null ? mmss(pos) : '??:??'}] （这一段没有预设台词了）`
+          + '\nLook at the picture with speakNow: true and say one sentence of your own, '
+          + 'or write the next lines with lines: [...]',
+        images: [],
+      };
+    }
+    return {
+      ok: true,
+      speaking: true,
+      at: pos,
+      text: `[${pos !== null ? mmss(pos) : '??:??'}] ${line}`,
+      images: [],
+    };
+  }
+
   // ---- 1. 播放位置
   // 用户很可能直接说"12:30"，数字里带冒号解析成 NaN 就白跑一次探测，这里先认一下
   const parseCursor = (v) => {
@@ -401,7 +520,9 @@ export async function runWatchPass(args, deps) {
         cursor = posNow;
         waitedSec = +(waitedSec + 2).toFixed(1);
         const nd = deliveryState({ cursor, segment: segStart, size, lead });
-        if (nd.due) {
+        // 同一段已经交过一次就别再交：用户刚看完 00:00–01:00，
+        // 再等到 00:59 把同一段塞给他一次，看起来像卡住了。
+        if (nd.due && segStart !== lastDelivered) {
           d.due = true;
           d.remaining = nd.remaining;
           break;
@@ -414,6 +535,13 @@ export async function runWatchPass(args, deps) {
     }
   }
 
+  deliveredNow = segStart;
+  // 记下来，下次 wait 就不会把同一段再交一次
+  {
+    const stD = await loadWatch();
+    stD[sk0] = { ...(stD[sk0] ?? {}), lastDelivered: segStart, at: Date.now() };
+    await saveWatch(stD).catch(() => {});
+  }
   const waitNote = waitedSec > 0 ? ` · waited ${waitedSec}s` : '';
 
   // ---- 3. 还没到交付点：保持安静
@@ -470,7 +598,8 @@ export async function runWatchPass(args, deps) {
     'They watched it themselves — do NOT retell the plot.',
     'Default: one sentence about what changed or what is worth noticing, then stop.',
     'Say more only if they ask, or if something genuinely deserves one callout.',
-    'If nothing is worth saying, say almost nothing.',
+    'If nothing is worth saying, say almost nothing — silence is a valid answer,',
+    'and so is watching two segments without commenting at all. There is no quota to fill.',
   ].join('\n');
 
   return {
@@ -484,6 +613,7 @@ export async function runWatchPass(args, deps) {
     measuredAt,
     segment: segStart,
     text: `${head}${waitNote}\n${guidance}${await latencyNote()}${nextHint}\n\n${entry.manifest}`,
+    segment: deliveredNow,
     images,
   };
 }

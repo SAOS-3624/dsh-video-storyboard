@@ -496,8 +496,12 @@ export function watchToolSpec() {
       'PotPlayer / Movies & TV and for browser playback, without any player plugin. If it cannot be read, pass ',
       'cursor yourself — do not guess.',
       '',
-      'Typical use: video_watch({ input }) every ~20s. When it returns an image, say at most one sentence about ',
-      'what changed; do not retell the plot the user just watched.',
+      'Simplest loop (no scripts, no line library):',
+      '  video_watch({ wait: true })  // blocks until the current segment is nearly over, then returns the image',
+      '  -> say something, or say nothing, then call it again. That is the whole thing.',
+      '',
+      'When it returns an image, say at most one sentence about what changed; do not retell the plot the user ',
+      'just watched. Silence is a valid answer - there is no quota.',
     ].join('\n'),
     // 宿主的 parameters 是**扁平 DSL**：每个字段一项，required 写在字段上，不是 JSON Schema 外壳
     parameters: {
@@ -535,6 +539,62 @@ export function watchToolSpec() {
         type: 'boolean',
         description: 'Stop the background watch loop (it wakes the session on its own). Idempotent.',
       },
+      tts: {
+        type: 'boolean',
+        description: 'Let the SCRIPT read the pre-written lines out loud at the right moment, without waking '
+          + 'the model at all. Timing and delivery cost zero tokens; you only speak when you have something of '
+          + 'your own to add. This is the cheap mode: lines by TTS, observations by you.',
+      },
+      waitForRefill: {
+        type: 'boolean',
+        description: 'Block until the line stock drops below refillBelow (i.e. it is time to look at the next '
+          + 'segment and write again). Returns which segments are missing. This is the loop the model should '
+          + 'sit in: look, write, optionally check the clock, wait for stock to run low, look again.',
+      },
+      waitUntil: {
+        type: 'number',
+        description: 'Block until playback reaches this many seconds. Use it to check on the timeline just '
+          + 'before the next segment without busy-waiting.',
+      },
+      refillBelow: {
+        type: 'number',
+        description: 'OPTIONAL and off by default (0). If you set it, the loop wakes you when fewer than N '
+          + 'upcoming segments still have pre-written lines. Most models do not need this: segment boundaries '
+          + 'plus wait: true already say when it is time to look again.',
+      },
+      speakAloud: {
+        type: 'boolean',
+        description: 'Read the given text out loud right now through system TTS (no model output involved). '
+          + 'Pair with text.',
+      },
+      text: {
+        type: 'string',
+        description: 'Text for speakAloud.',
+      },
+      voice: {
+        type: 'string',
+        description: 'TTS voice name fragment, e.g. "Huihui" or "Yaoyao". Defaults to the first Chinese voice.',
+      },
+      rate: {
+        type: 'number',
+        description: 'TTS rate, -10..10 (0 = normal).',
+      },
+      listVoices: {
+        type: 'boolean',
+        description: 'List the TTS voices installed on this machine.',
+      },
+      nextLine: {
+        type: 'boolean',
+        description: 'Say exactly one pre-written line, then return. The call blocks until the line is due, so '
+          + 'each call becomes one visible message in the conversation - that is the point: the user should see '
+          + 'you actually speak, at the right moment, not a script printing six sentences at once.',
+      },
+      everySec: {
+        type: 'number',
+        description: 'Spacing for nextLine (default 10 s). After each line the next call waits this long.',
+      },
+      // 说话频率**不设默认值**：不同模型有不同性格，写死只会让它变木讷。
+      // 由调用方自己决定每段写几句、间隔多久。
       speakEvery: {
         type: 'number',
         description: 'High-frequency mode in seconds: the loop wakes you every N seconds regardless of batch '
@@ -583,6 +643,10 @@ export function watchToolSpec() {
         type: 'array',
         items: { type: 'json' },
         description: 'Pre-written lines: [{ from: <segment start in seconds>, text: "<one sentence>" }]. '
+          + 'Recommended order: look at the picture FIRST (speakNow: true), then read the transcript lines for '
+          + 'that window, then write what you actually want to say. Writing from subtitles alone makes you talk '
+          + 'about what is said instead of what is shown. Repeat the same "from" in one call to queue several '
+          + 'lines for that segment (one per 10 s). '
           + 'The background loop reads the line out when that segment becomes due, so nothing has to be '
           + 'generated at that moment. Only write them for the prefetched window (default 5 minutes).',
       },

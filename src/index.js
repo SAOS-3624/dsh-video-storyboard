@@ -19,6 +19,7 @@ import { lookupCell } from './cells.js';
 import { DEFAULT_RAMP, DEFAULT_SEGMENT } from './batches.js';
 import { configuredLaunch, configuredPort } from './browser-time.js';
 import { checkBiliLogin, fetchRemoteSubtitles } from './subtitles.js';
+import { listVoices, speak as speakAloud } from './tts.js';
 import { makeBuilder, runWatchPass } from './watch-run.js';
 import { loopStatus, startWatchLoop, stopWatchLoop } from './watch-loop.js';
 import { wakeSession } from './timer.js';
@@ -203,6 +204,17 @@ async function registerAll(ctx) {
       if (args.stopLoop === true) return { text: JSON.stringify(stopWatchLoop('requested')), images: [] };
       // 只看钟的状态，不读进度、不出图 —— 排查"它为什么不说话"时用
       if (args.statusOnly === true) return { text: JSON.stringify(loopStatus()), images: [] };
+      // 看这台机器有哪些声音（TTS 用）
+      if (args.listVoices === true) return { text: JSON.stringify(await listVoices()), images: [] };
+
+      // 立刻念一句（脚本发声，不经过模型）：配合 nextLine 之外的"单发"场景
+      if (args.speakAloud === true) {
+        const text = String(args.text ?? '').trim();
+        if (!text) return { text: JSON.stringify({ ok: false, reason: 'empty-text' }), images: [] };
+        const r = await speakAloud(text, { voice: args.voice ?? undefined, rate: args.rate ?? 0 });
+        return { text: JSON.stringify(r), images: [] };
+      }
+
       // 检查 B 站登录态与字幕可用性：这一条能立刻回答"为什么还在用 ASR"
       if (args.checkCookies === true) {
         const login = await checkBiliLogin({ cookies: args.cookies });
@@ -261,11 +273,19 @@ async function registerAll(ctx) {
         // 段边界不再在这里算 —— 交给批次表（开头短、逐段加长）。
         const depth = Math.max(1, Number(args.depth) || 2);
         const speakEvery = Math.max(0, Number(args.speakEvery) || 0);
+        // tts: true → 到点由脚本念台词，不叫醒模型（省 token、也没有等待）
+        const tts = args.tts === true
+          ? { enabled: true, voice: args.voice ?? undefined, rate: args.rate ?? 0 }
+          : null;
+        // 台词库存的"补词判定"**默认关闭**：
+        // 分段 + 阻塞等待已经足够知道"该看下一段了"，再加一层库存判断反而会把模型叫得太频繁，
+        // 而且有些模型本来就不爱说话 —— 不该逼它产出台词。
+        const refillBelow = args.refillBelow === undefined ? 0 : Math.max(0, Number(args.refillBelow) || 0);
         startWatchLoop({
           ctx, sessionId: lastSessionId, input: r.input,
           cursor: r.cursor, status: r.status,
           // 段长 / 阶梯 / 缓冲深度交给循环：之后它自己往前滚、自己补建
-          segment, ramp, depth, speakEvery,
+          segment, ramp, depth, speakEvery, tts, refillBelow,
           // 循环负责"什么时候建"，这里给它"怎么建"
           deps: {
             browserPort,

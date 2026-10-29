@@ -178,13 +178,24 @@ export async function saveLines(input, lines, { env = process.env } = {}) {
   const st = await loadWatch(env);
   const sk = sessionKey(input);
   const prev = st[sk]?.lines ?? {};
-  let n = 0;
+
+  // 同一次调用里，同一个 from 出现多次 = 这一段要连说几句（按给定顺序）；
+  // 只出现一次 = 覆盖这一段原有的稿子（改了主意不该留下旧句）。
+  const grouped = new Map();
   for (const l of lines) {
     const from = Number(l?.from);
     const text = String(l?.text ?? '').trim();
     if (!Number.isFinite(from) || !text) continue;
-    prev[from] = { text: text.slice(0, 300), at: Date.now() };
-    n += 1;
+    if (!grouped.has(from)) grouped.set(from, []);
+    grouped.get(from).push(text.slice(0, 300));
+  }
+
+  let n = 0;
+  for (const [from, texts] of grouped) {
+    prev[from] = texts.length > 1
+      ? { queue: texts, at: Date.now() }
+      : { text: texts[0], at: Date.now() };
+    n += texts.length;
   }
   st[sk] = { ...(st[sk] ?? {}), lines: prev, at: Date.now() };
   await saveWatch(st, env);
@@ -209,9 +220,40 @@ export async function consumeLine(input, from, { env = process.env } = {}) {
   const sk = sessionKey(input);
   const lines = st[sk]?.lines;
   if (!lines || !lines[Number(from)]) return null;
-  const text = lines[Number(from)].text ?? null;
-  delete lines[Number(from)];
+  const slot = lines[Number(from)];
+  let text = null;
+  if (Array.isArray(slot.queue) && slot.queue.length > 0) {
+    // 队列里有就取第一条，取完还有就留着，取完最后一条才删
+    text = slot.queue[0];
+    if (slot.queue.length > 1) {
+      lines[Number(from)] = { queue: slot.queue.slice(1), at: Date.now() };
+    } else {
+      delete lines[Number(from)];
+    }
+  } else {
+    text = slot.text ?? null;
+    delete lines[Number(from)];
+  }
   st[sk] = { ...(st[sk] ?? {}), lines, at: Date.now() };
   await saveWatch(st, env);
   return text;
+}
+
+/** 这一段还有没有台词（给"余量不足就叫醒模型"用） */
+export async function hasLine(input, from, { env = process.env } = {}) {
+  const st = await loadWatch(env);
+  const slot = st[sessionKey(input)]?.lines?.[Number(from)];
+  if (!slot) return false;
+  if (Array.isArray(slot.queue)) return slot.queue.length > 0;
+  return Boolean(slot.text);
+}
+
+/** 库存概览：已经写好台词的段有哪些（诊断用） */
+export async function linesOverview(input, { env = process.env } = {}) {
+  const st = await loadWatch(env);
+  const lines = st[sessionKey(input)]?.lines ?? {};
+  return Object.entries(lines).map(([from, slot]) => ({
+    from: Number(from),
+    count: Array.isArray(slot.queue) ? slot.queue.length : (slot.text ? 1 : 0),
+  })).filter((x) => x.count > 0).sort((a, b) => a.from - b.from);
 }

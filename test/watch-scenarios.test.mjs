@@ -256,3 +256,34 @@ test('⑮ 高频模式在暂停时闭嘴', async () => {
   assert.ok(wakes <= 3, `暂停后不该继续叫（读取有延迟，允许头几次），实得 ${wakes}`);
   stopWatchLoop('test');
 });
+
+test('⑯ 台词库存不足时叫醒模型补写（只有这一件事该叫它）', async () => {
+  const sim = createSim({ refreshEveryMs: 30_000, duration: 900 });
+  const wakes = [];
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'no-lines.mp4',
+    segment: 60, ramp: [], depth: 2, refillBelow: 2,
+    deps: { ...sim.deps, wake: async (_c, o) => { wakes.push(o.text); return { ok: true }; } },
+    log: () => {},
+  });
+  await sim.runTo(10);
+  assert.equal(wakes.length, 1, '库存为空时应该叫一次');
+  assert.match(wakes[0], /补词/, '要说清是缺词');
+  assert.match(wakes[0], /01:00–02:00/, '要指出缺哪一段');
+  stopWatchLoop('test');
+});
+
+test('⑰ tts 模式下脚本自己念，不叫醒模型', async () => {
+  const sim = createSim({ refreshEveryMs: 30_000, duration: 900 });
+  let woken = 0;
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'tts.mp4',
+    segment: 60, ramp: [], depth: 2, tts: { enabled: true }, speakEvery: 5,
+    deps: { ...sim.deps, wake: async () => { woken += 1; return { ok: true }; } },
+    log: () => {},
+  });
+  await sim.runTo(20);
+  // 没有台词可念 → 会被当成"缺词"叫醒（这是对的：脚本不会编词）
+  assert.ok(woken <= 2, `不该每 5 秒叫一次，实得 ${woken}`);
+  stopWatchLoop('test');
+});

@@ -221,7 +221,11 @@ export async function runStoryboard(opts) {
       // **先试站点字幕轨**（B 站 CC）：作者写的文本比 ASR 准，还不烧 CPU。
       // 以前只看"下载下来的 mp4 里有没有内嵌字幕流"，而 B 站的字幕是单独轨道，
       // 于是永远判成"没有字幕"，白白退回 ASR。
-      const remote = sourceInfo?.url ? await fetchRemoteSubtitles({ url: sourceInfo.url }) : null;
+      // 站点字幕默认开（准、且省掉一次 ASR）；想省钱/想只走 ASR 时可以显式关：
+      //   fetchOptions: { siteSubtitles: false }
+      const remote = (sourceInfo?.url && fetchOptions?.siteSubtitles !== false)
+        ? await fetchRemoteSubtitles({ url: sourceInfo.url, cookies: fetchOptions?.cookies ?? null })
+        : null;
       const subtitle = remote?.ok
         ? remote.segments
         : (info.hasSubtitle ? await extractSubtitleTrack({ input, ffmpegPath }) : null);

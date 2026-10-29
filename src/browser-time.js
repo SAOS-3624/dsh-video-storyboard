@@ -23,7 +23,8 @@
 const DEFAULT_PORT = 9333;
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -225,23 +226,42 @@ export async function readBrowserPosition({ port = DEFAULT_PORT, timeoutMs = 150
  * 所以：想在"打开视频时自动就有端口"，只能是插件来起。
  */
 export function launchBrowser({
-  port = DEFAULT_PORT, url = '', profileDir = null, exe = null,
+  port = DEFAULT_PORT, url = '', profileDir = null, exe = null, taskScheduler = true,
 } = {}) {
   const edge = exe
     ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
   const profile = profileDir ?? join(homedir(), '.dsh', 'edge-watch');
+  if (!existsSync(edge)) return { ok: false, reason: 'edge-not-found' };
+  mkdirSync(profile, { recursive: true });
+  const args = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${profile}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    ...(url ? [url] : []),
+  ];
+
+  // **Windows 上走计划任务**：普通 spawn 出去的进程会留在调用者的 Job Object 里，
+  // 调用方一退出就被回收（实测：窗口开起来、几秒后整个浏览器消失）。
+  // 计划任务由 Task Scheduler 服务启动，不在那个 job 里，才能真正活下来。
+  if (process.platform === 'win32' && taskScheduler !== false) {
+    const task = `DSH-Edge-Watch-${port}`;
+    const quoted = args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ');
+
+    // 先试 schtasks.exe：最通用。某些安全策略会把它列为黑名单程序，
+    // 那种情况下退回"直接 spawn"（活不长，但至少能看）。
+    try {
+      execFileSync('schtasks', ['/create', '/tn', task, '/tr', `"${edge}" ${quoted}`,
+        '/sc', 'once', '/st', '23:59', '/f'], { stdio: 'ignore', windowsHide: true, timeout: 15_000 });
+      execFileSync('schtasks', ['/run', '/tn', task], { stdio: 'ignore', windowsHide: true, timeout: 15_000 });
+      return { ok: true, via: 'schtasks', task, port, profile };
+    } catch { /* 没权限就往下走 */ }
+  }
+
   try {
-    mkdirSync(profile, { recursive: true });
-    const args = [
-      `--remote-debugging-port=${port}`,
-      `--user-data-dir=${profile}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-      ...(url ? [url] : []),
-    ];
     const child = spawn(edge, args, { detached: true, stdio: 'ignore' });
     child.unref();
-    return { ok: true, pid: child.pid, port, profile };
+    return { ok: true, via: 'spawn', pid: child.pid, port, profile };
   } catch (e) {
     return { ok: false, reason: String(e?.message ?? e).slice(0, 120) };
   }

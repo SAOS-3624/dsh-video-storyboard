@@ -18,7 +18,8 @@ import {
 import { startTicker, wakeSession } from './timer.js';
 import { describePlan, makePlan } from './batches.js';
 import { readBrowserPosition } from './browser-time.js';
-import { consumeLine, loadLine, pickSession, probePlayback } from './watch.js';
+import { speak as speakAloud, PREFERRED_VOICES } from './tts.js';
+import { consumeLine, hasLine, loadLine, pickSession, probePlayback } from './watch.js';
 
 const mmss = (s) => `${String(Math.floor(Math.max(0, s) / 60)).padStart(2, '0')}:${String(Math.round(Math.max(0, s) % 60)).padStart(2, '0')}`;
 
@@ -97,7 +98,9 @@ export function stopWatchLoop(reason = 'stopped') {
  */
 export function startWatchLoop({
   ctx, sessionId, input, segments, cursor = null, status = 'playing', log = () => {},
-  size = 120, depth = 2, segment, ramp, speakEvery = 0,
+  size = 120, depth = 2, segment, ramp, speakEvery = 0, tts = null,
+  // 台词库存低于这么多段时，叫醒模型去补写。0 = 不管（默认关）
+  refillBelow = 0,
   // 依赖可注入：进程内默认真实实现；测试/仿真用假的，于是"到点会不会说话"可以离线验证
   deps = {},
 }) {
@@ -173,6 +176,10 @@ export function startWatchLoop({
     // 前面的用完了，后面的立刻顶上，同时开始算再下一个 —— 永远有余量。
     depth: Math.max(1, Number(depth) || 2),
     speakEvery: Math.max(0, Number(speakEvery) || 0),
+    tts: tts?.enabled ? { enabled: true, voice: tts.voice ?? PREFERRED_VOICES[0], rate: Number(tts.rate) || 0 } : null,
+    spokenAloud: 0,
+    refillBelow: Math.max(0, Number(refillBelow) || 0),
+    refillAskedAt: 0,
     lastSpeakAt: 0,
     built: new Set(),        // 已经建好的批次（按 from 记）
     building: null,          // 正在建的那一个（同时只建一个，别把 CPU 打满）
@@ -300,6 +307,33 @@ export function startWatchLoop({
         }
       }
 
+      // ---- 台词库存检查：余量不足就**叫醒模型去写**（这是唯一该叫它的理由）
+      // 脚本自己不会写台词 —— 它只念。写作是模型的事，库存不够就得有人去补。
+      if (loop.refillBelow > 0 && tNow - (loop.refillAskedAt || 0) > 300_000) {
+        const estR = estimate(loop.anchor, tNow);
+        const idxNow = plan.indexAt(estR.pos);
+        const missing = [];
+        for (let i = idxNow + 1; i <= idxNow + loop.refillBelow; i += 1) {
+          const seg = plan.from(i, 1)[0];
+          if (!seg) break;
+          // eslint-disable-next-line no-await-in-loop
+          if (!(await hasLine(loop.input, seg.from).catch(() => false))) missing.push(seg);
+        }
+        if (missing.length > 0) {
+          loop.refillAskedAt = tNow;
+          const list = missing.map((m) => `${mmss(m.from)}–${mmss(m.to)}`).join('、');
+          const w = await wake(loop.ctx, {
+            sessionId: loop.sessionId,
+            text: `[一起看·补词] 台词库存不够了：${list} 还没有词（现在 ${mmss(estR.pos)}）。`
+              + '先用 video_watch({ speakNow: true }) 看画面，再用 lines: [...] 补上。',
+          });
+          loop.lastWake = { at: new Date().toTimeString().slice(0, 8), ok: Boolean(w?.ok), reason: w?.reason ?? null, segment: missing[0].from };
+          if (!w?.ok) { loop.wakeFails += 1; loop.lastReason = 'wake-failed'; }
+          note(`refill-needed ${missing.map((m) => m.from).join(',')} → ${w?.ok ? 'ok' : w?.reason ?? 'failed'}`);
+          return;
+        }
+      }
+
       // ---- 高频模式：不受批次边界限制，每 speakEvery 秒叫一次（测试/密集解说用）
       if (loop.speakEvery > 0) {
         const est = estimate(loop.anchor, tNow);
@@ -308,6 +342,20 @@ export function startWatchLoop({
         if (gap >= loop.speakEvery * 1000 && within && est.why !== 'paused') {
           loop.lastSpeakAt = tNow;
           const seg = plan.segmentAt(est.pos);
+          // **TTS 模式**：到点直接念预设台词，完全不叫醒模型（0 token、0 等待）
+          if (loop.tts?.enabled) {
+            const line = await consumeLine(loop.input, seg.from).catch(() => null);
+            if (line) {
+              void speakAloud(line, { voice: loop.tts.voice, rate: loop.tts.rate });
+              loop.spokenAloud += 1;
+              note(`tts ${Math.round(est.pos)}s: ${line.slice(0, 20)}…`);
+            } else {
+              // 没词就**安静地跳过**：补词是 refillBelow 的职责，
+              // 让它每 10 秒叫一次模型，等于把省下来的都还回去。
+              note(`tts ${Math.round(est.pos)}s: no line, skipped`);
+            }
+            return;
+          }
           const w = await wake(loop.ctx, {
             sessionId: loop.sessionId,
             text: `[一起看·高频] 现在 ${mmss(est.pos)}（这一段 ${mmss(seg.from)}–${mmss(seg.to)}）。`
@@ -362,6 +410,14 @@ export function startWatchLoop({
       // 有预设台词就直接给稿子：省掉"现场想"的那 2–4 秒，也省一次看图的 token
       // **念完就删**：取和删放一起，避免"取到了但没删"导致重看时同一句说两遍
       const line = await consumeLine(loop.input, r.segment).catch(() => loadLine(loop.input, r.segment).catch(() => null));
+      // **TTS 模式**：有预设台词就直接念出来，不叫醒模型。
+      // 模型只在"没词可说、或者想补充自己观察"的时候才被叫——那才是它该花 token 的地方。
+      if (loop.tts?.enabled && line) {
+        void speakAloud(line, { voice: loop.tts.voice, rate: loop.tts.rate });
+        loop.spokenAloud += 1;
+        note(`tts ${r.segment}s: ${line.slice(0, 20)}…`);
+        return;
+      }
       const head = `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 该说话了`
         + `（用户大约看到 ${mmss(r.pos)}${r.confidence === 'extrapolated' ? '，按墙钟推算' : ''}）。`;
       const text = line
