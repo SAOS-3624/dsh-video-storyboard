@@ -32,7 +32,8 @@ import {
 } from './asr.js';
 import { fetchRemoteSubtitles } from './subtitles.js';
 import { detectSubtitleBand, OCR_MAX_ITEMS, ocrPython, readBand, shouldReplace } from './ocr.js';
-import { cacheKey, pruneCache, withCache } from './cache.js';
+import { cacheKey, withCache } from './cache.js';
+import { pruneStorage } from './storage.js';
 import { saveCells } from './cells.js';
 import { ffmpegVersion, sha256File } from './provenance.js';
 import { findInjection } from './injection.js';
@@ -326,7 +327,7 @@ export async function runStoryboard(opts) {
       // 否则 3 秒 18 个镜头会被压成 4 刀 —— 实测过，这是"数不出快闪"的主因。
       minGap: scanGap, ffmpegPath, onProgress,
     }), { enabled: cache });
-  if (cache && !scan.cached && !precomputed) await pruneCache();
+  if (cache && !scan.cached && !precomputed) await pruneStorage();
   mark('scan');
 
   // ---- 爆点细扫（见 refineBurstCuts 注释：粗扫看不见 0.35s 以下的刀）

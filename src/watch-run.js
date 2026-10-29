@@ -16,7 +16,7 @@ import {
   sessionKey, WATCH_LEAD, WATCH_SEGMENT,
 } from './watch.js';
 import { describeLatency, recordLatency } from './latency.js';
-import { makePlan } from './batches.js';
+import { DEFAULT_LOOKAHEAD, depthForBuffer, makePlan } from './batches.js';
 import {
   fileUrlToPath, hasDebugPort, launchBrowser, looksLikeVideoUrl, readBrowserPosition, waitForPort,
 } from './browser-time.js';
@@ -122,6 +122,10 @@ export async function runWatchPass(args, deps) {
     ramp: args.ramp === undefined ? null : args.ramp,
   });
   const lead = args.lead !== undefined ? Number(args.lead) : WATCH_LEAD;
+  // 余量：进入阻塞前要备好的时长（秒）。默认 5 分钟，和循环用的是同一个口径。
+  const lookahead = args.lookahead === undefined
+    ? DEFAULT_LOOKAHEAD
+    : Math.max(0, Number(args.lookahead) || 0);
 
   // ---- 0. 源：没给 input 就自己从"系统里在播什么"反推
   // 用户只会说"我在看这个"，不会报路径。SMTC 给标题和时长，够我们去找。
@@ -462,29 +466,52 @@ export async function runWatchPass(args, deps) {
     builtMs = Date.now() - t0;
   }
 
-  // ---- 顺手把**下一段**也建好（后台，不阻塞本次返回）
-  // 用户的抱怨是"回复晚了十秒"，而这十秒里大部分是"到点才去建这一段"。
-  // 提前一段建好，到点时那次调用就是命中了。
-  // **下一段要用批次表算**：阶梯里第 3 段是 3 分钟，不是"当前段长再复制一份"。
-  // 之前按 size 硬加，于是提示写 03:00–05:00、调度实际排在 03:00–06:00 —— 用户照提示算的时间点不存在。
-  const nextSeg = plan.from(cur.index + 1, 1)[0];
-  const nextStart = nextSeg.from;
-  const inRange = !Number.isFinite(activeSession?.dur) || nextStart < activeSession.dur;
-  const nextHint = (!inRange)
-    ? ''
-    : `\n[next] ${mmss(nextSeg.from)}–${mmss(nextSeg.to)} already prefetched `
-      + `(speaks near ${mmss(nextSeg.sayAt)}). `
-      + 'To make it speak the instant it is due, write the line now: '
-      + `video_watch({ input, lines: [{ from: ${nextStart}, text: "…" }] })`;
-  // 预取已经交给陪看循环（它有"当前 + 下一个"的双缓冲节奏）。
-  // 这里只在**没有循环**的单次调用里补一段，避免两处各建一次。
-  if (args.prefetch === true && inRange) {
+  // ---- 2.4 余量：把"当前位置之后 lookahead 秒"内的段全部备好
+  //
+  // **这是进入阻塞等待的前提**：等待期间用户还在看，没有人能再建图；所以阻塞之前，
+  // 未来那段窗口必须已经在缓存里。以前这里只预取"下一段"，而且是后台异步 ——
+  // 于是等到用户在段末要图时，图常常还没建好（或者词根本来不及写）。
+  // 两条路径分开处理：
+  //   · 本次就要交付（already due）→ 别为了预取拖慢返回，丢后台串行建
+  //   · 本次要阻塞等待 → **先把窗口建完再进入等待**，这样醒来时下一批已就绪
+  const needDepth = depthForBuffer(plan, cur.index, lookahead);
+  const winSegs = plan.from(cur.index, needDepth)
+    .filter((s) => !Number.isFinite(activeSession?.dur) || s.from < activeSession.dur);
+  const willWait = !d.due && args.wait === true;
+  const pending = winSegs
+    .filter((s) => s.from !== segStart)
+    .filter((s) => !cache.get(`${sessionKey(input)}|${s.from}`)?.png);
+  const buildOne = (s) => buildSegment({
+    input, segStart: s.from, size: s.size, args, runStoryboard, formatManifest, cache,
+  });
+  // 一次调用最多补 4 段：再多就是"用户其实不在看"，别把一次工具调用拖成几分钟
+  const toBuild = pending.slice(0, 4);
+  if (willWait) {
+    for (const s of toBuild) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await buildOne(s);
+      } catch { /* 备不上就算了，到点再建 */ }
+    }
+  } else if (args.prefetch !== false && toBuild.length > 0) {
     setTimeout(() => {
-      void buildSegment({
-        input, segStart: nextStart, size, args, runStoryboard, formatManifest, cache,
-      }).catch(() => {});
+      void (async () => {
+        for (const s of toBuild) {
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            await buildOne(s);
+          } catch { /* 后台失败不响 */ }
+        }
+      })();
     }, 0).unref?.();
   }
+
+  const winEnd = winSegs[winSegs.length - 1];
+  const bufferHint = (winSegs.length > 1 && winEnd)
+    ? `\n[buffer] 图已备到 ${mmss(winEnd.to)}（${winSegs.length} 段，约 `
+      + `${Math.max(0, Math.round((winEnd.to - cursor) / 60))} 分钟余量）。`
+      + '词就写这个区间：' + winSegs.map((s) => `${mmss(s.from)}–${mmss(s.to)}`).join('、')
+    : '';
 
   const measuredAt = new Date().toTimeString().slice(0, 8);
   const found = resolved ? ` · source: ${resolved.matchedBy} → ${String(input).split(/[\\/]/).pop()}` : '';
@@ -577,7 +604,7 @@ export async function runWatchPass(args, deps) {
       measuredAt,
       segment: segStart,
       text: `${head}${waitNote}\nnot yet — keep watching. I will speak near ${mmss(segStart + size - lead)}.`
-        + await latencyNote() + nextHint,
+        + await latencyNote() + bufferHint,
       images: [],
     };
   }
@@ -634,7 +661,7 @@ export async function runWatchPass(args, deps) {
     cursor,
     measuredAt,
     segment: segStart,
-    text: `${head}${waitNote}\n${guidance}${await latencyNote()}${nextHint}\n\n${entry.manifest}`,
+    text: `${head}${waitNote}\n${guidance}${await latencyNote()}${bufferHint}\n\n${entry.manifest}`,
     images,
   };
 }

@@ -163,3 +163,26 @@ test('台词存在会话状态里，和 spoken 不互相覆盖', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('后补的带 at 台词不会冲掉同段已有的（台词凭空消失的那个 bug）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'due6-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    await saveLines('h.mp4', [
+      { from: 1500, at: 1525, text: 'A' },
+      { from: 1500, at: 1565, text: 'B' },
+    ]);
+    // 后来只想补一句收尾词
+    await saveLines('h.mp4', [{ from: 1500, at: 1778, text: 'C' }]);
+    const rows = await linesOverview('h.mp4');
+    assert.equal(rows[0].count, 3, 'A、B 必须还在');
+    assert.deepEqual(rows[0].ats, [1525, 1565, 1778]);
+    // 同一个 at 再写一次 = 改词，不是新增
+    await saveLines('h.mp4', [{ from: 1500, at: 1565, text: 'B2' }]);
+    const again = await linesOverview('h.mp4');
+    assert.equal(again[0].count, 3);
+    assert.equal(await dueLine('h.mp4', 1565, { size: 300 }), 'B2');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -218,8 +218,20 @@ export async function saveLines(input, lines, { env = process.env } = {}) {
 
   let n = 0;
   for (const [from, items] of grouped) {
-    // 一律存成队列：单句和连说几句走同一条读路径，少一个分支就少一类 bug
-    prev[from] = { queue: items, savedAt: Date.now() };
+    // **带 at 的按时刻合并**，不覆盖同段其它句子。
+    // 以前这里是无条件覆盖，于是"后补一句收尾词"会把这一批已经写好的四句全冲掉 ——
+    // 表现是台词凭空消失，而且没有任何提示。
+    const withAt = items.filter((x) => x.at !== undefined);
+    if (withAt.length > 0) {
+      const merged = new Map();
+      for (const it of slotItems(prev[from])) merged.set(it.at ?? null, it);
+      for (const it of items) merged.set(it.at ?? null, it);   // 同一个 at = 改词
+      const list = [...merged.values()].sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+      writeSlot(prev, from, list);
+    } else {
+      // 老口径（不带 at）：这一段只有一句 / 一组，整段覆盖
+      prev[from] = { queue: items, savedAt: Date.now() };
+    }
     n += items.length;
   }
   st[sk] = { ...(st[sk] ?? {}), lines: prev, at: Date.now() };

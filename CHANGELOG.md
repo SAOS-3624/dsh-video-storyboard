@@ -15,6 +15,28 @@
   off by default).
 - **`nextLine`** returns one line at a time, so a delivered line reads as a message instead of a dump.
 
+### Changed
+
+- **`wait: true` now builds the look-ahead window before it blocks.** The buffer used to be one
+  background segment, kicked off after the current one and (by default) not at all — so the picture
+  the user needed at the end of the next batch was still being built when they got there, and there was
+  no moment at which lines could be written for it. Blocking now presupposes the future is ready: every
+  segment inside `lookahead` is built first (capped at four per call), and the reply names the window
+  (`[buffer] … 词就写这个区间`), so the lines cover exactly the same span the pictures do. When the call
+  is already due, prefetch moves back to the background so delivery stays fast; `prefetch: false` still
+  turns it off.
+
+- **One place decides what a storyboard run is** (`src/board.js`). `video_storyboard`, `video_zoom` and the
+  co-watch path each hand-wrote the `runStoryboard` defaults, and the copies had already drifted: only the
+  storyboard tool had `detail`, so co-watch was stuck at a hard-coded 80 characters per cell; the
+  "ocr when detail=high" rule existed in one of the three; zoom pinned `scanHeight` while the storyboard
+  tool let you pass it. The defaults live in one function now, which is why `detail` / `ocr` reached
+  `video_watch` without a second copy of anything. What stays per-kind is deliberate: the batch table
+  (minutes) is not the frame plan (density), and only co-watch has delivery timing.
+
+- **`mm:ss` had two implementations that disagreed at the boundary**: 59.6 s was `01:00` in one and
+  `00:60` in the other. One implementation, with a carry (`src/time.js`), plus a test for it.
+
 ### Fixed
 
 - **Lines are pinned to a moment (`at`), and fired by playback position.** The script used to speak

@@ -16,7 +16,7 @@ import {
   MAX_EXTRAPOLATE_MS, estimate, makeAnchor, shouldSpeak, updateAnchor,
 } from './position.js';
 import { startTicker, wakeSession } from './timer.js';
-import { describePlan, depthForBuffer, makePlan } from './batches.js';
+import { DEFAULT_LOOKAHEAD, describePlan, depthForBuffer, makePlan } from './batches.js';
 import { readBrowserPosition } from './browser-time.js';
 import { speak as speakAloud, PREFERRED_VOICES } from './tts.js';
 import { consumeLine, dueLine, hasLine, loadLine, pickSession, probePlayback } from './watch.js';
@@ -32,11 +32,8 @@ const ASK_COOLDOWN_MS = 300_000;
 const UNKNOWN_GIVE_UP_MS = 600_000;
 /** 浏览器和 SMTC 都没有可用源超过这么久，就停（视频关了 / 浏览器退出了） */
 const NO_SOURCE_GIVE_UP_MS = 300_000;
-/**
- * 默认余量（秒）。
- * 用户定的：**少于 5 分钟不保险**。按段数算的话，开头 1/2/3 分钟一段，两段只有 2 分钟。
- */
-export const DEFAULT_LOOKAHEAD = 300;
+/** 余量默认值在 batches.js（批次规划的策略），这里转出给老的调用方 */
+export { DEFAULT_LOOKAHEAD };
 
 const loop = {
   active: false,

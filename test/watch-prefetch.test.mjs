@@ -49,7 +49,7 @@ test('显式 prefetch: true 时，抛完当前段会顺手建下一段', async (
   }
 });
 
-test('默认不预取：交给陪看循环去排（避免两处各建一次）', async () => {
+test('默认就把 lookahead 窗口备好，不只是当前段', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'prefetch2-'));
   process.env.DSH_VIDEO_CACHE_DIR = dir;
   try {
@@ -63,7 +63,52 @@ test('默认不预取：交给陪看循环去排（避免两处各建一次）',
     };
     await runWatchPass({ input: 'b.mp4', cursor: 10, segment: 120 }, deps);
     await settle();
-    assert.deepEqual(built, [0], '默认只有当前段；预取由循环的双缓冲负责');
+    assert.equal(built[0], 0, '当前段必须先建');
+    assert.ok(built.length >= 3, `默认应把 5 分钟余量里的段都备好，实际只建了 ${built.join(',')}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('prefetch: false 才真的只建当前段', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'prefetch2b-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    const built = [];
+    const deps = {
+      cache: new Map(),
+      saveImage: async () => Buffer.from('x'),
+      runStoryboard: async ({ from }) => { built.push(from); return { sheets: [{ png: Buffer.from('x'), cells: [] }] }; },
+      formatManifest: () => 'm',
+      probe: async () => ({ ok: true, sessions: [] }),
+    };
+    await runWatchPass({ input: 'b2.mp4', cursor: 10, segment: 120, prefetch: false }, deps);
+    await settle();
+    assert.deepEqual(built, [0], '显式关掉就只建当前段');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('wait 之前先把余量建完（进入阻塞的前提）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'prefetch2c-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    const built = [];
+    const deps = {
+      cache: new Map(),
+      saveImage: async () => Buffer.from('x'),
+      runStoryboard: async ({ from }) => { built.push(from); return { sheets: [{ png: Buffer.from('x'), cells: [] }] }; },
+      formatManifest: () => 'm',
+      probe: async () => ({ ok: true, sessions: [] }),
+      browserPort: 1,
+      autoLaunch: false,
+      readBrowser: async () => ({ pos: 10, dur: 900, paused: false, url: 'file:///b3.mp4' }),
+    };
+    const r = await runWatchPass({ input: 'b3.mp4', wait: true, maxWaitSec: 5, segment: 120 }, deps);
+    assert.equal(r.speaking, false, '没到点不该交付');
+    assert.ok(built.length >= 3, `阻塞前应已备好窗口，实际 ${built.join(',')}`);
+    assert.match(r.text, /\[buffer\]/, '要告诉模型余量覆盖到哪');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

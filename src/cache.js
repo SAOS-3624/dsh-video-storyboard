@@ -19,7 +19,16 @@ import { join } from 'node:path';
 // 1 → 2：0.4.3 改了极静素材的相对基线判定（spikeCuts）、平铺格与 suppressClose 的用法，
 // 旧缓存里的 cuts 与现在的算法不是一回事，留着会让"改了却看不出变化"。
 export const CACHE_VERSION = 2;
+/** 单独用（没有统一预算时）的默认上限；正常路径走 storage.js 的 300MB 总预算。 */
 export const MAX_CACHE_BYTES = 50 * 1024 * 1024;
+
+/**
+ * 这些文件不是"缓存"：删了就丢状态（台词队列、看过哪、cell 映射、延迟标定）。
+ * 以前 pruneCache 会把所有 *.json 按 mtime 删，理论上包括 watch.json —— 台词会凭空消失。
+ */
+export const PROTECTED_FILES = Object.freeze([
+  'watch.json', 'seen.jsonl', 'latency.json', 'cells.json',
+]);
 
 export function cacheDir(env = process.env) {
   if (env.DSH_VIDEO_CACHE_DIR) return env.DSH_VIDEO_CACHE_DIR;
@@ -69,6 +78,18 @@ export async function writeCache(key, value, { dir = cacheDir() } = {}) {
   }
 }
 
+/** 当前 JSON 缓存占用（不含受保护的状态文件） */
+export async function cacheBytes({ dir = cacheDir() } = {}) {
+  let entries = [];
+  try { entries = await readdir(dir); } catch { return 0; }
+  let total = 0;
+  for (const name of entries) {
+    if (!name.endsWith('.json') || PROTECTED_FILES.includes(name)) continue;
+    try { total += (await stat(join(dir, name))).size; } catch { /* 忽略 */ }
+  }
+  return total;
+}
+
 /** 超过上限就按最久未用的删（简单 LRU） */
 export async function pruneCache({ dir = cacheDir(), maxBytes = MAX_CACHE_BYTES } = {}) {
   let entries;
@@ -80,6 +101,7 @@ export async function pruneCache({ dir = cacheDir(), maxBytes = MAX_CACHE_BYTES 
   const files = [];
   for (const name of entries) {
     if (!name.endsWith('.json')) continue;
+    if (PROTECTED_FILES.includes(name)) continue;
     try {
       const st = await stat(join(dir, name));
       files.push({ path: join(dir, name), size: st.size, at: st.mtimeMs });
