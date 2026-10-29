@@ -197,6 +197,8 @@ async function registerAll(ctx) {
     async execute(args) {
       const problems = validateWatchArgs(args);
       if (args.stopLoop === true) return { text: JSON.stringify(stopWatchLoop('requested')), images: [] };
+      // 只看钟的状态，不读进度、不出图 —— 排查"它为什么不说话"时用
+      if (args.statusOnly === true) return { text: JSON.stringify(loopStatus()), images: [] };
       if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
       const r = await runWatchPass(args, {
         cache: watchCache,
@@ -223,7 +225,7 @@ async function registerAll(ctx) {
         });
         startWatchLoop({
           ctx, sessionId: lastSessionId, input: r.input, segments,
-          cursor: r.cursor, log: () => {},
+          cursor: r.cursor, status: r.status, log: () => {},
         });
       }
       return { text: r.text, images: r.images };

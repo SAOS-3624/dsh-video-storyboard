@@ -523,6 +523,15 @@ export function watchToolSpec() {
         type: 'number',
         description: 'Cells per segment sheet (default 5). Each segment is one image.',
       },
+      stopLoop: {
+        type: 'boolean',
+        description: 'Stop the background watch loop (it wakes the session on its own). Idempotent.',
+      },
+      statusOnly: {
+        type: 'boolean',
+        description: 'Return the loop state only (position, confidence, why it did or did not speak) without '
+          + 'reading the video. Use it when you need to know why it went quiet.',
+      },
       lookahead: {
         type: 'number',
         description: 'How many seconds ahead to schedule, in seconds (default 300 = 5 minutes). '
