@@ -118,7 +118,7 @@ export function spikeCuts(stats, { k = 3, minAbs = 6, halfWindow = 15 } = {}) {
   for (let i = 0; i < stats.length; i++) {
     const lo = Math.max(0, i - halfWindow);
     const hi = Math.min(stats.length, i + halfWindow + 1);
-    const around = scores.slice(lo, hi).slice(0, i - lo).concat(scores.slice(i - lo + 1, hi - lo));
+    const around = scores.slice(lo, i).concat(scores.slice(i + 1, hi));
     const local = around.length ? around.sort((a, b) => a - b)[Math.floor(around.length / 2)] : global;
     const base = Math.max(0.2, Math.min(local, global));
     const need = Math.max(minAbs, base * k);
@@ -192,12 +192,9 @@ export function decideCuts(stats, { threshold = 'auto', minGap = 0.35, duration 
       : threshold;
   const eps = 1e-6;
   const above = stats.filter((s) => s.score > used + eps);
-  // 上限只对 auto 生效：显式阈值是调用方的明确意图
-  const cap = threshold === 'auto' ? autoThreshold(scores, { duration }).target : Infinity;
-  const picked = Number.isFinite(cap) && cap > 0 && above.length > cap
-    ? [...above].sort((a, b) => b.score - a.score).slice(0, cap).sort((a, b) => a.t - b.t)
-    : above;
-  const cuts = suppressClose(picked.map((s) => ({ ...s })), minGap);
+  // autoThreshold 已经用分位数把阈值放在目标切点数附近；这里不要再读不存在的
+  // `.target`（它返回 number），否则 cap 恒为 undefined，下面的限流分支是死代码。
+  const cuts = suppressClose(above.map((s) => ({ ...s })), minGap);
   const hotRatio = stats.length > 0 ? above.length / stats.length : 0;
   // 分数序列的变异系数：区分"每帧一剪"和"匀速运镜"
   const mean = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;

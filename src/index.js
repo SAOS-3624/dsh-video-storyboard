@@ -291,6 +291,9 @@ async function registerAll(ctx) {
   // 当前会话：从 session/event 里拿（`session.header.id`）。这是 dsh-fish 的做法，
   // 比反射 ctx 安全得多 —— 反射会把整个应用搞崩（见 apply 的注释）。
   let lastSessionId = null;
+  // 必须在注册监听器之前声明：否则 ctx.on 同步回调里的 push 会踩 TDZ，
+  // 异常被下面的 try/catch 吞掉，off 永远进不了 cleanup（插件重载残留监听器）。
+  const disposers = [];
   if (typeof ctx.on === 'function') {
     try {
       const off = ctx.on('session/event', (session) => {
@@ -301,13 +304,13 @@ async function registerAll(ctx) {
     } catch { /* 拿不到就退化成"只能手动触发" */ }
   }
 
-  const disposers = [
+  disposers.push(
     ctx.tools.register(storyboard),
     ctx.tools.register(zoom),
     ctx.tools.register(probe),
     ctx.tools.register(locate),
     ctx.tools.register(watch),
-  ];
+  );
   return () => {
     for (const dispose of disposers.reverse()) dispose?.();
   };

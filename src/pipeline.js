@@ -594,7 +594,7 @@ export async function runStoryboard(opts) {
     });
   }
 
-  return {
+  const result = {
     timing,
     ...(ocrReport ? { ocr: ocrReport } : {}),
     info,

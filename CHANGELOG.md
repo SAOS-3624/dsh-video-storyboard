@@ -4,7 +4,11 @@
 
 ### Fixed
 
-- **`video_zoom({ cellId })` now remembers URL inputs and relative paths.** The storyboard saved the cell
+- **`video_zoom({ cellId })` is actually usable now.** 0.4.4 returned the storyboard result from
+  `runStoryboard` before the `saveCells` block, so the cell map was never written — the alias/race fix alone
+  could not help. The function now assigns `const result = …` and falls through to `saveCells`; an integration
+  test runs the storyboard and looks the cell up again. Reported in #21.
+- **`video_zoom({ cellId })` also remembers URL inputs and relative paths.** The storyboard saved the cell
   map under the downloaded local file, so a remote input could never find the map written by its own previous
   call; a relative local path failed the same way. The map now records the original input, the resolved path
   and the source URL together, and the write is awaited so an immediate zoom cannot race it.
@@ -14,6 +18,10 @@
 
 ### Internal
 
+- **Audit follow-ups from #21.** The plugin cleanup now declares `disposers` before registering the
+  `session/event` listener (the TDZ error was swallowed, leaking the listener); `spikeCuts` reads only the
+  left/right neighbours when computing its local median; and the dead `autoThreshold(...).target` cap branch
+  in `decideCuts` is gone.
 - **OCR rule comments now match the thresholds the code enforces** (confidence 0.65, max length gap 50%,
   LCS coverage 0.6–0.98), and the static-shot e2e fixture invokes `DEFAULT_FFMPEG` instead of a bare
   `ffmpeg`, so it still runs when DSH's media binary is not on `PATH`.

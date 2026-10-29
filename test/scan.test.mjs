@@ -231,3 +231,15 @@ test('spikeCuts: 运镜里插一刀仍然能挑出来', () => {
   assert.equal(cuts.length, 1);
   assert.equal(cuts[0].t, 40 / 12);
 });
+
+test('spikeCuts: 局部窗口中位数只取左右邻居（lo > 0 时不能误取全数组下标）', () => {
+  // 旧实现第二段用了 scores.slice(i-lo+1, hi-lo)，在 lo=47、i=62 时会取到
+  // 全数组的 16..30 号元素，漏掉 62 号这一刀；正确写法应取 63..hi 的邻居。
+  const scores = [6, 0, 7, 7, 2, 6, 1, 7, 4, 7, 2, 5, 4, 3, 6, 1, 2, 4, 6, 1,
+    6, 0, 5, 2, 6, 4, 6, 0, 1, 2, 6, 5, 7, 7, 0, 4, 4, 17, 10, 0,
+    3, 22, 24, 22, 7, 0, 5, 3, 9, 25, 30, 6, 4, 2, 0, 27, 2, 3, 2, 2,
+    5, 7, 11, 18, 3, 1, 3, 4, 2, 6, 3, 2, 5, 4, 1, 0, 7, 0, 5, 1];
+  const stats = scores.map((score, i) => ({ t: i / 12, score }));
+  const cuts = spikeCuts(stats, { k: 3, minAbs: 6 });
+  assert.ok(cuts.some((c) => Math.abs(c.t - 62 / 12) < 1e-9), JSON.stringify(cuts));
+});

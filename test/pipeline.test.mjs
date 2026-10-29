@@ -11,6 +11,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import { lookupCell } from '../src/cells.js';
 import { runStoryboard, formatManifest, saveStoryboards } from '../src/pipeline.js';
 import { DEFAULT_FFMPEG } from '../src/probe.js';
 
@@ -164,8 +165,10 @@ test('插件接线: apply() 注册一个叫 video_storyboard 的工具', async (
 
   const registered = [];
   let disposed = 0;
+  let offCalled = 0;
   const saved = [];
   const ctx = {
+    on: () => () => { offCalled += 1; },
     tools: { register: (tool) => { registered.push(tool); return () => { disposed += 1; }; } },
     attachments: {
       saveImage: async (input) => {
@@ -181,6 +184,7 @@ test('插件接线: apply() 注册一个叫 video_storyboard 的工具', async (
     assert.equal(typeof disposer, 'function', 'apply 必须返回 disposer');
     disposer();
     assert.equal(disposed, 5, '五个工具都应被释放');
+    assert.equal(offCalled, 1, 'session/event 监听器也必须进入 cleanup');
     // 真跑一次 execute，确保交给附件的是真 PNG（这一条能抓住线上那个 malformed 事故）
     const dir2 = await mkdtemp(join(tmpdir(), 'dsh-exec-'));
     t.after(() => rm(dir2, { recursive: true, force: true }));
@@ -514,4 +518,27 @@ test('e2e: 极静素材（PPT 型）也能找到那一刀', async (t) => {
   const r = await runStoryboard({ input: out, cells: 2, encode: false, transcript: 'off', cache: false });
   assert.ok(r.cuts.length >= 1, `极静素材上的小改动应该被抓到，实得 ${r.cuts.length} 刀`);
   assert.ok(r.cuts.some((c) => Math.abs(c.t - 2) < 0.6), `切点应落在 2 秒附近，实得 ${r.cuts.map((c) => c.t.toFixed(2))}`);
+});
+
+test('e2e: runStoryboard 在 return 前写入 cellId 映射', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not available');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-cells-e2e-'));
+  const cache = await mkdtemp(join(tmpdir(), 'dsh-cells-cache-'));
+  const prevCache = process.env.DSH_VIDEO_CACHE_DIR;
+  process.env.DSH_VIDEO_CACHE_DIR = cache;
+  t.after(() => {
+    if (prevCache === undefined) delete process.env.DSH_VIDEO_CACHE_DIR;
+    else process.env.DSH_VIDEO_CACHE_DIR = prevCache;
+    return Promise.all([
+      rm(dir, { recursive: true, force: true }),
+      rm(cache, { recursive: true, force: true }),
+    ]);
+  });
+  const file = await makeFixture(dir);
+  const r = await runStoryboard({ input: file, cells: 4, encode: false, transcript: 'off', cache: false });
+  assert.equal(r.sheets[0].cells.length, 4);
+  const hit = await lookupCell(file, 2);
+  assert.ok(hit, 'video_storyboard 返回后必须能按 cellId 找到映射');
+  assert.equal(hit.i, 2);
+  assert.ok(hit.from < hit.to);
 });
