@@ -259,6 +259,16 @@ test('formatManifest: no-key 说"没跑"，且不许出现"跑了没听到话"',
   assert.ok(!/may be misheard/.test(text), '没跑就不该出现"可能听错"');
 });
 
+test('formatManifest: 未合流的 DASH 音频指向 ffmpeg，而不是让人换 cookies', () => {
+  const r = makeResult({ cells: 4 });
+  r.source = { kind: 'url', audioMissing: true, audioMissingReason: 'unmerged-dash' };
+  r.transcript = { source: 'no-audio', segments: 0 };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /separate file instead of merging/);
+  assert.match(text, /DSH_FFMPEG_PATH/);
+  assert.ok(!/Pass cookies/.test(text), '合流失败不是 cookies 能修的');
+});
+
 /* ---------------------------------------------------------------- 多图落盘命名 */
 
 test('withSheetSuffix: 任何扩展名都不会互相覆盖', () => {

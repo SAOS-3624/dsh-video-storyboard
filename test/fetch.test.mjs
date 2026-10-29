@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -54,15 +54,15 @@ test('mediaKey: 清晰度不同 → 键不同', () => {
 
 test('formatSelector: B 站是 DASH，必须 bv*+ba 而不是 b', () => {
   // 渐进式单文件优先（快、不用合流），拿不到再退 DASH
-  assert.equal(formatSelector(360), 'b[height<=360]/bv*[height<=360]+ba/b[height<=360]/bv*+ba/b');
+  assert.equal(formatSelector(360), 'b[height<=360][acodec!=none]/bv*[height<=360]+ba/b[height<=360][acodec!=none]/bv*+ba/b');
   assert.equal(formatSelector(1080, { withAudio: false }), 'b[height<=1080]/bv*[height<=1080]/bv*/b');
-  assert.equal(formatSelector(0), 'bv*+ba/b');
+  assert.equal(formatSelector(0), 'bv*+ba/b[acodec!=none]/b');
 });
 
 test('formatSelector: 末尾必须留无筛选兜底（竖屏 height 是长边，会一个都匹配不到）', () => {
   // 9:16 视频在 yt-dlp 里是 360x640 / 480x852：height<=480 匹配不到任何格式
   assert.ok(formatSelector(480).endsWith('/bv*+ba/b'));
-  assert.ok(formatSelector(480).startsWith('b[height<=480]'), '先试渐进式');
+  assert.ok(formatSelector(480).startsWith('b[height<=480][acodec!=none]'), '先试渐进式，但必须带音轨');
   assert.ok(formatSelector(480, { withAudio: false }).endsWith('/bv*/b'));
 });
 
@@ -173,6 +173,7 @@ const FAKE_SOURCE = `
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 const args = process.argv.slice(2);
+if (process.env.FAKE_ARGS_FILE) writeFileSync(process.env.FAKE_ARGS_FILE, JSON.stringify(args));
 if (args.includes('--version')) { console.log('9999.01.01'); process.exit(0); }
 if (process.env.FAKE_FAIL === '1') {
   console.error('ERROR: Sign in to confirm you are not a bot');
@@ -237,6 +238,26 @@ test('fetchMedia: 解析 → 下载 → 第二次命中缓存', async () => {
     assert.equal(second.source.cached, true, '同一条链接第二次必须命中，否则下游缓存全部失效');
     assert.equal(second.path, first.path, '路径必须稳定');
   } finally {
+    await h.cleanup();
+  }
+});
+
+test('fetchMedia: 把 ffmpeg 路径传给 yt-dlp 用于 DASH 合流', async () => {
+  const h = await makeHarness();
+  const argsFile = join(h.root, 'args.json');
+  const prev = process.env.FAKE_ARGS_FILE;
+  process.env.FAKE_ARGS_FILE = argsFile;
+  try {
+    const ffmpegPath = join(h.root, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+    await fetchMedia('https://www.bilibili.com/video/BV1dash-ffmpeg', {
+      ytdlp: h.ytdlp, env: h.env, cookies: h.cookies, scanHeight: 360, ffmpegPath,
+    });
+    const args = JSON.parse(await readFile(argsFile, 'utf8'));
+    const at = args.indexOf('--ffmpeg-location');
+    assert.ok(at >= 0, '必须把 ffmpeg 位置传给 yt-dlp，否则 DASH 合流会静默失败');
+    assert.equal(args[at + 1], ffmpegPath);
+  } finally {
+    if (prev === undefined) delete process.env.FAKE_ARGS_FILE; else process.env.FAKE_ARGS_FILE = prev;
     await h.cleanup();
   }
 });
