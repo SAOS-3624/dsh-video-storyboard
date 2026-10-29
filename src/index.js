@@ -16,7 +16,7 @@ import { DETAIL_CHARS, runStoryboard, formatManifest, formatProbe, formatRemoteP
 import { probeVideo } from './probe.js';
 import { formatMatches, matchSegments, recallSegments } from './locate.js';
 import { lookupCell } from './cells.js';
-import { runWatchPass } from './watch-run.js';
+import { makeBuilder, runWatchPass } from './watch-run.js';
 import { loopStatus, startWatchLoop, stopWatchLoop } from './watch-loop.js';
 import { isHttpUrl, probeUrl, resolveDirectUrl, resolveInput } from './fetch.js';
 import {
@@ -214,11 +214,10 @@ async function registerAll(ctx) {
       if (args.loop !== false && lastSessionId && Number.isFinite(r.cursor)) {
         const size = r.size ?? 120;
         const startSeg = r.segment ?? 0;
-        // **只往后看 lookahead 秒**（默认 5 分钟），不是整片。
-        // 用户随时可能不看了——排到两小时之后就是在白算。滚动的：用户每看一段，
-        // 下一次调用把窗口再往前推一段。
-        const lookahead = Number.isFinite(Number(args.lookahead)) ? Number(args.lookahead) : 300;
-        const count = Math.max(1, Math.ceil(lookahead / size));
+        // **双缓冲**：始终保留 depth 个批次（默认 2 个 = 当前 + 下一个）。
+        // 前面的用完，后面的顶上，同时算再下一个 —— 永远有余量，且不会排到整片。
+        const depth = Math.max(1, Number(args.depth) || 2);
+        const count = depth;
         const segments = Array.from({ length: count }, (_, i) => {
           const from = startSeg + (i + 1) * size;
           return { from, to: from + size, sayAt: from + size - 15 };
@@ -226,8 +225,15 @@ async function registerAll(ctx) {
         startWatchLoop({
           ctx, sessionId: lastSessionId, input: r.input, segments,
           cursor: r.cursor, status: r.status,
-          // 把段长和窗口交给循环：之后它自己往前滚，不必等下一次工具调用
-          size, lookahead, log: () => {},
+          // 段长 / 缓冲深度交给循环：之后它自己往前滚、自己补建，不必等下一次工具调用
+          size, depth,
+          // 循环负责"什么时候建"，这里给它"怎么建"
+          deps: {
+            build: makeBuilder({
+              input: r.input, args: { ...args, segment: size }, runStoryboard, formatManifest, cache: watchCache,
+            }),
+          },
+          log: () => {},
         });
       }
       return { text: r.text, images: r.images };

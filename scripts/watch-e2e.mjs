@@ -18,7 +18,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { formatManifest, runStoryboard } from '../src/pipeline.js';
-import { runWatchPass } from '../src/watch-run.js';
+import { makeBuilder, runWatchPass } from '../src/watch-run.js';
 import { startWatchLoop, loopStatus, stopWatchLoop } from '../src/watch-loop.js';
 
 const args = Object.fromEntries(
@@ -77,7 +77,7 @@ const deps = {
     const p = (async () => {
     console.log(`\n[e2e] ${fmt(playhead())} 叫醒 → ${text.split('\n')[0].slice(0, 60)}…`);
     const r = await runWatchPass({ input, cursor: playhead(), segment, lead }, {
-      cache, runStoryboard, formatManifest,
+      cache: watchCache, runStoryboard, formatManifest,
       saveImage: async ({ data, name }) => { await writeFile(join('.tmp', name), data); return name; },
     });
     const cost = ((Date.now() - t) / 1000).toFixed(1);
@@ -95,9 +95,14 @@ const deps = {
   },
 };
 
+const watchCache = new Map();
+const build = makeBuilder({
+  input, args: { segment }, runStoryboard, formatManifest, cache: watchCache,
+});
 startWatchLoop({
   ctx: { sessionController: { prompt: async () => {} }, _fake: true },
-  sessionId: 'e2e', input, segments, deps, log: (m) => console.log(`[loop] ${m}`),
+  sessionId: 'e2e', input, segments, size: segment, depth: Number(args.depth ?? 2),
+  deps: { ...deps, build }, log: (m) => console.log(`[loop] ${m}`),
 });
 
 // 等到预算时间用完

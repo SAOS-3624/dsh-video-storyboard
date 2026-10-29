@@ -15,7 +15,7 @@ import { runWatchPass } from '../src/watch-run.js';
 
 const settle = () => new Promise((r) => setTimeout(r, 30));
 
-test('跑完一段会顺手把下一段建好（不阻塞返回）', async () => {
+test('显式 prefetch: true 时，抛完当前段会顺手建下一段', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'prefetch-'));
   process.env.DSH_VIDEO_CACHE_DIR = dir;
   try {
@@ -34,7 +34,7 @@ test('跑完一段会顺手把下一段建好（不阻塞返回）', async () =>
 
     const now = Date.now();
     // 第 0 段：应该建 0；随后后台预取 120
-    const r1 = await runWatchPass({ input: 'a.mp4', cursor: 10, segment: 120 }, {
+    const r1 = await runWatchPass({ input: 'a.mp4', cursor: 10, segment: 120, prefetch: true }, {
       ...deps, probe: async () => ({ ok: true, sessions: [
         { app: 'x', status: 4, pos: 10, dur: 1087, title: 'a', updated: now },
       ] }),
@@ -49,7 +49,7 @@ test('跑完一段会顺手把下一段建好（不阻塞返回）', async () =>
   }
 });
 
-test('prefetch: false 时不多建（省 CPU 的开关）', async () => {
+test('默认不预取：交给陪看循环去排（避免两处各建一次）', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'prefetch2-'));
   process.env.DSH_VIDEO_CACHE_DIR = dir;
   try {
@@ -61,9 +61,9 @@ test('prefetch: false 时不多建（省 CPU 的开关）', async () => {
       formatManifest: () => 'm',
       probe: async () => ({ ok: true, sessions: [] }),
     };
-    await runWatchPass({ input: 'b.mp4', cursor: 10, segment: 120, prefetch: false }, deps);
+    await runWatchPass({ input: 'b.mp4', cursor: 10, segment: 120 }, deps);
     await settle();
-    assert.deepEqual(built, [0], '关掉预取就只建当前段');
+    assert.deepEqual(built, [0], '默认只有当前段；预取由循环的双缓冲负责');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -89,7 +89,7 @@ test('第二段到点时是缓存命中（这一条守住"到点秒回"）', asy
       ] }),
     });
 
-    await runWatchPass({ input: 'c.mp4', cursor: 10, segment: 120 }, p(10));
+    await runWatchPass({ input: 'c.mp4', cursor: 10, segment: 120, prefetch: true }, p(10));
     await settle();                      // 预取完成
     const before = builds;
     const r2 = await runWatchPass({ input: 'c.mp4', cursor: 125, segment: 120 }, p(125));

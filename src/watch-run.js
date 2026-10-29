@@ -24,6 +24,17 @@ import { saveLines } from './watch.js';
 let tStartForNote = Date.now();
 
 /**
+ * 给循环用的建段函数：传一次参数，返回 `build(from) => Promise`。
+ * 循环负责"什么时候建"，这里只管"怎么建"。
+ */
+export function makeBuilder({ input, args = {}, runStoryboard, formatManifest, cache }) {
+  return (from) => buildSegment({
+    input, segStart: from, size: Number(args.segment) > 0 ? Number(args.segment) : 120,
+    args, runStoryboard, formatManifest, cache,
+  });
+}
+
+/**
  * 建一段：分镜 + 清单，放进缓存。
  * 抽出来是为了"当前段"和"下一段的预取"用同一条代码路径（预取跑偏了就是白烧 CPU）。
  */
@@ -210,13 +221,14 @@ export async function runWatchPass(args, deps) {
   const nextStart = segStart + size;
   const inRange = !Number.isFinite(activeSession?.dur) || nextStart < activeSession.dur;
   // 预取完顺手提示：想让它"到点立刻开口"，现在就把那句写好
-  const nextHint = (args.prefetch === false || !inRange)
+  const nextHint = (!inRange)
     ? ''
     : `\n[next] ${mmss(nextStart)}–${mmss(nextStart + size)} already prefetched. `
       + 'To make it speak the instant it is due, write the line now: '
       + `video_watch({ input, lines: [{ from: ${nextStart}, text: "…" }] })`;
-  if (args.prefetch !== false && inRange) {
-    // 延后一拍再建：先把这个响应交出去，别让后台活挡住用户这一眼
+  // 预取已经交给陪看循环（它有"当前 + 下一个"的双缓冲节奏）。
+  // 这里只在**没有循环**的单次调用里补一段，避免两处各建一次。
+  if (args.prefetch === true && inRange) {
     setTimeout(() => {
       void buildSegment({
         input, segStart: nextStart, size, args, runStoryboard, formatManifest, cache,

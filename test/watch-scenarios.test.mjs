@@ -119,3 +119,38 @@ test('⑦ 窗口不会无限长（跟着 lookahead 走）', async () => {
   assert.ok(n <= 10, `不该排到整片，实得 ${n} 段`);
   stopWatchLoop('test');
 });
+
+test('⑧ 双缓冲：当前批次还没用完，下一个已经建好了', async () => {
+  const built = [];
+  const sim = createSim({ refreshEveryMs: 30_000, duration: 900 });
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'A',
+    segments: [{ from: 0, to: 120 }, { from: 120, to: 240 }],
+    size: 120, depth: 2,
+    deps: {
+      ...sim.deps,
+      build: async (from) => { built.push(from); },
+    },
+    log: () => {},
+  });
+  // 看到 100 秒：第 0 段还在看，第 120 段应该已经建好了
+  await sim.runTo(100);
+  assert.ok(built.includes(120), `第 2 段应在第 1 段结束前建好，实际建了 ${built.join(',') || '无'}`);
+  assert.ok(!built.includes(240), '第 3 段这时还不该建（只保留 2 个批次）');
+  stopWatchLoop('test');
+});
+
+test('⑨ 换批次后立刻开始建再下一个（永远留一个余量）', async () => {
+  const built = [];
+  const sim = createSim({ refreshEveryMs: 30_000, duration: 1200 });
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'A',
+    segments: [{ from: 0, to: 120 }, { from: 120, to: 240 }],
+    size: 120, depth: 2,
+    deps: { ...sim.deps, build: async (from) => { built.push(from); } },
+    log: () => {},
+  });
+  await sim.runTo(150);          // 已经进入第 2 段
+  assert.ok(built.includes(240), `应已开始建第 3 段，实际 ${built.join(',')}`);
+  stopWatchLoop('test');
+});
