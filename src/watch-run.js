@@ -16,6 +16,7 @@ import {
   sessionKey, WATCH_LEAD, WATCH_SEGMENT,
 } from './watch.js';
 import { describeLatency, recordLatency } from './latency.js';
+import { estimate, makeAnchor } from './position.js';
 import { resolvePlayingSource } from './resolve-playing.js';
 
 // 模块级：latencyNote() 需要知道"这一轮从什么时候开始"
@@ -39,6 +40,7 @@ const mmss = (sec) => {
 export async function runWatchPass(args, deps) {
   const {
     saveImage, runStoryboard, formatManifest, cache = new Map(),
+    probe = probePlayback,
   } = deps;
   // 从"开始读进度"到"结果返回"的耗时 —— 这就是本机延迟的实测值，用来做提前量标定
   const tStart = Date.now();
@@ -54,7 +56,7 @@ export async function runWatchPass(args, deps) {
   const stateEarly = await loadWatch();
   const titleKey = (t) => String(t ?? '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '').slice(0, 40);
   if (!input) {
-    const p0 = await probePlayback();
+    const p0 = await probe();
     activeSession = p0.ok ? pickSession(p0.sessions, {}) : null;
     if (!activeSession?.title) {
       return {
@@ -103,22 +105,42 @@ export async function runWatchPass(args, deps) {
   };
   let cursor = parseCursor(args.cursor);
   let note = '';
+  let confidence = Number.isFinite(cursor) ? 'given' : null;
   if (!Number.isFinite(cursor)) {
-    const probe = await probePlayback();
-    const pick = probe.ok
-      ? pickSession(probe.sessions, { input, title: args.title ?? activeSession?.title ?? null })
+    const probeRes = await probe();
+    const pick = probeRes.ok
+      ? pickSession(probeRes.sessions, { input, title: args.title ?? activeSession?.title ?? null })
       : null;
     if (!pick) {
       return {
         ok: false,
-        text: `cannot read your playback position (${probe.error ?? 'no active media session'}).\n`
+        text: `cannot read your playback position (${probeRes.error ?? 'no active media session'}).\n`
           + 'Tell me how far you are (e.g. "我看到 12:30 了") and call again with cursor: 750. '
           + 'I will not guess — a wrong cursor makes every later segment wrong too.',
         images: [],
       };
     }
-    cursor = pick.pos;
-    note = ` (${pick.app}, ${describeStatus(pick.status)})`;
+    // **不能把 SMTC 的冻结值当实时值**：Edge 只在起播/暂停/拖动时刷新，
+    // 实测两次刷新隔过 143 秒。所以先问"这个值有多旧"，再决定信不信。
+    const est = estimate(makeAnchor(pick, Date.now()));
+    confidence = est.confidence;
+
+    if (est.confidence === 'unknown') {
+      return {
+        ok: false,
+        confidence,
+        text: `your playback position is unreadable right now: SMTC last updated `
+          + `${Math.round(est.staleMs / 1000)}s ago (${est.why}), so I cannot tell whether you are at `
+          + `${mmss(pick.pos)} or further.\n`
+          + 'Tell me where you are and pass cursor (e.g. cursor: 750 or "12:30"). '
+          + 'I will not extrapolate that far — a wrong position makes every later segment wrong.',
+        images: [],
+      };
+    }
+
+    cursor = est.pos;
+    note = ` (${pick.app}, ${describeStatus(pick.status)}`
+      + `${est.confidence === 'extrapolated' ? `, measured ${Math.round(est.staleMs / 1000)}s ago` : ''})`;
   }
 
   const segStart = segmentStart(cursor, size);
@@ -175,6 +197,8 @@ export async function runWatchPass(args, deps) {
     return {
       ok: true,
       speaking: false,
+      confidence,
+      status: note.includes('paused') ? 'paused' : 'playing',
       input,
       size,
       cursor,
@@ -228,6 +252,8 @@ export async function runWatchPass(args, deps) {
   return {
     ok: true,
     speaking: true,
+    confidence,
+    status: note.includes('paused') ? 'paused' : 'playing',
     input,
     size,
     cursor,

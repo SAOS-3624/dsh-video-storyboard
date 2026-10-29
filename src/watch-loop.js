@@ -1,24 +1,30 @@
 /**
  * watch-loop.js — 陪看循环：起钟、读进度、到点叫醒。
  *
- * 三件事，各自独立：
- *   1. **钟**（2 秒 tick，纯本地比较，不调模型）
- *   2. **进度**（每 15 秒读一次系统媒体控件，1 秒开销）
- *   3. **叫醒**（真到点才发一条极短消息进会话）
+ * 进度这一层交给 `position.js`：SMTC 的 `Position` **只在事件时刷新**
+ * （实测两次刷新隔过 143 s / 216 s，最长 155 s 不动），所以"位置值 + 刷新时刻"必须一起看，
+ * 不能把冻结值当实时值 —— 上一版就是这么一直 `not yet` 的。
  *
- * 为什么叫醒消息里不放内容：叫醒只是给 AI 一个"该说话了"的由头，
- * 真正的图和清单由它自己调 `video_watch` 拿到——那条消息越短，上下文越干净。
+ * 循环只做三件事，各自频率不同：
+ *   每 2 秒   本地判定（纯算术，不调模型）
+ *   每 15 秒  读一次 SMTC（起 python ≈1 s），更新锚点
+ *   真到点    往会话投一条极短消息（这才贵）
  */
 
 import { aheadSeconds, loadLatency } from './latency.js';
 import {
-  dueDecision, startTicker, wakeSession,
-} from './timer.js';
-import { describeStatus, pickSession, probePlayback } from './watch.js';
+  MAX_EXTRAPOLATE_MS, estimate, makeAnchor, shouldSpeak, updateAnchor,
+} from './position.js';
+import { startTicker, wakeSession } from './timer.js';
+import { pickSession, probePlayback } from './watch.js';
 
 const mmss = (s) => `${String(Math.floor(Math.max(0, s) / 60)).padStart(2, '0')}:${String(Math.round(Math.max(0, s) % 60)).padStart(2, '0')}`;
 
-/** 进程内唯一的陪看循环 */
+const TICK_MS = 2000;
+const PROBE_EVERY_MS = 15_000;
+/** 连续多久读不到可信位置就停表等人给 cursor（别在那儿空转 20 分钟） */
+const UNKNOWN_GIVE_UP_MS = 180_000;
+
 const loop = {
   active: false,
   ctx: null,
@@ -26,30 +32,27 @@ const loop = {
   input: null,
   segments: [],
   spoken: [],
-  cursor: null,
-  measuredAt: 0,
-  status: null,
-  lastProbeAt: 0,
-  ticker: null,
+  anchor: null,
   aheadSec: 0,
-  frozen: false,
+  unknownSince: 0,
+  lastProbeAt: 0,
+  lastReason: '',
+  ticker: null,
   log: () => {},
-  onWake: null,
 };
 
-const PROBE_EVERY_MS = 15_000;
-const TICK_MS = 2000;
-
 export function loopStatus() {
+  const est = loop.anchor ? estimate(loop.anchor) : null;
   return {
     active: loop.active,
     session: loop.sessionId,
     input: loop.input,
-    spoken: loop.spoken.length,
-    cursor: loop.cursor,
-    status: loop.status,
-    frozenTimeline: loop.frozen,
     segments: loop.segments.length,
+    spoken: loop.spoken.length,
+    pos: est ? +est.pos.toFixed(1) : null,
+    confidence: est?.confidence ?? 'none',
+    staleMs: est ? est.staleMs : null,
+    reason: loop.lastReason,
   };
 }
 
@@ -58,97 +61,130 @@ export function stopWatchLoop(reason = 'stopped') {
   loop.ticker = null;
   if (loop.active) loop.log(`[watch] loop stopped (${reason})`);
   loop.active = false;
+  loop.lastReason = reason;
   return loopStatus();
 }
 
 /**
- * 起循环。重复调用会先停旧的（同一个用户只会有一段陪看）。
+ * 起循环。重复调用先停旧的（同一时刻只允许一段陪看）。
+ *
  * @param {object} o
- * @param {object} o.ctx        宿主上下文（用 sessionController 叫醒）
- * @param {string} o.sessionId  要叫醒哪个会话
- * @param {string} o.input      源（本地路径或链接）
- * @param {Array<{from:number,to:number}>} o.segments 待说的段（绝对时间）
+ * @param {object} o.ctx
+ * @param {string} o.sessionId
+ * @param {string} o.input
+ * @param {Array<{from:number,to:number,sayAt?:number}>} o.segments
+ * @param {number} [o.cursor]  用户自报的真实进度 —— 传了就以它当锚点（SMTC 不可信时的兜底）
+ * @param {'playing'|'paused'} [o.status]
  */
 export function startWatchLoop({
-  ctx, sessionId, input, segments, cursor = null, status = null, log = () => {}, onWake = null,
+  ctx, sessionId, input, segments, cursor = null, status = 'playing', log = () => {},
 }) {
   if (!sessionId) return { ok: false, reason: 'no-session-id' };
   if (!Array.isArray(segments) || segments.length === 0) return { ok: false, reason: 'no-segments' };
 
   stopWatchLoop('restart');
 
-  loop.active = true;
-  loop.ctx = ctx;
-  loop.sessionId = sessionId;
-  loop.input = input;
-  loop.segments = segments.map((s) => ({
-    from: Number(s.from),
-    to: Number(s.to),
-    sayAt: Number.isFinite(s.sayAt) ? s.sayAt : Number(s.to) - 15,
-  }));
-  loop.spoken = [];
-  loop.cursor = Number.isFinite(cursor) ? cursor : null;
-  loop.measuredAt = Date.now();
-  loop.status = status;
-  loop.lastProbeAt = 0;
-  loop.log = log;
-  // 先按上次标定的值起跑；每轮 tick 都会重新读一次（别的进程可能刚更新过）
+  Object.assign(loop, {
+    active: true,
+    ctx,
+    sessionId,
+    input,
+    segments: segments.map((s) => ({
+      from: Number(s.from),
+      to: Number(s.to),
+      sayAt: Number.isFinite(s.sayAt) ? s.sayAt : Number(s.to) - 15,
+    })),
+    spoken: [],
+    aheadSec: 0,
+    unknownSince: 0,
+    lastProbeAt: 0,
+    lastReason: 'started',
+    log,
+  });
+
+  // 用户自报的 cursor 当作"刚刚刷新过的真值"，比任何外推都可信
+  loop.anchor = Number.isFinite(cursor)
+    ? makeAnchor({ pos: cursor, dur: null, status, updated: Date.now() })
+    : null;
+
   void loadLatency().then((st) => { loop.aheadSec = aheadSeconds(st); });
 
   loop.ticker = startTicker({
     everyMs: TICK_MS,
     tick: async () => {
       const now = Date.now();
-      // 进度每 15 秒读一次：读一次要起个 python 进程（≈1 s），没必要跟着 2 秒的钟跑
+
       if (now - loop.lastProbeAt >= PROBE_EVERY_MS) {
         loop.lastProbeAt = now;
-        const p = await probePlayback({ env: process.env });
+        const p = await probePlayback();
         const s = p.ok ? pickSession(p.sessions ?? [], { input: loop.input }) : null;
         if (s) {
-          const nextStatus = describeStatus(s.status);
-          // **Edge + B站 的 SMTC timeline 会冻结**：PlaybackStatus=Playing，但 Position 和
-          // LastUpdatedTime 都停在起播那一刻（实测 3 分钟不动）。这时候如果照样刷新 measuredAt，
-          // 外推就被每 15 秒重置一次，永远以为用户停在原地 → 一直"not yet"。
-          // 所以：位置没动就**不刷新锚点**，让外推继续走。
-          const moved = Math.abs((s.pos ?? 0) - (loop.cursor ?? 0)) > 0.5;
-          if (moved || loop.cursor === null) {
-            loop.cursor = s.pos;
-            loop.measuredAt = now;
+          if (loop.anchor) {
+            const { anchor, driftSec, refreshed, changedVideo } = updateAnchor(loop.anchor, s, now);
+            if (changedVideo) {
+              stopWatchLoop('video-changed');
+              return;
+            }
+            if (refreshed && Math.abs(driftSec) > 5) {
+              // 刷新给出的真值和我们的外推差得多：中间暂停/缓冲过。
+              // 不惩罚，只是用新锚点重算。
+              loop.log(`[watch] re-anchored, drift ${driftSec}s`);
+            }
+            loop.anchor = anchor;
+          } else {
+            loop.anchor = makeAnchor(s, now);
           }
-          loop.status = nextStatus;
-          loop.frozen = !moved && nextStatus === 'playing';
-        } else if (p.ok) {
-          loop.status = 'no-session';
+          const st = await loadLatency();
+          loop.aheadSec = aheadSeconds(st);
         }
       }
 
-      const pausedMs = loop.status === 'paused' ? now - loop.measuredAt : null;
-      const d = dueDecision({
-        cursor: loop.cursor,
-        measuredAt: loop.measuredAt,
-        now,
-        segments: loop.segments,
-        spoken: loop.spoken,
-        lead: 15,
-        pausedMs,
-        aheadSec: loop.aheadSec,
-      });
-
-      if (!d.wake) {
-        if (d.why === 'paused-too-long') stopWatchLoop('paused-too-long');
+      if (!loop.anchor) {
+        loop.lastReason = 'no-anchor';
         return;
       }
 
-      loop.spoken.push(d.segment);
-      const seg = loop.segments.find((x) => x.from === d.segment);
+      const r = shouldSpeak({
+        anchor: loop.anchor,
+        segments: loop.segments,
+        spoken: loop.spoken,
+        now,
+        lead: 15,
+        aheadSec: loop.aheadSec,
+      });
+      loop.lastReason = r.reason ?? 'not-due';
+
+      if (r.reason === 'position-unknown') {
+        if (!loop.unknownSince) loop.unknownSince = now;
+        if (now - loop.unknownSince > UNKNOWN_GIVE_UP_MS) {
+          // 读不到就别空转：停掉，等用户给 cursor 重新起
+          stopWatchLoop('position-unreadable');
+        }
+        return;
+      }
+      loop.unknownSince = 0;
+
+      if (!r.speak) return;
+
+      loop.spoken.push(r.segment);
+      const seg = loop.segments.find((x) => x.from === r.segment);
       const text = `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 这一段该说话了`
-        + `（用户现在看到 ${mmss(d.pos)}）。调 video_watch 拿这一段的画面，然后说一句。`;
-      const r = await wakeSession(loop.ctx, { sessionId: loop.sessionId, text });
-      loop.log(`[watch] wake ${d.segment}s → ${r.ok ? 'ok' : r.reason}`);
-      onWake?.({ ...d, text, ok: r.ok, reason: r.reason });
+        + `（用户大约看到 ${mmss(r.pos)}${r.confidence === 'extrapolated' ? '，按墙钟推算' : ''}）。`
+        + '调 video_watch 拿这一段的画面，然后只说一句。';
+      const w = await wakeSession(loop.ctx, { sessionId: loop.sessionId, text });
+      loop.log(`[watch] wake ${r.segment}s (${r.confidence}) → ${w.ok ? 'ok' : w.reason}`);
     },
   });
 
   loop.log(`[watch] loop started: ${loop.segments.length} segment(s), session ${sessionId}`);
   return { ok: true, ...loopStatus() };
 }
+
+/** 仅测试用：直接注入锚点，跳过 SMTC */
+export function __setAnchorForTest(anchor) {
+  loop.anchor = anchor;
+}
+
+export const LOOP_LIMITS = Object.freeze({
+  TICK_MS, PROBE_EVERY_MS, UNKNOWN_GIVE_UP_MS, MAX_EXTRAPOLATE_MS,
+});
