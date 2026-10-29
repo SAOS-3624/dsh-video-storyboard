@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Hard-coded subtitles now correct the transcript** when `detail: high`. ASR mishears names and particles
+  (「他也忘记。」 for a line that actually reads 「你连，也要忘记吗」); the burned-in text is the authority.
+  The pass is deliberately cheap: one detection pass over three full-resolution frames locates the subtitle
+  band (~3 s), then each sampled line is OCR'd as a band crop **without detection** — 0.26 s instead of 3.1 s.
+
+  It replaces text only when the OCR covers ≥60% of the ASR characters in order, and it trims the matched span
+  so the neighbouring line does not leak in. Measured on a music-video sample: 1 of 3 lines fixed, the rest
+  left alone. Runs locally, so **no extra tokens** — versus ~34,500 tokens if the model read the subtitles
+  frame by frame. Silently skipped when rapidocr is not installed, and it says so rather than pretending.
+
+### Changed
+
+- Segments dropped as non-speech now say what they most likely are ("singing or music, NOT dialogue") and
+  that they are **excluded rather than guessed**.
+
 ## [0.4.3] — 2026-10-29
 
 ### Headline: the ASR path was the weak spot

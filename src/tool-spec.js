@@ -86,6 +86,12 @@ export function storyboardToolSpec() {
           '[{from,to,text}] / Bilibili {body:[{from,to,content}]}). When given, the subtitle track ' +
           'and ASR are both skipped — use this when the site already has captions.',
       },
+      ocr: {
+        type: 'boolean',
+        description: 'Correct ASR text against burned-in on-screen subtitles (local OCR, no extra tokens). ' +
+          'Defaults to true when detail=high. Only helps when the video actually has hard-coded subtitles; ' +
+          'silently skipped otherwise.',
+      },
       hotwords: {
         type: 'string',
         description: 'Space-separated terms to bias this run\'s transcription (e.g. "位错 滑移 柏氏矢量"). ' +

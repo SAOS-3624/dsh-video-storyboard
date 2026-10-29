@@ -87,6 +87,8 @@ export async function apply(ctx) {
       sourceHash: args.sourceHash === true,
       textOnly: args.textOnly === true,
       detail: args.detail ?? 'med',
+      // detail=high 表示"要能引用原话"，这时才值得用硬字幕校正（本地 OCR，不花 token）
+      ocr: args.ocr === true || (args.ocr !== false && (args.detail ?? 'med') === 'high'),
       fetchOptions: {
         cookies: args.cookies,
         allowAnonymous: args.allowAnonymous === true,

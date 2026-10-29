@@ -5,9 +5,13 @@
  * 本模块只返回内存里的 PNG buffer 与结构化清单，落盘由调用方决定。
  */
 
-import { writeFile } from 'node:fs/promises';
-import { cpus } from 'node:os';
-import { spawn } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cpus, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const runFile = promisify(execFile);
 
 import { probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
 import { resolveInput } from './fetch.js';
@@ -24,6 +28,7 @@ import {
   ASR_DEFAULTS, alignCells, applyTermMap, describeAsrTarget, explainFetchError, extractSubtitleTrack,
   filterSuspectSegments, resolveAsrConfig, speechCurve, transcribeLong,
 } from './asr.js';
+import { detectSubtitleBand, OCR_MAX_ITEMS, ocrPython, readBand, shouldReplace } from './ocr.js';
 import { cacheKey, pruneCache, withCache } from './cache.js';
 import { ffmpegVersion, sha256File } from './provenance.js';
 import { findInjection } from './injection.js';
@@ -109,6 +114,8 @@ export async function runStoryboard(opts) {
     // 热词按**这一次**覆盖全局：材料视频该传「位错 滑移 柏氏矢量」，口播摄影片传「像差 焦段」。
     // 全局 asr.json 里的那份是默认值，不是铁律 —— 学科不对时它对识别是负偏置。
     hotwords,
+    // 用画面硬字幕校正 ASR（detail=high 时才开）：OCR 全程本地，不花 token
+    ocr = false,
     cache = true,
     textOnly = false,
     precomputed = null,
@@ -310,7 +317,23 @@ export async function runStoryboard(opts) {
 
   // ---- 台词：显式文件 > 字幕轨 > ASR；三者都没有就静默跳过（绝不让分镜失败）
 
-  const { transcriptInfo, textInSilence } = await transcriptP;
+  const transcriptResult = await transcriptP;
+  let { transcriptInfo } = transcriptResult;
+  const { textInSilence } = transcriptResult;
+  // ---- 硬字幕校正：只在明确要求、且转写来自 ASR 时才做
+  let ocrReport = null;
+  if (ocr && transcriptInfo?.source === 'asr' && (transcriptInfo.segments?.length ?? 0) > 0) {
+    ocrReport = await correctByOnScreenSubs({
+      input, winStart, winDur, ffmpegPath, segments: transcriptInfo.segments, remoteFrame,
+    }).catch((e) => {
+      if (process.env.DSH_OCR_DEBUG) console.error('[ocr]', e?.message ?? e);
+      return { status: 'failed', reason: String(e?.message ?? e).slice(0, 160) };
+    });
+    if (ocrReport?.status === 'applied' && ocrReport.fixed > 0) {
+      transcriptInfo = { ...transcriptInfo, segments: ocrReport.segments, ocrFixed: ocrReport.fixed };
+    }
+    delete ocrReport.segments;
+  }
   const relSegments = (transcriptInfo?.segments ?? [])
     .map((seg) => ({ ...seg, from: seg.from - winStart, to: seg.to - winStart }))
     .filter((seg) => seg.to > 0 && seg.from < winDur);
@@ -547,6 +570,7 @@ export async function runStoryboard(opts) {
 
   return {
     timing,
+    ...(ocrReport ? { ocr: ocrReport } : {}),
     info,
     provenance,
     window: { from: winStart, to: winStart + winDur, duration: winDur },
@@ -730,6 +754,87 @@ async function mapPool(items, limit, fn) {
     }
   }));
   return out;
+}
+
+
+/**
+ * 用画面硬字幕校正 ASR。流程刻意分两步，因为检测是最贵的一环：
+ *   ① 抽 2–3 张**原分辨率**帧做一次全图检测，定出字幕带   （≈3 s）
+ *   ② 对若干条台词，只裁那一条带子做识别（不做检测）      （≈0.26 s/条）
+ *
+ * 只有三条都成立才替换（见 shouldReplace）：OCR 置信度够、长度差不多、相似度落在 0.2–0.9。
+ * 剩下的情况一律保留 ASR 原文 —— 宁可留一个已知的错字，也不要引入一个来源不明的句子。
+ */
+async function correctByOnScreenSubs({ input, winStart, winDur, ffmpegPath, segments, remoteFrame }) {
+  // 直链是另一套取帧路径（带 header），第一版不做 —— 明确说"跳过"，而不是悄悄不生效
+  if (remoteFrame?.uri) return { status: 'skipped', reason: 'remote-frame-source' };
+  const python = ocrPython();
+  if (!python) return { status: 'skipped', reason: 'no-python-with-rapidocr' };
+
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-ocr-'));
+  try {
+    const grab = async (at, outName, crop) => {
+      const out = join(dir, outName);
+      const args = ['-hide_banner', '-v', 'error', '-y', '-ss', String(Math.max(0, at)), '-i', input,
+        '-frames:v', '1', '-q:v', '2'];
+      if (crop) args.push('-vf', crop);
+      args.push(out);
+      await runFile(ffmpegPath, args);
+      return out;
+    };
+
+    // ① 定字幕带：取窗口内均匀分布的 3 个时刻
+    const probes = await Promise.all([0.2, 0.5, 0.8].map((r, i) => grab(
+      winStart + winDur * r, `probe${i}.jpg`, null,
+    )));
+    const band = await detectSubtitleBand({ python, frames: probes });
+    if (!band) return { status: 'failed', reason: 'detect-failed' };
+
+    const [y0, y1] = band.band;
+    const crop = `crop=iw:ih*${(y1 - y0).toFixed(4)}:0:ih*${y0.toFixed(4)},scale=1280:-1`;
+
+    // ② 均匀抽样若干条台词（不取全部，成本与收益不成正比）
+    const picks = [];
+    const n = Math.min(OCR_MAX_ITEMS, segments.length);
+    const step = segments.length / n;
+    for (let i = 0; i < n; i += 1) picks.push(Math.floor(i * step));
+
+    const images = [];
+    for (const [k, idx] of picks.entries()) {
+      const seg = segments[idx];
+      const mid = winStart + (seg.from + seg.to) / 2;
+      images.push(await grab(mid, `band${k}.jpg`, crop));
+    }
+    const items = await readBand({ python, images });
+    if (!items) return { status: 'failed', reason: 'read-failed' };
+
+    const out = segments.map((x) => ({ ...x }));
+    const changes = [];
+    for (const [k, idx] of picks.entries()) {
+      const seg = segments[idx];
+      const ocrText = (items[k]?.text ?? '').replace(/\s+/g, '');
+      const verdict = shouldReplace({ asr: seg.text, ocr: ocrText, conf: items[k]?.conf ?? 0 });
+      if (process.env.DSH_OCR_DEBUG) {
+        console.error('[ocr]', seg.from.toFixed(1), JSON.stringify(seg.text), '| ocr:', JSON.stringify(ocrText),
+          '| conf', items[k]?.conf, '|', verdict.reason, verdict.cover ?? '');
+      }
+      if (verdict.replace) {
+        const fixedText = verdict.text ?? ocrText;
+        changes.push({ from: seg.from, was: seg.text, now: fixedText, cover: verdict.cover });
+        out[idx] = { ...seg, text: fixedText };
+      }
+    }
+    return {
+      status: 'applied',
+      fixed: changes.length,
+      checked: picks.length,
+      band: { y0: +y0.toFixed(3), y1: +y1.toFixed(3), detected: band.detected },
+      changes: changes.slice(0, 5),
+      segments: out,
+    };
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 async function extractSubTile({ input, remote, a, b, k, cellW, cellH, ffmpegPath }) {
@@ -1203,8 +1308,22 @@ export function formatManifest(result, {
     if (result.transcript.suspect > 0) {
       const detail = (result.transcript.suspectDetail ?? [])
         .map((d) => `${d.from}-${d.to}s (${d.charsPerSec} chars/s, ${d.reason})`).join(', ');
-      lines.push(`${result.transcript.suspect} segment(s) ignored as non-speech: ${detail}` +
+      lines.push(`${result.transcript.suspect} segment(s) ignored as non-speech — most likely singing or ` +
+        `music, NOT dialogue, so they are excluded from the transcript rather than guessed: ${detail}` +
         (result.transcript.suspect > 3 ? ', …' : ''));
+    }
+  }
+  if (result.ocr) {
+    if (result.ocr.status === 'applied') {
+      lines.push(result.ocr.fixed > 0
+        ? `on-screen subtitles used to correct ${result.ocr.fixed} of ${result.ocr.checked} checked lines ` +
+          `(band y=${result.ocr.band.y0}-${result.ocr.band.y1}): ${result.ocr.changes
+            .map((c) => `${c.from.toFixed(1)}s "${c.was}" → "${c.now}"`).join(' · ')}`
+        : `on-screen subtitles checked ${result.ocr.checked} lines, nothing needed changing ` +
+          `(band y=${result.ocr.band.y0}-${result.ocr.band.y1}).`);
+    } else {
+      lines.push(`on-screen subtitle correction skipped (${result.ocr.reason ?? result.ocr.status}) — ` +
+        'transcript is ASR only.');
     }
   }
   if (result.transcript?.source === 'asr-failed') {

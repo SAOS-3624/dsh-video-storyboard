@@ -296,6 +296,29 @@ DSH_ASR_KEY        DSH_ASR_KEY_ENV
 
 > 桌面版 DSH 的进程环境由启动器决定，`setx` 设的变量宿主读不到 —— **优先用 `asr.json`**。
 
+### 硬字幕校正（`detail: high` 时自动开）
+
+画面里烧进去的字幕是**确定的文本**，ASR 会听错。开 `detail: high` 时插件会：
+
+1. 抽 2–3 张原分辨率帧，找出字幕带（≈3 秒，只做一次）
+2. 对若干条台词，只裁那一条带子做 OCR（≈0.26 秒/条，**不做检测**）
+3. OCR 文本能覆盖 ASR 那句（≥60% 的字按顺序对得上）就替换，否则保留 ASR
+
+```
+明细里会写：on-screen subtitles used to correct 1 of 3 checked lines:
+             4.4s "他也忘记。" → "也要忘记吗"
+```
+
+**实测**（同一段 PV）：ASR 出「所以。他也忘记。」，画面是「你连，也要忘记吗」——OCR 把整句救回来了。
+
+**全程本地、不花 token。** 需要 `rapidocr_onnxruntime`：
+
+```bash
+pip install rapidocr-onnxruntime
+```
+
+没装就**静默跳过**，清单里会写 `skipped (no-python-with-rapidocr)`，不会当作成功。
+
 ### 热词（比换模型更有效）
 
 **热词要按片子传，不要写死在全局。** 全局那份是默认值，学科不对时它是**负偏置**（拿摄影词去识别材料学讲座，只会帮倒忙）。
