@@ -15,7 +15,17 @@ import {
   deliveryState, describeStatus, loadWatch, pickSession, probePlayback, saveWatch, segmentStart,
   sessionKey, WATCH_LEAD, WATCH_SEGMENT,
 } from './watch.js';
+import { describeLatency, recordLatency } from './latency.js';
 import { resolvePlayingSource } from './resolve-playing.js';
+
+// 模块级：latencyNote() 需要知道"这一轮从什么时候开始"
+let tStartForNote = Date.now();
+
+async function latencyNote() {
+  const st = await recordLatency(Date.now() - tStartForNote);
+  // 标定完成后就不再占 token 了
+  return st.samples > 3 ? '' : `\n${describeLatency(st)}`;
+}
 
 const mmss = (sec) => {
   const s = Math.max(0, Math.round(sec));
@@ -30,6 +40,9 @@ export async function runWatchPass(args, deps) {
   const {
     saveImage, runStoryboard, formatManifest, cache = new Map(),
   } = deps;
+  // 从"开始读进度"到"结果返回"的耗时 —— 这就是本机延迟的实测值，用来做提前量标定
+  const tStart = Date.now();
+  tStartForNote = tStart;
   const size = Number(args.segment) > 0 ? Number(args.segment) : WATCH_SEGMENT;
   const lead = args.lead !== undefined ? Number(args.lead) : WATCH_LEAD;
 
@@ -167,7 +180,8 @@ export async function runWatchPass(args, deps) {
       cursor,
       measuredAt,
       segment: segStart,
-      text: `${head}\nnot yet — keep watching. I will speak near ${mmss(segStart + size - lead)}.`,
+      text: `${head}\nnot yet — keep watching. I will speak near ${mmss(segStart + size - lead)}.`
+        + await latencyNote(),
       images: [],
     };
   }
@@ -219,7 +233,7 @@ export async function runWatchPass(args, deps) {
     cursor,
     measuredAt,
     segment: segStart,
-    text: `${head}\n${guidance}\n\n${entry.manifest}`,
+    text: `${head}\n${guidance}${await latencyNote()}\n\n${entry.manifest}`,
     images,
   };
 }

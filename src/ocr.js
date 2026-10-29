@@ -35,7 +35,12 @@ export async function ocrPython({ config = {}, env = process.env } = {}) {
 function runBridge({ python, mode, images, timeoutMs = 120_000 }) {
   const bridge = join(HERE, 'ocr_bridge.py');
   return new Promise((resolve) => {
-    execFile(python, [bridge, mode, ...images], { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
+    execFile(python, [bridge, mode, ...images], {
+      timeout: timeoutMs,
+      maxBuffer: 8 * 1024 * 1024,
+      windowsHide: true,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+    },
       (err, stdout) => {
         if (err) return resolve(null);
         try {

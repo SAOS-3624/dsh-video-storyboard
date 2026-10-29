@@ -10,6 +10,14 @@
 
 import asyncio
 import json
+import sys
+
+# Windows 下 stdout 默认是 cp936：中文标题会被写成 GBK 字节，Node 按 UTF-8 解就是 `��ҹ32Сʱ`。
+# 强制 UTF-8，别指望环境变量。
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:                       # noqa: BLE001
+    pass
 
 
 async def main():
@@ -38,6 +46,7 @@ async def main():
                 title = None
             out.append({
                 "app": s.source_app_user_model_id,
+                "updated": int(tl.last_updated_time.timestamp() * 1000) if tl.last_updated_time else None,
                 # 4 = paused, 5 = playing（SMTC 枚举）
                 "status": int(info.playback_status),
                 "pos": round(tl.position.total_seconds(), 2),

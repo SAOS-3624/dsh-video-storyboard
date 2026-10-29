@@ -10,6 +10,7 @@
  * 真正的图和清单由它自己调 `video_watch` 拿到——那条消息越短，上下文越干净。
  */
 
+import { aheadSeconds, loadLatency } from './latency.js';
 import {
   dueDecision, startTicker, wakeSession,
 } from './timer.js';
@@ -30,6 +31,8 @@ const loop = {
   status: null,
   lastProbeAt: 0,
   ticker: null,
+  aheadSec: 0,
+  frozen: false,
   log: () => {},
   onWake: null,
 };
@@ -45,6 +48,7 @@ export function loopStatus() {
     spoken: loop.spoken.length,
     cursor: loop.cursor,
     status: loop.status,
+    frozenTimeline: loop.frozen,
     segments: loop.segments.length,
   };
 }
@@ -88,6 +92,8 @@ export function startWatchLoop({
   loop.status = status;
   loop.lastProbeAt = 0;
   loop.log = log;
+  // 先按上次标定的值起跑；每轮 tick 都会重新读一次（别的进程可能刚更新过）
+  void loadLatency().then((st) => { loop.aheadSec = aheadSeconds(st); });
 
   loop.ticker = startTicker({
     everyMs: TICK_MS,
@@ -99,10 +105,18 @@ export function startWatchLoop({
         const p = await probePlayback({ env: process.env });
         const s = p.ok ? pickSession(p.sessions ?? [], { input: loop.input }) : null;
         if (s) {
-          // 位置在动就更新；暂停时保留旧值，但记下状态
-          loop.cursor = s.pos;
-          loop.measuredAt = now;
-          loop.status = describeStatus(s.status);
+          const nextStatus = describeStatus(s.status);
+          // **Edge + B站 的 SMTC timeline 会冻结**：PlaybackStatus=Playing，但 Position 和
+          // LastUpdatedTime 都停在起播那一刻（实测 3 分钟不动）。这时候如果照样刷新 measuredAt，
+          // 外推就被每 15 秒重置一次，永远以为用户停在原地 → 一直"not yet"。
+          // 所以：位置没动就**不刷新锚点**，让外推继续走。
+          const moved = Math.abs((s.pos ?? 0) - (loop.cursor ?? 0)) > 0.5;
+          if (moved || loop.cursor === null) {
+            loop.cursor = s.pos;
+            loop.measuredAt = now;
+          }
+          loop.status = nextStatus;
+          loop.frozen = !moved && nextStatus === 'playing';
         } else if (p.ok) {
           loop.status = 'no-session';
         }
@@ -117,6 +131,7 @@ export function startWatchLoop({
         spoken: loop.spoken,
         lead: 15,
         pausedMs,
+        aheadSec: loop.aheadSec,
       });
 
       if (!d.wake) {
