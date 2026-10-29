@@ -18,7 +18,7 @@ import { probeVideo } from './probe.js';
 import { formatMatches, matchSegments, recallSegments } from './locate.js';
 import { lookupCell } from './cells.js';
 import { DEFAULT_RAMP, DEFAULT_SEGMENT } from './batches.js';
-import { configuredLaunch, configuredPort, listTargets } from './browser-time.js';
+import { configuredLaunch, configuredPort, listTargets, probeBrowser } from './browser-time.js';
 import { chatAlive, startChatServer, DEFAULT_CHAT_PORT } from './chat.js';
 import { checkBiliLogin, fetchRemoteSubtitles } from './subtitles.js';
 import { listVoices, speak as speakAloud } from './tts.js';
@@ -191,8 +191,16 @@ async function registerAll(ctx) {
       if (args.stopLoop === true) return { text: JSON.stringify(stopWatchLoop('requested')), images: [] };
       // 即将进入阻塞：把聊天框支起来（第一次会起服务 + 开标签，之后什么都不做）
       if (args.wait === true) void ensureChatBox(args.browserPort ?? configuredPort());
-      // 只看钟的状态，不读进度、不出图 —— 排查"它为什么不说话"时用
-      if (args.statusOnly === true) return { text: JSON.stringify(loopStatus()), images: [] };
+      // 只看钟的状态，不读进度、不出图 —— 排查"它为什么不说话"时用。
+      // **顺带报浏览器状态**：这是唯一一个"只问不建"的入口，模型想知道
+      // "浏览器到底开着没"的时候应该走这里，而不是拿播放位置去倒推。
+      if (args.statusOnly === true) {
+        const bp = args.browserPort ?? configuredPort() ?? null;
+        const browser = bp
+          ? await probeBrowser({ port: bp }).catch(() => ({ state: 'error', port: bp }))
+          : { state: 'unconfigured', port: null };
+        return { text: JSON.stringify({ ...loopStatus(), browser }, null, 1), images: [] };
+      }
       // 看这台机器有哪些声音（TTS 用）
       if (args.listVoices === true) return { text: JSON.stringify(await listVoices()), images: [] };
 

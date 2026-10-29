@@ -2,6 +2,68 @@
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-10-30
+
+### Fixed
+
+- **The cell map was never written (video_zoom `cellId` never resolved).** `runStoryboard` ended with
+  a bare `return {` instead of `const result = {`, so `saveCells()` and the final `return result` were
+  unreachable dead code. It now assigns, awaits `saveCells`, and returns the result. `cellId` lookups
+  were broken for every storyboard since 0.4.4.
+- **Cell lookup by URL.** A remote video is addressed by URL but downloaded to a temp path; only one
+  of the two was stored, so the other always returned NOT FOUND. `saveCells` now takes aliases and
+  writes the same record under each.
+- **`spikeCuts` local-window median used the wrong indices** when `lo > 0`
+  (`slice(i - lo + 1, hi - lo)` indexes the whole array, not the neighbours), so a real cut could be
+  dropped.
+- **Bilibili DASH audio (PR #19, issue #18).** `formatSelector` now requires `[acodec!=none]` on the
+  progressive branch, and `fetchMedia` hands yt-dlp our ffmpeg so video+audio actually merge. The
+  manifest now separates "unmerged-dash" from "silent source" — cookies do not fix the former.
+- **`paused` false positives.** It was read straight from the DOM, and reported paused while the video
+  was playing (observed: 8.6 s of progress over 66 s of wall clock, then a jump to 01:24). Now three
+  signals must agree: `video.paused`, whether `currentTime` actually advanced, and a `staleMs` marker
+  so "really paused" is distinguishable from "cannot read". `rawPaused` keeps the DOM value.
+- **`waitForVideo` only waited when the source was unknown.** A video page being open is not the same
+  as a readable position; the wait loop was skipped in exactly the most common case (page open, play
+  not pressed). It now waits for `pos > 0.5 || playing` and reports `waitedSec`.
+- **Enabling `tts` mid-loop had no effect.** `samePlan` compared input/sessionId/segment/ramp but not
+  `tts`, and `loop.tts` was only assigned when creating a loop — so `speakNow` followed by
+  `lines + tts:true` resumed forever with `tts = null`. The loop never ran in TTS mode. Same for
+  `wakeOnLinesEmpty`.
+- **The same video opened twice on every cold start.** `ensureBrowser` checked `sameTarget()` right
+  after `launchBrowser` had already been handed the URL, while the tab was still `about:blank`, and
+  opened a second one. It now waits up to 4 s for the tab to load.
+- **Scheduled task name embedded the port**, so every port change left another task behind (two were
+  found on disk). The name is fixed; port-suffixed leftovers are cleaned on each launch.
+- **Edge path was hardcoded to the x86 location**, which does not exist on this machine and kills
+  auto-launch on Chrome-only setups. Both Edge locations plus both Chrome ones are now tried.
+
+### Added
+
+- **`chat.js` — a localhost chat box shared by the CLI and the plugin.** Host input boxes do not reach
+  disk while a tool call is blocking (measured: a message sent at 03:05:35 landed after the 03:05:52
+  turn), so this is the only channel that can be heard mid-wait. The wait loop polls it every 500 ms.
+- **`attachOnly`** — never launches a browser; returns an error if no position is readable. For users
+  who do not want the plugin touching their browser.
+- **`wakeOnLinesEmpty`** — with TTS on, a finished line used to mean silence until the user spoke;
+  this wakes once when the current segment runs out of pre-written lines.
+- **`at` accepts a transcript substring** instead of a number: the anchor is looked up, not guessed.
+  Hand-written seconds put one batch 58 s early, and the user saw words describing a shot that had
+  not happened yet.
+- **edge-tts neural voices with SAPI fallback.** `speak()` now tries edge-tts first
+  (`zh-CN-XiaoxuanNeural` and friends) and only falls back to SAPI when synthesis or playback fails.
+  `edgeVoiceFor()` maps `"Huihui"` / `"zh-CN-XiaoxuanNeural"` / nothing to a real neural name — before,
+  a neural name matched no SAPI voice and silently fell back to the system default, which is why
+  passing a voice changed nothing.
+
+### Changed
+
+- **Late tolerance 6 s → 3 s.** A dense batch at 7 s spacing drifted 9 s and never caught up; a line
+  is now dropped rather than pushed later, because a late line describes a shot that has moved on.
+- **`tts` and `spokenAloud` are reported in `loopStatus()`**, so "is the voice actually on" is
+  answerable instead of guesswork.
+
+
 ### Added
 
 - **`video_watch` — the model watches and writes, the script speaks on cue.** Lines are a queue the

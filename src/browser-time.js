@@ -252,6 +252,63 @@ export async function readBrowserPosition({ port = DEFAULT_PORT, timeoutMs = 150
 const lastSnapByPort = new Map();
 
 /**
+ * 「浏览器到底在不在」—— 一次调用同时回答三件事：端口开没开 / 有没有标签页挂着 <video> /
+ * 视频在播还是暂停。
+ *
+ * ## 为什么必须有这个函数
+ *
+ * `readBrowserPosition()` 读不到时返回 `null`，而调用方一律写成
+ * `.catch(() => null)`（watch-run 里有 7 处）。于是**"浏览器没开"和"浏览器开着但没视频"
+ * 在上层看起来一模一样**——都是"没有位置"。模型只能拿"有没有位置"去倒推"浏览器在不在"，
+ * 而这两件事根本不是一回事：SMTC 那条路是系统级的，VLC、电影和电视、另一个没开调试端口的
+ * Edge 窗口都能给它一个位置。结果就是"有位置" ≠ "你在看的那只浏览器开着"，
+ * 模型对着空气写台词，还以为一切正常。
+ *
+ * 这里把状态说死，不给上层猜的空间：
+ *   unconfigured  没配调试端口（只可能走 SMTC）
+ *   closed        端口不通 → 浏览器没开 / 没带调试参数启动
+ *   no-video      端口通、标签页也有，但没有一个页面挂着 <video>
+ *   watching      读到了具体进度（带 url / title / playing / pos）
+ *   error         探测本身抛了，连"开没开"都不知道
+ *
+ * @returns {Promise<{state:'unconfigured'|'closed'|'no-video'|'watching'|'error', port:number|null,
+ *   url?:string, title?:string, pos?:number, dur?:number|null, paused?:boolean, playing?:boolean,
+ *   pages?:number, urls?:string[]}>}
+ */
+export async function probeBrowser({ port = DEFAULT_PORT, timeoutMs = 1200 } = {}) {
+  if (!port) return { state: 'unconfigured', port: null };
+  const targets = await listTargets({ port, timeoutMs });
+  if (!targets) return { state: 'closed', port };
+  const pages = targets.filter((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+  let snap = null;
+  try {
+    snap = await readBrowserPosition({ port, timeoutMs, maxPages: 6 });
+  } catch {
+    return { state: 'error', port, pages: pages.length };
+  }
+  if (!snap) {
+    return {
+      state: 'no-video',
+      port,
+      pages: pages.length,
+      urls: pages.slice(0, 3).map((t) => String(t.url ?? '').slice(0, 100)),
+    };
+  }
+  return {
+    state: 'watching',
+    port,
+    pages: pages.length,
+    url: snap.url,
+    title: snap.title,
+    pos: snap.pos,
+    dur: snap.dur ?? null,
+    paused: snap.paused,
+    playing: snap.playing === true,
+    confidence: snap.confidence,
+  };
+}
+
+/**
  * 由**插件自己**把浏览器拉起来。
  *
  * 为什么不能靠外部脚本代劳：我这边的工具进程跑在一个 Job Object 里，

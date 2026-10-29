@@ -145,7 +145,8 @@ export async function runStoryboard(opts) {
 
   // 链接在这里变成一份本地文件；本地路径原样返回（source 为 null）。
   // 后面的所有阶段都只面对 input，不知道它原来是不是个 URL。
-  const resolved = await resolveInput(inputRaw, fetchOptions ?? {});
+  // ffmpegPath 也要带过去：链接下载时 yt-dlp 需要它来合流 DASH 的 video+audio（issue #18）
+  const resolved = await resolveInput(inputRaw, { ...(fetchOptions ?? {}), ffmpegPath });
   const input = resolved.path;
   const sourceInfo = resolved.source;
   // zoom 用高清直链取帧；失败要能回落到本地低清，所以这里只记"首选源"，不替换 input
@@ -630,7 +631,11 @@ export async function runStoryboard(opts) {
     });
   }
 
-  return {
+  // **这里是赋值，不是 return。**
+  // 原来是 `return {`：函数当场结束，后面记 cell 表的 `saveCells()` 和 `return result`
+  // 全成了死代码 —— 所以 0.4.4 的 cell 表**从来没写进去过**，
+  // `video_zoom({ cellId })` 一直找不到格子，只能退回 from/to。
+  const result = {
     timing,
     ...(ocrReport ? { ocr: ocrReport } : {}),
     info,
@@ -691,7 +696,9 @@ export async function runStoryboard(opts) {
         cellTimes.push({ i: c.i, from: c.t_start + winStart, to: c.t_end + winStart });
       }
     }
-    void saveCells(input, cellTimes);
+    // 必须 await：紧接着的 video_zoom({cellId}) 可能立刻来查；saveCells 自己吞写失败，
+    // 不会影响出图。URL 输入还要拿原始 URL 当别名（此时 input 已是下载到本地的路径）。
+    await saveCells([inputRaw, input].filter(Boolean), cellTimes);
   }
 
   return result;
@@ -1472,10 +1479,16 @@ export function formatManifest(result, {
       '(this is different from a subtitle-track failure). Read the pictures and the audio strip.');
   }
   if (result.transcript?.source === 'no-audio') {
-    // 区分"源本来没声音"和"这次下载的副本没声音" —— 后者能修（换成带 cookies 或本地文件）
+    // 区分"源本来没声音"和"这次下载的副本没声音" —— 后者能修（换成带 cookies 或本地文件）。
+    // 如果音频轨被留在单独的 m4a 里，真正的原因是合流没跑（ffmpeg 不在 yt-dlp 的搜索路径），
+    // 这时让用户换 cookies 只会白费一轮。
     lines.push(result.source?.audioMissing
-      ? 'no audio in this copy: the downloaded track is silent while the source has audio. ' +
-        'Pass cookies, or download locally, to get loudness and transcript.'
+      ? result.source.audioMissingReason === 'unmerged-dash'
+        ? 'no audio in this copy: yt-dlp downloaded the DASH audio as a separate file instead of ' +
+          'merging it (ffmpeg was not available to yt-dlp). Install ffmpeg or set DSH_FFMPEG_PATH, ' +
+          'then retry — cookies will not fix this.'
+        : 'no audio in this copy: the downloaded track is silent while the source has audio. ' +
+          'Pass cookies, or download locally, to get loudness and transcript.'
       : 'no audio track: grid is visual only');
   }
   lines.push(`total ${picked.length} of ${total} cells shown` +
