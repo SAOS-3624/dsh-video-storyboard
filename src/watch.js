@@ -197,3 +197,21 @@ export async function loadLine(input, from, { env = process.env } = {}) {
   const hit = st[sessionKey(input)]?.lines?.[Number(from)];
   return hit?.text ?? null;
 }
+
+/**
+ * 念完就删。
+ *
+ * 为什么必须删：用户倒回去重看时，如果这句还留着，会被**一模一样地再说一遍** —— 太假了。
+ * 删掉之后同一段再遇到，会退回"到点再看一眼图"，说出来的话至少是新的。
+ */
+export async function consumeLine(input, from, { env = process.env } = {}) {
+  const st = await loadWatch(env);
+  const sk = sessionKey(input);
+  const lines = st[sk]?.lines;
+  if (!lines || !lines[Number(from)]) return null;
+  const text = lines[Number(from)].text ?? null;
+  delete lines[Number(from)];
+  st[sk] = { ...(st[sk] ?? {}), lines, at: Date.now() };
+  await saveWatch(st, env);
+  return text;
+}

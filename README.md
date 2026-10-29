@@ -218,6 +218,27 @@ MSEdge | playing | pos=5.9s | dur=68.0s | 鲸鱼陪看：让 DSH 里的她看得
 读不到时它会**明说读不到**并要你自报（`cursor: 750` 或 `"12:30"`），**不会猜**——
 猜错一次，后面每一段都是错的。
 
+#### 想要毫秒级准？开浏览器的调试端口
+
+SMTC 的刷新是稀疏的。浏览器里那个 `<video>.currentTime` 才是**真值**，只要求浏览器带调试端口启动：
+
+```bash
+# 先完全退出 Edge（否则新参数会被已有实例吞掉）
+"C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" --remote-debugging-port=9222
+```
+
+然后设一个环境变量（或 `video_watch({ browserPort: 9222 })`）：
+
+```
+DSH_BROWSER_DEBUG_PORT=9222
+```
+
+开了之后：**位置毫秒级准**（实测 `pos=8.374`），而且**当前页面地址就是源**（直接拿到 BV 号），
+连标题搜索都省了。没开就自动退回 SMTC，不报错。
+
+> 为什么不默认开：这台机器上 **WorkBuddy 自己就占着 9222**，页面里还有个 5 秒的 `<video>`。
+> 盲读会读到宿主的界面元素。所以默认关、显式开，并且会跳过 `app.asar` / devtools 这类页面。
+
 #### 为什么进度会"读不到"（重要）
 
 Edge 播网页视频时，Windows 媒体控件的 `Position` **只在事件发生时刷新**：起播、暂停、拖动、切集。

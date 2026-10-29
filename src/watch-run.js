@@ -16,6 +16,7 @@ import {
   sessionKey, WATCH_LEAD, WATCH_SEGMENT,
 } from './watch.js';
 import { describeLatency, recordLatency } from './latency.js';
+import { readBrowserPosition } from './browser-time.js';
 import { estimate, makeAnchor } from './position.js';
 import { resolvePlayingSource } from './resolve-playing.js';
 import { saveLines } from './watch.js';
@@ -92,6 +93,8 @@ export async function runWatchPass(args, deps) {
   const {
     saveImage, runStoryboard, formatManifest, cache = new Map(),
     probe = probePlayback,
+    readBrowser = readBrowserPosition,
+    browserPort = (Number(process.env.DSH_BROWSER_DEBUG_PORT) || undefined),
   } = deps;
   // 从"开始读进度"到"结果返回"的耗时 —— 这就是本机延迟的实测值，用来做提前量标定
   const tStart = Date.now();
@@ -106,6 +109,14 @@ export async function runWatchPass(args, deps) {
   let activeSession = null;
   const stateEarly = await loadWatch();
   const titleKey = (t) => String(t ?? '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '').slice(0, 40);
+  if (!input) {
+    // 浏览器开过调试端口时，**页面地址就是源**（能直接拿到 BV 号），比拿标题去搜准得多
+    const b0 = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
+    if (b0?.url && /^https?:/i.test(b0.url)) {
+      input = b0.url;
+      resolved = { input: b0.url, matchedBy: 'browser-url' };
+    }
+  }
   if (!input) {
     const p0 = await probe();
     activeSession = p0.ok ? pickSession(p0.sessions, {}) : null;
@@ -157,6 +168,16 @@ export async function runWatchPass(args, deps) {
   let cursor = parseCursor(args.cursor);
   let note = '';
   let confidence = Number.isFinite(cursor) ? 'given' : null;
+  if (!Number.isFinite(cursor)) {
+    // 浏览器里的 currentTime 是毫秒级真值（需显式开调试端口），比 SMTC 的稀疏刷新可靠
+    const b = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
+    if (b && Number.isFinite(b.pos)) {
+      cursor = b.pos;
+      confidence = 'browser';
+      note = ` (browser, ${b.paused ? 'paused' : 'playing'})`;
+      if (b.url) activeSession = { ...(activeSession ?? {}), title: b.title, dur: b.dur };
+    }
+  }
   if (!Number.isFinite(cursor)) {
     const probeRes = await probe();
     const pick = probeRes.ok
