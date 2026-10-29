@@ -41,6 +41,24 @@ test('cells: 路径大小写/斜杠不同也能命中（Windows 真实情况）'
   }
 });
 
+test('cells: URL 与下载后的本地路径是同一份记录（video_zoom cellId 的远程场景）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cells-url-'));
+  const env = { DSH_VIDEO_CACHE_DIR: dir };
+  try {
+    const url = 'https://www.bilibili.com/video/BV1eAs96TEM2/';
+    const local = ['D:', 'media', 'video.mp4'].join(String.fromCharCode(92));
+    await saveCells([url, local, 'media/video.mp4'], [
+      { i: 1, from: 0, to: 9.33 },
+      { i: 2, from: 9.33, to: 19.17 },
+    ], { env });
+    assert.deepEqual(await lookupCell(url, 2, { env }), { i: 2, from: 9.33, to: 19.17 });
+    assert.deepEqual(await lookupCell(local, 2, { env }), { i: 2, from: 9.33, to: 19.17 });
+    assert.deepEqual(await lookupCell('media/video.mp4', 2, { env }), { i: 2, from: 9.33, to: 19.17 });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('cells: 没记过就返回 null（调用方据此报错，不猜窗口）', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cells3-'));
   const env = { DSH_VIDEO_CACHE_DIR: dir };

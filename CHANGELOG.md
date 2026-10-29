@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`video_zoom({ cellId })` now remembers URL inputs and relative paths.** The storyboard saved the cell
+  map under the downloaded local file, so a remote input could never find the map written by its own previous
+  call; a relative local path failed the same way. The map now records the original input, the resolved path
+  and the source URL together, and the write is awaited so an immediate zoom cannot race it.
+- **On-screen subtitle correction sampled the wrong part of the video when `from > 0`.** ASR segments are
+  already absolute, but the OCR frame picker added `winStart` a second time; a window starting at 600 s
+  looked around 1200 s. Detail=high with a windowed read could therefore OCR unrelated frames.
+
 ## [0.4.4] — 2026-10-29
 
 ### Fixed

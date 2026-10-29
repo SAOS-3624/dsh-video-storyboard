@@ -647,7 +647,8 @@ export async function runStoryboard(opts) {
   };
 
   // 记下"这一格 = 这段绝对时间"，供 video_zoom({ cellId }) 直接寻址（清单里的 t_start 是窗口相对值）。
-  // 不 await：写失败不该影响出图，寻址会退回 from/to。
+  // 必须 await：紧接着的 video_zoom 可能立刻来查；saveCells 自己吞掉写失败，
+  // 不会影响出图。URL 输入还要用原始 URL 做别名 —— 此时 input 已经是下载到本地的路径。
   if (!textOnly) {
     const cellTimes = [];
     for (const sheet of out) {
@@ -655,7 +656,7 @@ export async function runStoryboard(opts) {
         cellTimes.push({ i: c.i, from: c.t_start + winStart, to: c.t_end + winStart });
       }
     }
-    void saveCells(input, cellTimes);
+    await saveCells([inputRaw, input, sourceInfo?.url].filter(Boolean), cellTimes);
   }
 
   return result;
@@ -847,7 +848,9 @@ async function correctByOnScreenSubs({
     const images = [];
     for (const [k, idx] of picks.entries()) {
       const seg = segments[idx];
-      const mid = winStart + (seg.from + seg.to) / 2;
+      // ASR 的 segment 时间已经是整段视频的绝对时间（transcribe() 把切片 start 加了回去），
+      // 这里不能再加 winStart；否则 from=600 的窗口会去 1200s 处取帧，OCR 全错位。
+      const mid = (seg.from + seg.to) / 2;
       images.push(await grab(mid, `band${k}.jpg`, crop));
     }
     const items = await readBand({ python, images });
