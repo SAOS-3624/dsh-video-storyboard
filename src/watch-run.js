@@ -77,9 +77,10 @@ export async function runWatchPass(args, deps) {
       pick: 'sharp',
       burn: 'index',
       minGap: 0.5,
-      // 陪看不数快闪：爆点细扫要多解一遍码，实测这一段 9.2 s → 5.0 s（省 45%）。
-      // 用户正看着，他要的是"这段发生什么"，不是"这 60 秒有几个镜头"。
-      refineBursts: false,
+      // 爆点细扫**保留**（默认就是 true）。
+      // 我一度把它关了"省时间"，但那是测错了：9.2s vs 5.0s 的差其实来自 ASR 冷启动，
+      // 交替复跑（transcript off）两次都是 4.5–4.6s，几乎没差；而它多找到 3 刀（40 vs 37），
+      // 直接影响快闪段落要不要摊成 2×2/3×3 —— 对音乐视频/动作片是实打实的画质。
       transcript: args.transcript ?? 'auto',
       adaptive: false,
       cookies: args.cookies,
