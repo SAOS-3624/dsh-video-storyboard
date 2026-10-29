@@ -46,8 +46,9 @@ test('shouldReplace: 空 OCR 不动', () => {
   assert.equal(shouldReplace({ asr: '随便一句', ocr: '', conf: 0.9 }).reason, 'empty-ocr');
 });
 
-test('预算与解释器发现是显式常量，不靠猜', () => {
+test('预算与解释器发现是显式常量，不靠猜', async () => {
   assert.ok(OCR_MAX_ITEMS > 0 && OCR_MAX_ITEMS <= 32);
-  const py = ocrPython({ env: {} });
-  assert.ok(py === null || typeof py === 'string');
+  // 现在是异步的：要真去试 `import rapidocr_onnxruntime`，不能靠路径猜
+  const py = await ocrPython({ env: {} });
+  assert.ok(py === null || typeof py === 'string', `unexpected: ${JSON.stringify(py)}`);
 });

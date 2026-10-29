@@ -27,13 +27,21 @@ const mmss = (sec) => {
  */
 export async function runWatchPass(args, deps) {
   const {
-    saveImage, resolveInput, runStoryboard, formatManifest, cache = new Map(),
+    saveImage, runStoryboard, formatManifest, cache = new Map(),
   } = deps;
   const size = Number(args.segment) > 0 ? Number(args.segment) : WATCH_SEGMENT;
   const lead = args.lead !== undefined ? Number(args.lead) : WATCH_LEAD;
 
   // ---- 1. 播放位置
-  let cursor = Number(args.cursor);
+  // 用户很可能直接说"12:30"，数字里带冒号解析成 NaN 就白跑一次探测，这里先认一下
+  const parseCursor = (v) => {
+    if (typeof v === 'number') return v;
+    if (typeof v !== 'string') return NaN;
+    const m = v.trim().match(/^(\d+):(\d{1,2}(?:\.\d+)?)$/);
+    if (m) return Number(m[1]) * 60 + Number(m[2]);
+    return Number(v);
+  };
+  let cursor = parseCursor(args.cursor);
   let note = '';
   if (!Number.isFinite(cursor)) {
     const probe = await probePlayback();
@@ -69,18 +77,22 @@ export async function runWatchPass(args, deps) {
       pick: 'sharp',
       burn: 'index',
       minGap: 0.5,
+      // 陪看不数快闪：爆点细扫要多解一遍码，实测这一段 9.2 s → 5.0 s（省 45%）。
+      // 用户正看着，他要的是"这段发生什么"，不是"这 60 秒有几个镜头"。
+      refineBursts: false,
       transcript: args.transcript ?? 'auto',
-      detail: 'low',
       adaptive: false,
       cookies: args.cookies,
       allowAnonymous: args.allowAnonymous === true,
     });
     entry = {
       png: r.sheets?.[0]?.png ?? null,
-      manifest: formatManifest(r, { maxChars: 2600 }),
+      manifest: formatManifest(r, { maxChars: 2600, maxCellChars: 80 }),
       cells: r.sheets?.[0]?.cells?.length ?? 0,
     };
     cache.set(key, entry);
+    // 每段一张 PNG，一部电影会有几十段。只留最近 8 段（前后各几段够回看），别把内存吃掉。
+    while (cache.size > 8) cache.delete(cache.keys().next().value);
     builtMs = Date.now() - t0;
   }
 
@@ -101,8 +113,14 @@ export async function runWatchPass(args, deps) {
   // ---- 4. 到点：交付（同一段不重复说）
   const st = await loadWatch();
   const sk = sessionKey(args.input);
-  const spoken = st[sk]?.spoken ?? [];
-  if (spoken.includes(segStart)) {
+  // 旧格式是数组，新格式是 {segStart: 说得有多久了}。倒回去重看同一段时，
+  // 隔了 10 分钟以上允许重说一次 —— 否则"我刚才没听清，再看一遍"就永远得不到回应。
+  const rawSpoken = st[sk]?.spoken ?? {};
+  const spoken = Array.isArray(rawSpoken)
+    ? Object.fromEntries(rawSpoken.map((k) => [k, Date.now() - 11 * 60_000]))
+    : rawSpoken;
+  const REPEAT_AFTER_MS = 10 * 60_000;
+  if (spoken[segStart] && Date.now() - spoken[segStart] < REPEAT_AFTER_MS) {
     return {
       ok: true,
       speaking: false,
@@ -110,7 +128,16 @@ export async function runWatchPass(args, deps) {
       images: [],
     };
   }
-  st[sk] = { ...(st[sk] ?? {}), spoken: [...spoken.slice(-40), segStart], at: Date.now() };
+  const nextSpoken = { ...spoken, [segStart]: Date.now() };
+  // 只留最近 60 段，别让状态文件无限长
+  const keptKeys = Object.keys(nextSpoken)
+    .sort((a, b) => nextSpoken[b] - nextSpoken[a])
+    .slice(0, 60);
+  st[sk] = {
+    ...(st[sk] ?? {}),
+    spoken: Object.fromEntries(keptKeys.map((k) => [k, nextSpoken[k]])),
+    at: Date.now(),
+  };
   await saveWatch(st);
 
   const images = entry.png ? [await saveImage({ data: entry.png, name: `watch-${segStart}.png` })] : [];

@@ -214,8 +214,18 @@ video_watch({ input: "D:/Movie/xxx.mp4" })   // 每 20 秒左右调一次
 MSEdge | playing | pos=5.9s | dur=68.0s | 鲸鱼陪看：让 DSH 里的她看得见你的屏幕
 ```
 
-读不到时它会**明说读不到**并要你自报（`cursor: 750`），**不会猜**——
+读不到时它会**明说读不到**并要你自报（`cursor: 750` 或 `"12:30"`），**不会猜**——
 猜错一次，后面每一段都是错的。
+
+需要一台装了 `winrt` 的 Python：
+
+```bash
+pip install winrt-runtime winrt-Windows.Media.Control winrt-Windows.Foundation
+```
+
+插件按这个顺序找解释器：`DSH_PYTHON` 环境变量 → `~/.dsh/asr.json` 里 `manage.start` 用的那个
+（你为 ASR 配的 venv 很可能也装在这里）→ PATH 上的 `python` / `python3`。
+找到后会真的 `import` 一次验证，验证不过就当作没有，**不会因为路径对就当成能用**。
 
 ### 它不是全片概览
 
