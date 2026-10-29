@@ -277,12 +277,13 @@ export async function consumeLine(input, from, { env = process.env } = {}) {
  *
  * 这里按 `at` 触发：位置到哪，就说到哪。暂停时位置不动，也就不会继续说。
  * 不带 `at` 的老台词按"进入这一段"处理，并在段内均匀铺开（每条占 1/k 段）。
- * 迟到超过 `lateSec`（默认 10 秒）的词直接作废：位置跳过去了，那句描述的画面已经不在。
+ * 迟到超过 `lateSec`（默认 6 秒）的词直接作废：位置跳过去了，那句描述的画面已经不在。
+ * 只认"两个时间大致相等"——早一点不发，晚太多也不要。
  *
  * @param {number} pos  当前播放位置（秒）
  * @param {{ size?: number, lateSec?: number }} [o] 当前段长（给没写 at 的台词分位）、迟到宽限
  */
-export async function dueLine(input, pos, { size = 0, lateSec = 10, env = process.env } = {}) {
+export async function dueLine(input, pos, { size = 0, lateSec = 6, env = process.env } = {}) {
   const now = Number(pos);
   if (!Number.isFinite(now)) return null;
   const st = await loadWatch(env);

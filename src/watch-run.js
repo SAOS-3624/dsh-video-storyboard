@@ -506,10 +506,16 @@ export async function runWatchPass(args, deps) {
     }, 0).unref?.();
   }
 
-  const winEnd = winSegs[winSegs.length - 1];
-  const bufferHint = (winSegs.length > 1 && winEnd)
-    ? `\n[buffer] 图已备到 ${mmss(winEnd.to)}（${winSegs.length} 段，约 `
-      + `${Math.max(0, Math.round((winEnd.to - cursor) / 60))} 分钟余量）。`
+  // **报实数，不报计划**：以前这里写的是"打算建到哪"，于是出现"说 5 分钟余量、
+  // 实际只有 3 分钟"——用户一眼就看穿了。现在以缓存里真的有图为准。
+  const builtWin = winSegs.filter((s) => s.from === segStart
+    || cache.get(`${sessionKey(input)}|${s.from}`)?.png);
+  const coverTo = builtWin.length > 0 ? builtWin[builtWin.length - 1].to : segStart + size;
+  const stillBuilding = winSegs.length > builtWin.length;
+  const bufferHint = (winSegs.length > 1)
+    ? `\n[buffer] 图已备到 ${mmss(coverTo)}（${builtWin.length}/${winSegs.length} 段，约 `
+      + `${Math.max(0, Math.round((coverTo - cursor) / 60))} 分钟余量`
+      + `${stillBuilding ? '，剩下的在后台补' : ''}）。`
       + '词就写这个区间：' + winSegs.map((s) => `${mmss(s.from)}–${mmss(s.to)}`).join('、')
     : '';
 

@@ -23,6 +23,8 @@ import { consumeLine, dueLine, hasLine, loadLine, pickSession, probePlayback } f
 import { mmss } from './time.js';
 
 const TICK_MS = 2000;
+/** 两句台词之间至少隔这么久（毫秒）：防止欠着的几句连着倒出来 */
+const TTS_MIN_GAP_MS = 6000;
 const PROBE_EVERY_MS = 15_000;
 /** 读不到位置多久后主动问一次（静默比问一句更糟：用户不知道它在等什么） */
 const ASK_AFTER_MS = 20_000;
@@ -358,11 +360,15 @@ export function startWatchLoop({
       // 和"什么时候该念这句话"是两件事，混在一起就是今晚"比画面快很多"的原因。
       if (loop.tts?.enabled) {
         const est = estimate(loop.anchor, tNow);
-        if (est.why !== 'paused' && Number.isFinite(est.pos)) {
+        // **两句之间至少隔 6 秒**：位置跳过去之后，欠着的好几句会同时"到点"，
+        // 不拦就会一口气倒出来，听起来像卡带。
+        const gapOk = !loop.lastTtsAt || tNow - loop.lastTtsAt >= TTS_MIN_GAP_MS;
+        if (gapOk && est.why !== 'paused' && Number.isFinite(est.pos)) {
           const segNow = plan.segmentAt(est.pos);
           // eslint-disable-next-line no-await-in-loop
           const line = await dueLine(loop.input, est.pos, { size: segNow.size }).catch(() => null);
           if (line) {
+            loop.lastTtsAt = tNow;
             void speakAloud(line, { voice: loop.tts.voice, rate: loop.tts.rate });
             loop.spokenAloud += 1;
             note(`tts ${Math.round(est.pos)}s: ${line.slice(0, 20)}…`);
