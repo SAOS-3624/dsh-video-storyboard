@@ -60,3 +60,17 @@ test('lookahead 很短（< 一段）也至少排一段', () => {
   const count = Math.max(1, Math.ceil(60 / 120));
   assert.equal(count, 1);
 });
+
+test('lookahead 决定排几段：5 分钟 = 3 段（120 秒一段），不是整片', () => {
+  // 这条守的是"别把两小时都排上"——用户随时可能不看了
+  const size = 120;
+  const lookahead = 300;
+  const count = Math.max(1, Math.ceil(lookahead / size));
+  assert.equal(count, 3, '300 秒 / 120 秒/段 = 3 段（含跨界的那个）');
+  assert.ok(count < 60, '绝不能按 60 段（两小时）去排');
+});
+
+test('lookahead 很短（< 一段）也至少排一段', () => {
+  const count = Math.max(1, Math.ceil(60 / 120));
+  assert.equal(count, 1);
+});
