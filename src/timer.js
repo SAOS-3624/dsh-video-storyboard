@@ -16,6 +16,8 @@ export function dueDecision({
   cursor, measuredAt, now = Date.now(),
   segments = [], spoken = [], lead = 15,
   pausedMs = null, pauseGraceMs = 180_000,
+  // 提前量：本机"测量→交付"的固定延迟（秒）。它让判定往前挪，抵消用户感知到的慢半拍。
+  aheadSec = 0,
 }) {
   if (!Number.isFinite(cursor)) return { wake: false, why: 'no-cursor' };
 
@@ -24,7 +26,7 @@ export function dueDecision({
 
   // 从"上次测得的位置"外推到"现在"：位置是测量值，时间在走
   const elapsed = Math.max(0, Math.min((now - (measuredAt ?? now)) / 1000, 60));
-  const pos = pausedMs === null ? cursor + elapsed : cursor;
+  const pos = (pausedMs === null ? cursor + elapsed : cursor) + Math.max(0, aheadSec);
 
   for (const seg of segments) {
     const sayAt = seg.sayAt ?? (seg.to - lead);

@@ -54,7 +54,14 @@ export async function probePlayback({
   const py = python ?? await probePython({ config, env });
   if (!py) return { ok: false, error: 'no-python-with-winrt (pip install winrt-runtime winrt-Windows.Media.Control winrt-Windows.Foundation)' };
   return new Promise((resolve) => {
-    execFile(py, [join(HERE, 'watch_smtc.py')], { timeout: timeoutMs, maxBuffer: 1 << 20 },
+    // windowsHide：不然每探一次进度就闪一个黑框。读取进度是高频动作，弹窗必须关掉。
+    // PYTHONIOENCODING/PYTHONUTF8：双保险，防止某些 python 发行版忽略 reconfigure。
+    execFile(py, [join(HERE, 'watch_smtc.py')], {
+      timeout: timeoutMs,
+      maxBuffer: 1 << 20,
+      windowsHide: true,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+    },
       (err, stdout) => {
         if (err) return resolve({ ok: false, error: String(err.message).slice(0, 160) });
         try {

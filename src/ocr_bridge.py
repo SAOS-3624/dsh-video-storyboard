@@ -13,6 +13,12 @@
 import json
 import sys
 
+# 同 watch_smtc.py：Windows 默认 cp936，中文会变乱码
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:                       # noqa: BLE001
+    pass
+
 
 def _fail(msg):
     print(json.dumps({"ok": False, "error": str(msg)}, ensure_ascii=False))

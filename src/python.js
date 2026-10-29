@@ -68,7 +68,7 @@ export function findPython(module, { config = {}, env = process.env, timeoutMs =
         return resolve(null);
       }
       const cmd = candidates[i++];
-      execFile(cmd, ['-c', `import ${module}`], { timeout: timeoutMs }, (err) => {
+      execFile(cmd, ['-c', `import ${module}`], { timeout: timeoutMs, windowsHide: true }, (err) => {
         if (err) return tryNext();
         verified.set(key, cmd);
         return resolve(cmd);
