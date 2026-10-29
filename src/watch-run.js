@@ -135,14 +135,26 @@ export async function runWatchPass(args, deps) {
   let activeSession = null;
   const stateEarly = await loadWatch();
   const titleKey = (t) => String(t ?? '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '').slice(0, 40);
+  /**
+   * "可以开始看了"的判据 —— **能读到播放位置**，而不是"能读到页面地址"。
+   *
+   * 这两个以前被混为一谈：只要浏览器里有一个视频页，就把 `input` 定死、跳过 waitForVideo，
+   * 然后因为页面还没起播读不到位，秒回一句 "cannot read your playback position"，
+   * 还反过来让用户报时间。而"页面开着、但还没点播放"恰恰是最常见的场景。
+   *
+   * pos > 0.5 或正在播，才算就绪：暂停在 0:00 的人只是开着页面，不是在看。
+   */
+  const positionReady = (b) => Boolean(b) && Number.isFinite(b?.pos)
+    && (b.pos > 0.5 || b.paused === false);
+
   if (!input) {
     // 浏览器开过调试端口时，**页面地址就是源**（能直接拿到 BV 号），比拿标题去搜准得多
     const b0 = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
     // 只认"视频页地址"：B 站首页也有 <video>（自动播放的推荐），但它不是任何一条视频
-    if (b0?.url && looksLikeVideoUrl(b0.url) && /^https?:/i.test(b0.url)) {
+    if (b0?.url && looksLikeVideoUrl(b0.url) && /^https?:/i.test(b0.url) && positionReady(b0)) {
       input = b0.url;
       resolved = { input: b0.url, matchedBy: 'browser-url' };
-    } else if (fileUrlToPath(b0?.url)) {
+    } else if (fileUrlToPath(b0?.url) && positionReady(b0)) {
       // **本地视频用浏览器打开**：页面地址就是那个文件，直接当 input（不用下载、不用问用户）
       input = fileUrlToPath(b0.url);
       resolved = { input, matchedBy: 'browser-file' };
@@ -168,7 +180,8 @@ export async function runWatchPass(args, deps) {
       let lastProbeAt = 0;
       while (Date.now() < deadline) {
         const bv = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
-        if (bv?.url) {
+        // 页面在、但还没起播 -> 继续等（以前这里只看有没有地址，于是"打开但没播"会立刻过关）
+        if (positionReady(bv)) {
           if (looksLikeVideoUrl(bv.url) && /^https?:/i.test(bv.url)) {
             input = bv.url;
             resolved = { input: bv.url, matchedBy: 'browser-url' };
