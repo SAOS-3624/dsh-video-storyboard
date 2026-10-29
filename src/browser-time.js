@@ -228,8 +228,16 @@ export async function readBrowserPosition({ port = DEFAULT_PORT, timeoutMs = 150
 export function launchBrowser({
   port = DEFAULT_PORT, url = '', profileDir = null, exe = null, taskScheduler = true,
 } = {}) {
+  // 不能只认 x86 那条：只装了 Chrome 的机器上，自动起浏览器这条路会直接死
+  const EDGE_CANDIDATES = [
+    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+    'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  ];
   const edge = exe
-    ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+    ?? EDGE_CANDIDATES.find((q) => { try { return existsSync(q); } catch { return false; } })
+    ?? EDGE_CANDIDATES[0];
   const profile = profileDir ?? join(homedir(), '.dsh', 'edge-watch');
   if (!existsSync(edge)) return { ok: false, reason: 'edge-not-found' };
   mkdirSync(profile, { recursive: true });
@@ -245,7 +253,18 @@ export function launchBrowser({
   // 调用方一退出就被回收（实测：窗口开起来、3 秒后整个浏览器消失）。
   // 计划任务由 Task Scheduler 服务启动，不在那个 job 里，才能真正活下来。
   if (process.platform === 'win32' && taskScheduler !== false) {
-    const task = `DSH-Edge-Watch-${port}`;
+    // 任务名**不带端口**。以前是 `DSH-Edge-Watch-${port}`，端口一改就多一个任务 ——
+    // 机器上实测已经积了两个（DSH-Edge-Watch / DSH-Edge-Watch-9333），每个都是独立定义，
+    // 用户根本不知道该删哪个。名字固定，端口写进参数里。
+    const task = 'DSH-Edge-Watch';
+
+    // 顺手清掉历史上按端口命名的那些变体，别再长新的
+    try {
+      execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+        "$ErrorActionPreference='SilentlyContinue'; "
+        + "Get-ScheduledTask -TaskName 'DSH-Edge-Watch-*' | Unregister-ScheduledTask -Confirm:$false"],
+      { stdio: 'ignore', windowsHide: true, timeout: 15_000 });
+    } catch { /* 清不掉也不影响启动 */ }
     const quoted = args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ');
     const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
