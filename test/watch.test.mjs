@@ -51,10 +51,11 @@ test('默认参数是"120 秒一段、提前 15 秒说"', () => {
   assert.equal(WATCH_LEAD, 15);
 });
 
-test('validateWatchArgs: 必填、范围、cells 上下界', () => {
+test('validateWatchArgs: input 可省略（自动探测），给了就必须非空', () => {
   assert.deepEqual(validateWatchArgs({ input: 'a.mp4' }), []);
   assert.deepEqual(validateWatchArgs({ input: 'a.mp4', cursor: 30, segment: 60, cells: 6 }), []);
-  assert.ok(validateWatchArgs({}).some((p) => /input/.test(p)));
+  assert.deepEqual(validateWatchArgs({}), [], '省略 input 是合法的：从系统媒体控件反查');
+  assert.ok(validateWatchArgs({ input: '' }).some((p) => /input/.test(p)), '空字符串要拒');
   assert.ok(validateWatchArgs({ input: 'a', cursor: -1 }).some((p) => /cursor/.test(p)));
   assert.ok(validateWatchArgs({ input: 'a', segment: 5 }).some((p) => /segment/.test(p)));
   assert.ok(validateWatchArgs({ input: 'a', cells: 12 }).some((p) => /cells/.test(p)));
@@ -65,6 +66,6 @@ test('watchToolSpec: 告诉模型"别复述剧情"和"读不到就问，不要�
   assert.equal(spec.name, 'video_watch');
   assert.match(spec.description, /do not retell the plot/i);
   assert.match(spec.description, /SMTC|media session/i);
-  assert.equal(spec.parameters.input.required, true, 'input 必须是必填（扁平 DSL 写在字段上）');
+  assert.equal(spec.parameters.input.required, undefined, 'input 不再必填：可以自动探测');
   assert.ok(spec.output?.schema, '输出 schema 必须存在，否则注册就崩');
 });

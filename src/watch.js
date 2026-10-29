@@ -69,9 +69,26 @@ export async function probePlayback({
   });
 }
 
-/** 只在播放/暂停中的会话里挑（4 = paused，5 = playing） */
+/**
+ * SMTC 的播放状态枚举（`GlobalSystemMediaTransportControlsSessionPlaybackStatus`）：
+ *   0 Closed · 1 Opened · 2 Changing · 3 Stopped · **4 Playing · 5 Paused**
+ *
+ * 我一开始把它写反了（以为 4=暂停），于是「正在播」被报成「暂停」——
+ * 用户当场发现："我一直在播放啊"。**枚举值要按官方定义，不能凭印象。**
+ */
+export const PLAYBACK = { CLOSED: 0, OPENED: 1, CHANGING: 2, STOPPED: 3, PLAYING: 4, PAUSED: 5 };
+
+export function describeStatus(code) {
+  if (code === PLAYBACK.PLAYING) return 'playing';
+  if (code === PLAYBACK.PAUSED) return 'paused';
+  if (code === PLAYBACK.STOPPED) return 'stopped';
+  if (code === PLAYBACK.CLOSED) return 'closed';
+  return `status-${code}`;
+}
+
+/** 只在播放/暂停中的会话里挑 */
 export function pickSession(sessions, { title = null, duration = null, input = null } = {}) {
-  const live = (sessions ?? []).filter((s) => s.status === 4 || s.status === 5);
+  const live = (sessions ?? []).filter((s) => s.status === PLAYBACK.PLAYING || s.status === PLAYBACK.PAUSED);
   if (live.length === 0) return null;
   if (live.length === 1) return live[0];
 

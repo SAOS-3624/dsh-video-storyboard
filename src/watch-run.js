@@ -12,9 +12,10 @@
  */
 
 import {
-  deliveryState, loadWatch, pickSession, probePlayback, saveWatch, segmentStart, sessionKey,
-  WATCH_LEAD, WATCH_SEGMENT,
+  deliveryState, describeStatus, loadWatch, pickSession, probePlayback, saveWatch, segmentStart,
+  sessionKey, WATCH_LEAD, WATCH_SEGMENT,
 } from './watch.js';
+import { resolvePlayingSource } from './resolve-playing.js';
 
 const mmss = (sec) => {
   const s = Math.max(0, Math.round(sec));
@@ -32,6 +33,52 @@ export async function runWatchPass(args, deps) {
   const size = Number(args.segment) > 0 ? Number(args.segment) : WATCH_SEGMENT;
   const lead = args.lead !== undefined ? Number(args.lead) : WATCH_LEAD;
 
+  // ---- 0. 源：没给 input 就自己从"系统里在播什么"反推
+  // 用户只会说"我在看这个"，不会报路径。SMTC 给标题和时长，够我们去找。
+  let input = args.input;
+  let resolved = null;
+  let activeSession = null;
+  const stateEarly = await loadWatch();
+  const titleKey = (t) => String(t ?? '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '').slice(0, 40);
+  if (!input) {
+    const p0 = await probePlayback();
+    activeSession = p0.ok ? pickSession(p0.sessions, {}) : null;
+    if (!activeSession?.title) {
+      return {
+        ok: false,
+        text: `no video is playing right now (${p0.error ?? 'no active media session'}).\n`
+          + 'Play something, or pass input yourself (path or link).',
+        images: [],
+      };
+    }
+    // 记住上一次为这个标题找到的源：搜索接口会限流，重复搜没意义，也慢（11 秒）。
+    const cachedInput = stateEarly.sources?.[titleKey(activeSession.title)];
+    if (cachedInput) {
+      input = cachedInput;
+      resolved = { input: cachedInput, matchedBy: 'remembered' };
+    } else {
+      resolved = await resolvePlayingSource({ title: activeSession.title, duration: activeSession.dur });
+      if (resolved) {
+        stateEarly.sources = {
+          ...(stateEarly.sources ?? {}),
+          [titleKey(activeSession.title)]: resolved.input,
+        };
+        await saveWatch(stateEarly);
+      }
+    }
+    if (!resolved) {
+      return {
+        ok: false,
+        text: `you are watching "${activeSession.title}" (${Math.round(activeSession.dur)}s), but I could not`
+          + ' find the source: no local file with that name, and the Bilibili search did not turn up a match'
+          + ' with the same duration.\nSend me the link or the file path once — I will remember it for this'
+          + ' title and stop asking.',
+        images: [],
+      };
+    }
+    input = resolved.input;
+  }
+
   // ---- 1. 播放位置
   // 用户很可能直接说"12:30"，数字里带冒号解析成 NaN 就白跑一次探测，这里先认一下
   const parseCursor = (v) => {
@@ -45,7 +92,9 @@ export async function runWatchPass(args, deps) {
   let note = '';
   if (!Number.isFinite(cursor)) {
     const probe = await probePlayback();
-    const pick = probe.ok ? pickSession(probe.sessions, { input: args.input, title: args.title ?? null }) : null;
+    const pick = probe.ok
+      ? pickSession(probe.sessions, { input, title: args.title ?? activeSession?.title ?? null })
+      : null;
     if (!pick) {
       return {
         ok: false,
@@ -56,12 +105,12 @@ export async function runWatchPass(args, deps) {
       };
     }
     cursor = pick.pos;
-    note = ` (${pick.app}, ${pick.status === 5 ? 'playing' : 'paused'})`;
+    note = ` (${pick.app}, ${describeStatus(pick.status)})`;
   }
 
   const segStart = segmentStart(cursor, size);
   const d = deliveryState({ cursor, segment: segStart, size, lead });
-  const key = `${sessionKey(args.input)}|${segStart}`;
+  const key = `${sessionKey(input)}|${segStart}`;
 
   // ---- 2. 预取这一段
   let entry = cache.get(key);
@@ -69,7 +118,7 @@ export async function runWatchPass(args, deps) {
   if (!entry?.png) {
     const t0 = Date.now();
     const r = await runStoryboard({
-      input: args.input,
+      input,
       from: segStart,
       to: segStart + size,
       cells: Number(args.cells) > 0 ? Number(args.cells) : 5,
@@ -97,7 +146,8 @@ export async function runWatchPass(args, deps) {
     builtMs = Date.now() - t0;
   }
 
-  const head = `watch ${mmss(cursor)}${note} · segment ${mmss(segStart)}–${mmss(segStart + size)}`
+  const found = resolved ? ` · source: ${resolved.matchedBy} → ${String(input).split(/[\\/]/).pop()}` : '';
+  const head = `watch ${mmss(cursor)}${note}${found} · segment ${mmss(segStart)}–${mmss(segStart + size)}`
     + ` · ${Math.max(0, d.remaining)}s left`
     + (builtMs ? ` · built in ${(builtMs / 1000).toFixed(1)}s` : ' · ready');
 
@@ -113,7 +163,7 @@ export async function runWatchPass(args, deps) {
 
   // ---- 4. 到点：交付（同一段不重复说）
   const st = await loadWatch();
-  const sk = sessionKey(args.input);
+  const sk = sessionKey(input);
   // 旧格式是数组，新格式是 {segStart: 说得有多久了}。倒回去重看同一段时，
   // 隔了 10 分钟以上允许重说一次 —— 否则"我刚才没听清，再看一遍"就永远得不到回应。
   const rawSpoken = st[sk]?.spoken ?? {};
