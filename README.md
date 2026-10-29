@@ -223,18 +223,32 @@ MSEdge | playing | pos=5.9s | dur=68.0s | 鲸鱼陪看：让 DSH 里的她看得
 SMTC 的刷新是稀疏的。浏览器里那个 `<video>.currentTime` 才是**真值**，只要求浏览器带调试端口启动：
 
 ```bash
-# 先完全退出 Edge（否则新参数会被已有实例吞掉）
-"C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" --remote-debugging-port=9222
+# 用一个独立 profile，这样不会影响你正在开的 Edge
+"C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" ^
+  --remote-debugging-port=9333 --user-data-dir="%USERPROFILE%/.dsh/edge-watch"
 ```
 
-然后设一个环境变量（或 `video_watch({ browserPort: 9222 })`）：
+然后设环境变量（或 `video_watch({ browserPort: 9333 })`）：
 
 ```
-DSH_BROWSER_DEBUG_PORT=9222
+DSH_BROWSER_DEBUG_PORT=9333
 ```
 
-开了之后：**位置毫秒级准**（实测 `pos=8.374`），而且**当前页面地址就是源**（直接拿到 BV 号），
-连标题搜索都省了。没开就自动退回 SMTC，不报错。
+> 端口别用 9222：那是 Chrome DevTools 的惯例端口，**WorkBuddy 自己就占着**（实测读到的会是它的界面）。
+
+开了之后：**位置毫秒级准**（实测 `pos=8.374`），而且**当前页面地址就是源**：
+B 站页面直接拿到 BV 链接；`file:///D:/x.mp4` 直接还原成本地路径。**不用搜索、不用下载、不用问用户。**
+
+##### 本地视频：用浏览器打开就行
+
+把本地文件拖进那个开了调试端口的 Edge，插件会拿到：
+
+```
+source: browser-file → 记忆管理局 概念PV.mp4
+watch 00:28 (browser, playing)
+```
+
+**位置准、路径直接有**——比 SMTC 靠播放器上报可靠得多。
 
 > 为什么不默认开：这台机器上 **WorkBuddy 自己就占着 9222**，页面里还有个 5 秒的 `<video>`。
 > 盲读会读到宿主的界面元素。所以默认关、显式开，并且会跳过 `app.asar` / devtools 这类页面。

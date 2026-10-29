@@ -18,7 +18,25 @@
  * 没有调试端口就返回 null，调用方退回 SMTC。不报错、不打扰。
  */
 
-const DEFAULT_PORT = 9222;
+// 默认 9333 而不是 9222：9222 是 Chrome DevTools 的惯例端口，容易被别的 Electron 应用占掉
+// （实测这台机器上 WorkBuddy 自己就占着 9222，盲连会读到它的界面）。
+const DEFAULT_PORT = 9333;
+
+/**
+ * `file:///D:/a%20b.mp4` → `D:/a b.mp4`
+ * 本地视频用浏览器打开时，页面地址就是这个视频的路径 —— 正好当 input 用，不必再问用户。
+ */
+export function fileUrlToPath(url) {
+  if (typeof url !== 'string' || !url.startsWith('file://')) return null;
+  try {
+    const p = new URL(url).pathname;
+    const decoded = decodeURIComponent(p);
+    // Windows: /D:/x → D:/x
+    return /^\/[a-z]:/i.test(decoded) ? decoded.slice(1) : decoded;
+  } catch {
+    return null;
+  }
+}
 
 /** 列出调试端口暴露的页面目标 */
 export async function listTargets({ port = DEFAULT_PORT, timeoutMs = 1200 } = {}) {
