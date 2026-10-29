@@ -551,6 +551,12 @@ export function watchToolSpec() {
         type: 'number',
         description: 'Upper bound for wait: how long this call may block (default 180, max 600).',
       },
+      checkCookies: {
+        type: 'boolean',
+        description: 'Diagnose the Bilibili login: asks the site directly whether the cookie is signed in, and '
+          + '(if input is a video URL) whether its subtitle track can be fetched. Use it when the transcript '
+          + 'is ASR but you suspect the video has subtitles.',
+      },
       testWake: {
         type: 'boolean',
         description: 'Try to wake this session once, right now, and report exactly what happened '

@@ -165,17 +165,21 @@ export async function ensureAsr({
   let child;
   if (Array.isArray(life.start)) {
     // 直接起 exe：windowsHide 才会真的不建控制台窗口，也不受批处理编码影响
+    // **不要 detached**：Windows 上 `detached: true` 会创建新的控制台窗口，
+    // 即使同时给了 windowsHide —— 实际表现就是"每拉起一次 ASR 就弹一个黑框挡住画面"。
+    // 不 detached 时子进程挂在 DSH 进程下，同样能跨工具调用存活（服务本来就是长期进程），
+    // 停止仍走 /shutdown 或 taskkill /T。
     child = spawnImpl(life.start[0], life.start.slice(1), {
-      detached: true, stdio: 'ignore', windowsHide: true, env,
+      detached: false, stdio: 'ignore', windowsHide: true, env,
     });
   } else {
     const isBatch = /\.(cmd|bat)$/i.test(life.start);
     child = process.platform === 'win32' && isBatch
       ? spawnImpl(SHELL_EXE, ['/c', 'start', '', '/b', life.start], {
-        detached: true, stdio: 'ignore', windowsHide: true, env,
+        detached: false, stdio: 'ignore', windowsHide: true, env,
       })
       : spawnImpl(life.start, [], {
-        shell: true, detached: true, stdio: 'ignore', windowsHide: true, env,
+        shell: true, detached: false, stdio: 'ignore', windowsHide: true, env,
       });
   }
   child.unref?.();

@@ -28,6 +28,7 @@ import {
   ASR_DEFAULTS, alignCells, applyTermMap, canTranscribe, describeAsrTarget, explainFetchError,
   extractSubtitleTrack, filterSuspectSegments, resolveAsrConfig, speechCurve, transcribeLong,
 } from './asr.js';
+import { fetchRemoteSubtitles } from './subtitles.js';
 import { detectSubtitleBand, OCR_MAX_ITEMS, ocrPython, readBand, shouldReplace } from './ocr.js';
 import { cacheKey, pruneCache, withCache } from './cache.js';
 import { saveCells } from './cells.js';
@@ -192,6 +193,8 @@ export async function runStoryboard(opts) {
     // 判据必须和 `transcribe()` 的门同源（见 asr.js 的 canTranscribe），否则清单会和实际行为相反。
     const willTranscribe = () => canTranscribe(resolveAsrConfig(), asrKey);
     let transcriptInfo = null;
+    // 站点有字幕轨但要登录 —— 清单要说明"现在用的是 ASR，不是这视频没字幕"
+    let subtitleNeedsLogin = false;
     if (transcriptFile) {
       // 显式给了转写就只用它：不查字幕轨、不跑 ASR。
       // 接 B 站时这一步最省 —— 字幕本来就有，没必要再识别一遍（10 分钟口播省 60–120 秒）。
@@ -215,11 +218,23 @@ export async function runStoryboard(opts) {
         };
       }
     } else if (transcript !== 'off' && info.hasAudio) {
-      const subtitle = info.hasSubtitle
-        ? await extractSubtitleTrack({ input, ffmpegPath })
-        : null;
+      // **先试站点字幕轨**（B 站 CC）：作者写的文本比 ASR 准，还不烧 CPU。
+      // 以前只看"下载下来的 mp4 里有没有内嵌字幕流"，而 B 站的字幕是单独轨道，
+      // 于是永远判成"没有字幕"，白白退回 ASR。
+      const remote = sourceInfo?.url ? await fetchRemoteSubtitles({ url: sourceInfo.url }) : null;
+      const subtitle = remote?.ok
+        ? remote.segments
+        : (info.hasSubtitle ? await extractSubtitleTrack({ input, ffmpegPath }) : null);
+      if (remote && !remote.ok && remote.reason === 'needs-login') {
+        // 有字幕但要登录：这个事实必须让用户看到，否则会以为"这视频没字幕"
+        subtitleNeedsLogin = true;
+      }
       if (subtitle) {
-        transcriptInfo = { segments: subtitle, source: 'subtitle', model: 'embedded' };
+        transcriptInfo = {
+          segments: subtitle,
+          source: 'subtitle',
+          model: remote?.ok ? `site-cc${remote.lang ? `:${remote.lang}` : ''}` : 'embedded',
+        };
       } else if (!willTranscribe()) {
         // 压根不会转写（云端没配 key）—— 跟"跑了但没听懂"是两码事。
         // 旧代码走的是 withCache → null 空壳 → asr.empty → 'asr-empty'，清单于是写
@@ -279,7 +294,12 @@ export async function runStoryboard(opts) {
       ? countTextInSilence(transcriptInfo.segments, silences)
       : 0;
 
-    return { transcriptInfo, textInSilence };
+    return {
+      transcriptInfo: (transcriptInfo && subtitleNeedsLogin)
+        ? { ...transcriptInfo, subtitleNeedsLogin: true }
+        : transcriptInfo,
+      textInSilence,
+    };
   })();
 
   // 扫描结果按 (文件, 窗口, 阈值策略) 缓存：storyboard 之后的 zoom 能直接复用
@@ -1195,6 +1215,11 @@ export function formatManifest(result, {
   maxCellChars = 120, maxChars = 24_000, cellRange = null,
 } = {}) {
   const { info, window: win, plan } = result;
+  // 站点有字幕轨但要登录：明说，别让用户以为这视频没字幕（也解释了为什么在用 ASR）
+  const subtitleNote = result.transcript?.subtitleNeedsLogin
+    ? 'NOTE: this video HAS a subtitle track, but the site only serves it to a signed-in account. '
+      + 'The transcript below is ASR, not the author\'s text. Re-export cookies to get exact text.'
+    : null;
   const hasSheets = Boolean(result.sheets?.length);
   const sheet0 = result.sheets?.[0];
 
@@ -1221,6 +1246,7 @@ export function formatManifest(result, {
     ? ` tokens="${result.sheets.length * 384} (est@384/img, DSH host billing; an API host bills by pixels)"`
     : '';
   const lines = [
+    ...(subtitleNote ? [subtitleNote] : []),
     `<storyboard path="${info.path ?? 'video'}" duration="${info.duration.toFixed(2)}" ` +
       `window="${win.from.toFixed(2)}-${win.to.toFixed(2)}" ` +
       `image="${hasSheets ? `${sheet0.width}x${sheet0.height}` : 'none (text only)'}" ` +

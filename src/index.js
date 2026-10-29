@@ -18,6 +18,7 @@ import { formatMatches, matchSegments, recallSegments } from './locate.js';
 import { lookupCell } from './cells.js';
 import { DEFAULT_RAMP, DEFAULT_SEGMENT } from './batches.js';
 import { configuredLaunch, configuredPort } from './browser-time.js';
+import { checkBiliLogin, fetchRemoteSubtitles } from './subtitles.js';
 import { makeBuilder, runWatchPass } from './watch-run.js';
 import { loopStatus, startWatchLoop, stopWatchLoop } from './watch-loop.js';
 import { wakeSession } from './timer.js';
@@ -202,6 +203,19 @@ async function registerAll(ctx) {
       if (args.stopLoop === true) return { text: JSON.stringify(stopWatchLoop('requested')), images: [] };
       // 只看钟的状态，不读进度、不出图 —— 排查"它为什么不说话"时用
       if (args.statusOnly === true) return { text: JSON.stringify(loopStatus()), images: [] };
+      // 检查 B 站登录态与字幕可用性：这一条能立刻回答"为什么还在用 ASR"
+      if (args.checkCookies === true) {
+        const login = await checkBiliLogin({ cookies: args.cookies });
+        const url = typeof args.input === 'string' && /^https?:/i.test(args.input) ? args.input : null;
+        const subs = url ? await fetchRemoteSubtitles({ url, cookies: args.cookies }) : null;
+        return {
+          text: JSON.stringify({
+            login,
+            subtitles: subs ? { ok: subs.ok, reason: subs.reason, count: subs.segments?.length ?? 0, lang: subs.lang } : 'pass a video URL in input to check subtitles',
+          }),
+          images: [],
+        };
+      }
       // 立刻试一次唤醒，把结果原样报出来。这一条能 5 秒内回答"loop 到底叫不叫得醒我"。
       if (args.testWake === true) {
         const r = await wakeSession(ctx, {
