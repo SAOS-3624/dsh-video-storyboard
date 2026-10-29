@@ -200,10 +200,13 @@ export async function ensureAsr({
  * 运行结束后安排停止。只有 owned 的实例才会被停。
  * 到点前如果又来了请求（keepAlive），这次停止会被取消。
  */
-export function scheduleStop({ owned, config, killImpl, baseUrl } = {}) {
+export function scheduleStop({ owned, config, killImpl, baseUrl, minIdleMs } = {}) {
   if (!owned) return false;
   const life = lifecycleConfig(config);
   if (!life) return false;
+  // 陪看这类"持续调用"的场景要临时放宽空闲窗口：否则每段之间服务就被关了，
+  // 下一段又要冷启动（实测 5 s，用户感知为"每次都要等"）。
+  if (Number.isFinite(minIdleMs) && minIdleMs > life.idleMs) life.idleMs = minIdleMs;
   keepAlive();
   const pid = ownedChild?.pid;
   pendingStop = setTimeout(() => {

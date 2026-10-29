@@ -131,6 +131,8 @@ export async function runWatchPass(args, deps) {
       // 交替复跑（transcript off）两次都是 4.5–4.6s，几乎没差；而它多找到 3 刀（40 vs 37），
       // 直接影响快闪段落要不要摊成 2×2/3×3 —— 对音乐视频/动作片是实打实的画质。
       transcript: args.transcript ?? 'auto',
+      // 陪看是持续调用：让本地 ASR 活过整段，别每段都冷启动一次（实测每段多 5 s）
+      asrIdleMs: size * 1000 + 30_000,
       adaptive: false,
       cookies: args.cookies,
       allowAnonymous: args.allowAnonymous === true,
@@ -146,8 +148,12 @@ export async function runWatchPass(args, deps) {
     builtMs = Date.now() - t0;
   }
 
+  const measuredAt = new Date().toTimeString().slice(0, 8);
   const found = resolved ? ` · source: ${resolved.matchedBy} → ${String(input).split(/[\\/]/).pop()}` : '';
-  const head = `watch ${mmss(cursor)}${note}${found} · segment ${mmss(segStart)}–${mmss(segStart + size)}`
+  // **进度必须带"什么时候测的"**：用户看到这句话时可能已经过了几分钟。
+  // 之前只写 `watch 08:28`，用户五分钟后再看会以为算错了——那是我把"测量时刻"说成了"现在"。
+  const head = `watch ${mmss(cursor)} @ ${measuredAt}${note}${found} `
+    + `· segment ${mmss(segStart)}–${mmss(segStart + size)}`
     + ` · ${Math.max(0, d.remaining)}s left`
     + (builtMs ? ` · built in ${(builtMs / 1000).toFixed(1)}s` : ' · ready');
 
@@ -204,6 +210,7 @@ export async function runWatchPass(args, deps) {
     ok: true,
     speaking: true,
     cursor,
+    measuredAt,
     segment: segStart,
     text: `${head}\n${guidance}\n\n${entry.manifest}`,
     images,
