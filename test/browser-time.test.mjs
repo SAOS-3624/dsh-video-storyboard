@@ -59,3 +59,16 @@ test('端口配置可以写在 ~/.dsh/video.json（桌面版读不到 setx 的 e
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test('cookie 能转成 Netscape 格式（yt-dlp 认这个）', async () => {
+  const { cookiesToNetscape } = await import('../src/browser-time.js');
+  const txt = cookiesToNetscape([
+    { name: 'SESSDATA', value: 'abc%2C123', domain: '.bilibili.com', path: '/', expires: 1800000000, secure: true },
+    { name: 'buvid3', value: 'x', domain: 'www.bilibili.com', path: '/', expires: -1, secure: false },
+    { value: 'no-name' },                       // 脏数据要跳过
+  ]);
+  const lines = txt.split('\n').filter((l) => l && !l.startsWith('#'));
+  assert.equal(lines.length, 2, '只有两条有效 cookie');
+  assert.match(lines[0], /^\.bilibili\.com\tTRUE\t\/\tTRUE\t1800000000\tSESSDATA\tabc%2C123$/);
+  assert.match(lines[1], /^www\.bilibili\.com\tFALSE\t\/\tFALSE\t0\tbuvid3\tx$/);
+});

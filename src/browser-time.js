@@ -23,7 +23,7 @@
 const DEFAULT_PORT = 9333;
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -262,4 +262,77 @@ export async function waitForPort(port, { timeoutMs = 8000, stepMs = 400 } = {})
 /** 调试端口开没开（用于给用户一句明确的提示，而不是让功能悄悄退化） */
 export async function hasDebugPort({ port = DEFAULT_PORT } = {}) {
   return (await listTargets({ port })) !== null;
+}
+
+/**
+ * 从浏览器里直接读 cookie，转成 Netscape 格式给 yt-dlp 用。
+ *
+ * 为什么比"手动导出"好：用户要做的只有一件事——**在带端口的那个窗口里登录一次**。
+ * 之后插件自己去要 cookie，不需要他找扩展、找文件、找路径。
+ *
+ * 走的是 CDP 的浏览器级端点（/json/version → Storage.getCookies），能拿到全部 cookie，
+ * 不受当前页面域限制。
+ */
+export async function readBrowserCookies({ port = DEFAULT_PORT, timeoutMs = 4000 } = {}) {
+  let wsUrl;
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    const res = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: ac.signal });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const v = await res.json();
+    wsUrl = v?.webSocketDebuggerUrl;
+  } catch {
+    return null;
+  }
+  if (!wsUrl) return null;
+
+  const cookies = await new Promise((resolve) => {
+    let ws;
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; try { ws?.close(); } catch { /* 已关 */ } resolve(v); };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    try { ws = new WebSocket(wsUrl); } catch { clearTimeout(timer); return resolve(null); }
+    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Storage.getCookies' }));
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(String(ev.data));
+        if (msg.id !== 1) return;
+        clearTimeout(timer);
+        finish(msg.result?.cookies ?? null);
+      } catch { clearTimeout(timer); finish(null); }
+    };
+    ws.onerror = () => { clearTimeout(timer); finish(null); };
+    ws.onclose = () => { clearTimeout(timer); finish(null); };
+  });
+  return Array.isArray(cookies) ? cookies : null;
+}
+
+/** cookie 数组 → Netscape cookies.txt 文本（yt-dlp 认这个格式） */
+export function cookiesToNetscape(cookies) {
+  const lines = ['# Netscape HTTP Cookie File', '# generated from the debug-port browser', ''];
+  for (const c of cookies ?? []) {
+    if (!c?.name || !c?.domain) continue;
+    const domain = c.domain.startsWith('.') ? c.domain : c.domain;
+    const includeSub = c.domain.startsWith('.') ? 'TRUE' : 'FALSE';
+    const expires = Number.isFinite(c.expires) && c.expires > 0 ? Math.floor(c.expires) : 0;
+    const secure = c.secure ? 'TRUE' : 'FALSE';
+    lines.push([domain, includeSub, c.path ?? '/', secure, expires, c.name, c.value ?? ''].join('\t'));
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+/** 把浏览器 cookie 落盘，返回文件路径（失败返回 null） */
+export async function writeBrowserCookiesFile({ port = DEFAULT_PORT, dir = null } = {}) {
+  const cookies = await readBrowserCookies({ port });
+  if (!cookies || cookies.length === 0) return null;
+  const target = dir ?? join(homedir(), '.dsh', 'bili-cookies-from-browser.txt');
+  try {
+    mkdirSync(join(target, '..'), { recursive: true });
+    writeFileSync(target, cookiesToNetscape(cookies), 'utf8');
+    return target;
+  } catch {
+    return null;
+  }
 }

@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { discoverYtdlp } from './fetch.js';
+import { configuredPort, writeBrowserCookiesFile } from './browser-time.js';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { parseSrt } from './asr.js';
@@ -54,8 +55,25 @@ export async function fetchRemoteSubtitles({
   const jar = cookies ?? configuredCookies();
   const key = `${url}|${jar ? 'ck' : 'anon'}`;
   if (memo.has(key)) return memo.get(key);
-  const result = await fetchOnce({ url, cookies: jar, timeoutMs, langs });
-  memo.set(key, result);
+
+  let result = await fetchOnce({ url, cookies: jar, timeoutMs, langs });
+
+  // **自愈**：cookie 文件过期 / 根本没配时，直接从带端口的浏览器里读一份。
+  // 用户只需要在浏览器里登录一次，不用找扩展、不用导文件。
+  if (!result.ok && result.reason === 'needs-login') {
+    const port = configuredPort();
+    if (port) {
+      const fromBrowser = await writeBrowserCookiesFile({ port });
+      if (fromBrowser) {
+        const retry = await fetchOnce({ url, cookies: fromBrowser, timeoutMs, langs });
+        if (retry.ok) result = { ...retry, cookiesFrom: 'browser' };
+        else result = { ...retry, cookiesFrom: 'browser' };
+      }
+    }
+  }
+
+  // "要登录"不要进缓存：用户可能下一秒就去登录了，缓存住会让他以为没生效
+  if (result.ok || result.reason !== 'needs-login') memo.set(key, result);
   return result;
 }
 

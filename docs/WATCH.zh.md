@@ -163,6 +163,24 @@ video_watch({ wait: true, maxWaitSec: 300 })   // 一直等到该说话，再返
 
 暂停 / 倒回 / 到封顶都会让它提前返回，不会死等。
 
+### B 站字幕：登录一次，之后不用管
+
+B 站的字幕是**单独轨道**，只有登录用户能读。插件现在会：
+
+1. 先用配置里的 cookie 试
+2. 不行就直接 **从带端口的浏览器里读 cookie**（CDP `Storage.getCookies`），转成 yt-dlp 的格式
+3. 还不行就退回 ASR，并在清单里写明"这视频有字幕，但要登录"
+
+所以你要做的只有一件事：**在带端口的那个窗口里登录一次 B 站**。
+
+自检：
+
+```js
+video_watch({ checkCookies: true, input: "https://www.bilibili.com/video/BV..." })
+```
+
+返回 `login.isLogin` 和 `subtitles.ok`。
+
 **还没打开视频？** 用 `waitForVideo` 让它等着：
 
 ```js
