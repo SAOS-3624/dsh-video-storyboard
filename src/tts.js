@@ -51,17 +51,58 @@ export function buildSpeakCommand({ text, voice = null, rate = 0, volume = 100 }
   return parts.join('; ');
 }
 
+/**
+ * 把"人话里的音色"映射成 edge-tts 的 Neural 名。
+ *
+ * 为什么要映射：`voice` 原来只认 SAPI 的 `GetDescription()` 片段（Huihui / Yaoyao / Kangkang），
+ * 传 `zh-CN-XiaoxuanNeural` 进去匹配不到任何 SAPI 声音，**静默回落到系统默认** ——
+ * 于是"传了等于没传"，用户听到的永远是同一个声音。
+ */
+const EDGE_VOICE_MAP = [
+  [/huihui/i, 'zh-CN-XiaoxuanNeural'],      // 默认音色 -> 用户点名的 Xiaoxuan
+  [/yaoyao/i, 'zh-CN-XiaoyiNeural'],
+  [/kangkang/i, 'zh-CN-YunjianNeural'],
+  [/xiaoxuan/i, 'zh-CN-XiaoxuanNeural'],
+  [/xiaoxiao/i, 'zh-CN-XiaoxiaoNeural'],
+  [/yunxi/i, 'zh-CN-YunxiNeural'],
+  [/yunjian/i, 'zh-CN-YunjianNeural'],
+];
+
+export function edgeVoiceFor(voice, env = process.env) {
+  const cfg = configuredDshTts(env);
+  const fallback = cfg?.voice || 'zh-CN-XiaoxiaoNeural';
+  const s = String(voice ?? '').trim();
+  if (!s) return fallback;
+  if (/^[a-z]{2,3}-[A-Z]{2}-[A-Za-z]+Neural$/.test(s)) return s;   // 已经是 neural 名
+  for (const [re, v] of EDGE_VOICE_MAP) if (re.test(s)) return v;
+  return fallback;
+}
+
 /** 真正念出来（异步，等它念完再 resolve；失败不抛，返回原因） */
-export function speak(text, {
-  voice = PREFERRED_VOICES[0], rate = 0, volume = 100, timeoutMs = 30_000, dryRun = false,
+export async function speak(text, {
+  voice = PREFERRED_VOICES[0], rate = 0, volume = 100, timeoutMs = 30_000,
+  dryRun = false, engine = null,
 } = {}) {
+  // **edge-tts 优先**：SAPI 那三个中文声音是十年前的拼接合成，一听就是导航软件。
+  // 合成或播放失败（多半是断网 / 没装）才退回 SAPI —— 念台词不能因此哑掉。
+  // dryRun 不进这条路：它要的是"生成的命令长什么样"，那是 SAPI 的概念。
+  if (!dryRun && engine !== 'sapi') {
+    const exe = defaultEdgeTtsBin();
+    if (exe) {
+      const r = await speakViaEdgeTts(text, {
+        voice: edgeVoiceFor(voice), bin: exe, rate, timeoutMs: Math.max(timeoutMs, 60_000),
+      });
+      if (r.ok) return r;
+    }
+  }
+
   const command = buildSpeakCommand({ text, voice, rate, volume });
-  if (dryRun) return Promise.resolve({ ok: true, dryRun: true, command });
+  if (dryRun) return { ok: true, dryRun: true, command };
   return new Promise((resolve) => {
     execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', command],
       { timeout: timeoutMs, windowsHide: true }, (err, _stdout, stderr) => {
         if (err) resolve({ ok: false, reason: String(stderr || err.message).slice(0, 200) });
-        else resolve({ ok: true });
+        else resolve({ ok: true, engine: 'sapi' });
       });
   });
 }

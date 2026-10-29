@@ -610,7 +610,8 @@ export function watchToolSpec() {
       },
       voice: {
         type: 'string',
-        description: 'TTS voice name fragment, e.g. "Huihui" or "Yaoyao". Defaults to the first Chinese voice.',
+        description: 'TTS voice. Accepts a SAPI fragment ("Huihui"/"Yaoyao"/"Kangkang") OR a full '
+          + 'edge-tts neural name ("zh-CN-XiaoxuanNeural"). Default is Xiaoxuan; the mapping is automatic.',
       },
       rate: {
         type: 'number',

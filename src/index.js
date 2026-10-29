@@ -18,7 +18,8 @@ import { probeVideo } from './probe.js';
 import { formatMatches, matchSegments, recallSegments } from './locate.js';
 import { lookupCell } from './cells.js';
 import { DEFAULT_RAMP, DEFAULT_SEGMENT } from './batches.js';
-import { configuredLaunch, configuredPort } from './browser-time.js';
+import { configuredLaunch, configuredPort, listTargets } from './browser-time.js';
+import { chatAlive, startChatServer, DEFAULT_CHAT_PORT } from './chat.js';
 import { checkBiliLogin, fetchRemoteSubtitles } from './subtitles.js';
 import { listVoices, speak as speakAloud } from './tts.js';
 import { makeBuilder, runWatchPass } from './watch-run.js';
@@ -69,6 +70,34 @@ async function attachSheetImages(ctx, result) {
     }));
   }
   return images;
+}
+
+/**
+ * 把陪看的聊天框支起来（只做一次）。
+ *
+ * 为什么要在插件里做：DSH 的 `wait: true` 一遇到 `paused` 就返回，用户想"不暂停视频、
+ * 只说一句"没有别的入口；而宿主的输入框在阻塞期间又不会把话送到工具里。
+ * 这个 localhost 页面写盘即时，`watch-run` 的等待循环每 500ms 读一次就能听见。
+ *
+ * 起不来（端口被占 / 没浏览器）就算了 —— 它是加分项，不该拖累陪看本身。
+ */
+let chatBoxTried = false;
+async function ensureChatBox(browserPort) {
+  if (chatBoxTried) return;
+  chatBoxTried = true;
+  try {
+    if (!(await chatAlive(DEFAULT_CHAT_PORT))) {
+      await startChatServer({ port: DEFAULT_CHAT_PORT, log: () => {} });
+    }
+    const bp = browserPort ?? configuredPort();
+    if (!bp) return;
+    const ts = await listTargets({ port: bp }).catch(() => null);
+    const already = (ts ?? []).some((t) => String(t.url ?? '').includes(`:${DEFAULT_CHAT_PORT}`));
+    if (already) return;
+    // 在调试浏览器里开一个标签（CDP 的 /json/new，Chrome 111+ 要求 PUT）
+    await fetch(`http://127.0.0.1:${bp}/json/new?${encodeURIComponent(`http://127.0.0.1:${DEFAULT_CHAT_PORT}/`)}`,
+      { method: 'PUT' }).catch(() => null);
+  } catch { /* 静默：聊天框是可选能力 */ }
 }
 
 /** 跑一次管线，把每张图提交成附件，返回规范值 { images, text } */
@@ -160,6 +189,8 @@ async function registerAll(ctx) {
     async execute(args) {
       const problems = validateWatchArgs(args);
       if (args.stopLoop === true) return { text: JSON.stringify(stopWatchLoop('requested')), images: [] };
+      // 即将进入阻塞：把聊天框支起来（第一次会起服务 + 开标签，之后什么都不做）
+      if (args.wait === true) void ensureChatBox(args.browserPort ?? configuredPort());
       // 只看钟的状态，不读进度、不出图 —— 排查"它为什么不说话"时用
       if (args.statusOnly === true) return { text: JSON.stringify(loopStatus()), images: [] };
       // 看这台机器有哪些声音（TTS 用）
