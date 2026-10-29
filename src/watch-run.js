@@ -162,6 +162,11 @@ export async function runWatchPass(args, deps) {
     return {
       ok: true,
       speaking: false,
+      input,
+      size,
+      cursor,
+      measuredAt,
+      segment: segStart,
       text: `${head}\nnot yet — keep watching. I will speak near ${mmss(segStart + size - lead)}.`,
       images: [],
     };
@@ -209,6 +214,8 @@ export async function runWatchPass(args, deps) {
   return {
     ok: true,
     speaking: true,
+    input,
+    size,
     cursor,
     measuredAt,
     segment: segStart,

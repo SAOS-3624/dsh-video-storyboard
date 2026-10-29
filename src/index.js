@@ -17,6 +17,7 @@ import { probeVideo } from './probe.js';
 import { formatMatches, matchSegments, recallSegments } from './locate.js';
 import { lookupCell } from './cells.js';
 import { runWatchPass } from './watch-run.js';
+import { loopStatus, startWatchLoop, stopWatchLoop } from './watch-loop.js';
 import { isHttpUrl, probeUrl, resolveDirectUrl, resolveInput } from './fetch.js';
 import {
   storyboardToolSpec, zoomToolSpec, probeToolSpec, locateToolSpec, watchToolSpec,
@@ -80,6 +81,8 @@ export async function apply(ctx) {
     try {
       ctx?.logger?.error?.(`[dsh-video-storyboard] failed to load: ${e?.stack ?? e}`);
     } catch { /* 连日志都写不了就算了 */ }
+    // DSH_VIDEO_DEBUG=1 时把错误抛出去 —— 否则"插件静默不工作"很难查
+    if (process.env.DSH_VIDEO_DEBUG) throw e;
     return () => {};
   }
 }
@@ -193,6 +196,7 @@ async function registerAll(ctx) {
     ...watchToolSpec(),
     async execute(args) {
       const problems = validateWatchArgs(args);
+      if (args.stopLoop === true) return { text: JSON.stringify(stopWatchLoop('requested')), images: [] };
       if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
       const r = await runWatchPass(args, {
         cache: watchCache,
@@ -202,6 +206,21 @@ async function registerAll(ctx) {
           data, mediaType: 'image/png', name,
         }),
       });
+
+      // 起陪看循环：从这里往后每 120 秒一段，到点自己叫醒。
+      // 没有会话 id 就不起（只是不会自动说话，工具本身照常可用）。
+      if (args.loop !== false && lastSessionId && Number.isFinite(r.cursor)) {
+        const size = r.size ?? 120;
+        const startSeg = r.segment ?? 0;
+        const segments = Array.from({ length: 60 }, (_, i) => {
+          const from = startSeg + (i + 1) * size;
+          return { from, to: from + size, sayAt: from + size - 15 };
+        });
+        startWatchLoop({
+          ctx, sessionId: lastSessionId, input: r.input, segments,
+          cursor: r.cursor, log: () => {},
+        });
+      }
       return { text: r.text, images: r.images };
     },
   });
@@ -253,6 +272,19 @@ async function registerAll(ctx) {
       return { text: formatMatches(args.query, matches, { total: inWindow.length }) };
     },
   });
+
+  // 当前会话：从 session/event 里拿（`session.header.id`）。这是 dsh-fish 的做法，
+  // 比反射 ctx 安全得多 —— 反射会把整个应用搞崩（见 apply 的注释）。
+  let lastSessionId = null;
+  if (typeof ctx.on === 'function') {
+    try {
+      const off = ctx.on('session/event', (session) => {
+        const id = session?.header?.id ?? session?.id;
+        if (id) lastSessionId = id;
+      });
+      if (typeof off === 'function') disposers.push(off);
+    } catch { /* 拿不到就退化成"只能手动触发" */ }
+  }
 
   const disposers = [
     ctx.tools.register(storyboard),
