@@ -808,7 +808,7 @@ async function correctByOnScreenSubs({
 }) {
   // 直链是另一套取帧路径（带 header），第一版不做 —— 明确说"跳过"，而不是悄悄不生效
   if (remoteFrame?.uri) return { status: 'skipped', reason: 'remote-frame-source' };
-  const python = ocrPython();
+  const python = await ocrPython();
   if (!python) return { status: 'skipped', reason: 'no-python-with-rapidocr' };
 
   const dir = await mkdtemp(join(tmpdir(), 'dsh-ocr-'));

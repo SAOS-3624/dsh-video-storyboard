@@ -181,7 +181,6 @@ export async function apply(ctx) {
       if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
       const r = await runWatchPass(args, {
         cache: watchCache,
-        resolveInput,
         runStoryboard,
         formatManifest,
         saveImage: async ({ data, name }) => ctx.attachments.saveImage({

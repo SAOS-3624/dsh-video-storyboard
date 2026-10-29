@@ -564,6 +564,9 @@ export function validateWatchArgs(args) {
   if (args?.cursor !== undefined && !(args.cursor >= 0)) problems.push('cursor must be >= 0');
   if (args?.segment !== undefined && !(args.segment >= 20)) problems.push('segment must be >= 20 seconds');
   if (args?.lead !== undefined && !(args.lead >= 0)) problems.push('lead must be >= 0');
+  const seg = args?.segment ?? 120;
+  const lead = args?.lead ?? 15;
+  if (lead >= seg) problems.push('lead must be smaller than segment, otherwise every call delivers immediately');
   if (args?.cells !== undefined && (!Number.isInteger(args.cells) || args.cells < 1 || args.cells > 9)) {
     problems.push('cells must be an integer 1..9');
   }

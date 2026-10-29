@@ -11,12 +11,12 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { cacheDir } from './cache.js';
+import { findPython } from './python.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -29,28 +29,39 @@ const norm = (p) => String(p ?? '').replace(/\\/g, '/').toLowerCase();
 
 /* ------------------------------------------------------------ 播放进度 */
 
-export function probePython(config = {}, env = process.env) {
-  const configured = config?.ocr?.python || env.DSH_OCR_PYTHON || env.DSH_WATCH_PYTHON;
-  if (configured && existsSync(configured)) return configured;
-  const guesses = process.platform === 'win32'
-    ? ['D:/asr-local/.venv/Scripts/python.exe']
-    : ['/usr/bin/python3', '/usr/local/bin/python3'];
-  return guesses.find((p) => existsSync(p)) ?? null;
+/**
+ * 找一台能 `import winrt` 的 python（读系统媒体控件要用）。
+ * 早期版本硬编码了开发机的 .venv —— 别人装上会永远读不到进度，所以统一走候选链 + 实际验证。
+ */
+export async function probePython({ config = {}, env = process.env } = {}) {
+  return findPython('winrt.windows.media.control', { config, env });
 }
 
 /**
  * 读当前所有媒体会话。读不到返回 `{ok:false, error}` —— 上层据此说"读不到进度"，
  * 而不是假装知道用户在看到第几秒。
  */
-export function probePlayback({ python = probePython(), timeoutMs = 8000 } = {}) {
-  if (!python) return Promise.resolve({ ok: false, error: 'no-python-with-winrt' });
+let probeCache = { at: 0, value: null };
+
+/**
+ * 同一秒内重复探测没有意义（位置一直在动，但 1.5 秒内差不了多少），
+ * 而每次探测要起一个 python 进程（≈1 s）。缓存一下，一轮唤醒只付一次。
+ */
+export async function probePlayback({
+  python, timeoutMs = 8000, config = {}, env = process.env, maxAgeMs = 1500,
+} = {}) {
+  if (!python && probeCache.value && Date.now() - probeCache.at < maxAgeMs) return probeCache.value;
+  const py = python ?? await probePython({ config, env });
+  if (!py) return { ok: false, error: 'no-python-with-winrt (pip install winrt-runtime winrt-Windows.Media.Control winrt-Windows.Foundation)' };
   return new Promise((resolve) => {
-    execFile(python, [join(HERE, 'watch_smtc.py')], { timeout: timeoutMs, maxBuffer: 1 << 20 },
+    execFile(py, [join(HERE, 'watch_smtc.py')], { timeout: timeoutMs, maxBuffer: 1 << 20 },
       (err, stdout) => {
         if (err) return resolve({ ok: false, error: String(err.message).slice(0, 160) });
         try {
           const parsed = JSON.parse(String(stdout ?? '').trim() || '{}');
-          return resolve(parsed?.ok ? parsed : { ok: false, error: parsed?.error ?? 'bad-output' });
+          const value = parsed?.ok ? parsed : { ok: false, error: parsed?.error ?? 'bad-output' };
+          probeCache = { at: Date.now(), value };
+          return resolve(value);
         } catch {
           return resolve({ ok: false, error: 'unparsable' });
         }
@@ -99,8 +110,12 @@ export async function loadWatch(env = process.env) {
 
 export async function saveWatch(state, env = process.env) {
   try {
+    // 只留最近 20 个源：不然看几十部片子之后这个文件会无限长
+    const keys = Object.keys(state).sort((a, b) => (state[b]?.at ?? 0) - (state[a]?.at ?? 0));
+    const pruned = {};
+    for (const k of keys.slice(0, 20)) pruned[k] = state[k];
     await mkdir(cacheDir(env), { recursive: true });
-    await writeFile(watchPath(env), JSON.stringify(state), 'utf8');
+    await writeFile(watchPath(env), JSON.stringify(pruned), 'utf8');
   } catch { /* 存不下就算了，最多重启后重算一段 */ }
 }
 

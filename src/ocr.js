@@ -12,9 +12,10 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { findPython } from './python.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -22,19 +23,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export const OCR_MAX_ITEMS = 16;
 
 /**
- * 找可用的 python：先用配置里的，再试环境变量，最后试常见位置。
- * 只要求"能 import rapidocr_onnxruntime"，不做版本猜测。
+ * 找一台能 `import rapidocr_onnxruntime` 的 python。
+ *
+ * 早期版本在这里硬编码了开发机的 `.venv` 路径 —— 跟着包发出去，别人的机器上永远找不到，
+ * 于是"OCR 校正"对所有人都是静默跳过。现在统一走 python.js 的候选链 + 实际 import 验证。
  */
-export function ocrPython({ config = {}, env = process.env } = {}) {
-  const configured = config?.ocr?.python || env.DSH_OCR_PYTHON;
-  if (configured && existsSync(configured)) return configured;
-  const guesses = process.platform === 'win32'
-    ? [
-      'D:/asr-local/.venv/Scripts/python.exe',
-      join(env.LOCALAPPDATA ?? '', 'Programs', 'Python', 'Python313', 'python.exe'),
-    ]
-    : ['/usr/bin/python3', '/usr/local/bin/python3'];
-  return guesses.find((p) => p && existsSync(p)) ?? null;
+export async function ocrPython({ config = {}, env = process.env } = {}) {
+  return findPython('rapidocr_onnxruntime', { config, env });
 }
 
 function runBridge({ python, mode, images, timeoutMs = 120_000 }) {
