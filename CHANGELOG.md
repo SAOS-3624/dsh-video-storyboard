@@ -18,6 +18,17 @@
 
 ### Added
 
+- **`video_zoom({ cellId })`** — reference a cell by number instead of copying timestamps. The last storyboard
+  writes `{cell: absolute from/to}` to the cache, so a zoom resolves `cellId: 3` to the cell labelled 3 even
+  after parameters change; it errors clearly (rather than guessing a window) when no map exists. Suggested in
+  issue #4: timestamps drift once you change the window or the file, and a reference that cannot be replayed
+  is not a reference.
+
+- **`planThresholds` is now configurable** (`musicLufs` / `musicSpeechRate` / `speechRateCut`), from issue #4.
+  The defaults (−18 LUFS / 1 char·s⁻¹ / 3 char·s⁻¹) were tuned on one master, and loudness spans 9 LU across
+  material — a constant that misfires on the next batch is worse than no constant. The values that actually
+  applied were already printed; now they can be overridden per call.
+
 - **Hard-coded subtitles now correct the transcript** when `detail: high`. ASR mishears names and particles
   (「他也忘记。」 for a line that actually reads 「你连，也要忘记吗」); the burned-in text is the authority.
   The pass is deliberately cheap: one detection pass over three full-resolution frames locates the subtitle
@@ -29,6 +40,10 @@
   frame by frame. Silently skipped when rapidocr is not installed, and it says so rather than pretending.
 
 ### Docs
+
+- The `tokens=` figure now states its basis: `384 (est@384/img, DSH host billing; an API host bills by
+  pixels)`. Issue #4 was right that "384 token" is unreadable without saying who charges that — the real
+  pixel dimensions were already next to it.
 
 - Sponsor entry: `.github/FUNDING.yml` (custom link to the WeChat reward code) and a README section, so the
   repo shows a Sponsor button without requiring GitHub Sponsors, which is impractical from mainland China.

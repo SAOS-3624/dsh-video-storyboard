@@ -101,7 +101,7 @@ test('清单头部带 cell/tokens/ffmpeg/sha256 与 plan 输入', () => {
   };
   const text = formatManifest(r, { maxChars: 200_000 });
   assert.match(text, /cell="559x248"/);
-  assert.match(text, /tokens="384 \(DSH estimate\)"/);
+  assert.match(text, /tokens="384 \(est@384\/img[^"]*\)"/, '要写清 384 是按什么口径估的');
   assert.match(text, /ffmpeg="6\.1\.1-essentials_build"/);
   assert.match(text, /sha256="abc123"/);
   assert.match(text, /plan: auto 16 cells/);

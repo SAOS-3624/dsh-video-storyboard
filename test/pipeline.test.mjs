@@ -56,7 +56,7 @@ test('e2e: runStoryboard 出一张图 + 完整清单', async (t) => {
 
   const text = formatManifest(r);
   assert.match(text, new RegExp(`cell="${sheet.cellW}x${sheet.cellH}"`));
-  assert.match(text, /tokens="384 \(DSH estimate\)"/);
+  assert.match(text, /tokens="384 \(est@384\/img[^"]*\)"/, '要写清 384 是按什么口径估的');
   assert.match(text, /ffmpeg="[^"]+"/);
   assert.match(text, /sha256="[0-9a-f]{64}"/);
   assert.match(text, /plan: explicit 4 cells/);

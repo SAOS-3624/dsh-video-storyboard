@@ -15,6 +15,7 @@
 import { DETAIL_CHARS, runStoryboard, formatManifest, formatProbe, formatRemoteProbe } from './pipeline.js';
 import { probeVideo } from './probe.js';
 import { formatMatches, matchSegments, recallSegments } from './locate.js';
+import { lookupCell } from './cells.js';
 import { isHttpUrl, probeUrl, resolveDirectUrl, resolveInput } from './fetch.js';
 import {
   storyboardToolSpec, zoomToolSpec, probeToolSpec, locateToolSpec, validateToolArgs, validateZoomArgs,
@@ -89,6 +90,8 @@ export async function apply(ctx) {
       detail: args.detail ?? 'med',
       // detail=high 表示"要能引用原话"，这时才值得用硬字幕校正（本地 OCR，不花 token）
       ocr: args.ocr === true || (args.ocr !== false && (args.detail ?? 'med') === 'high'),
+      ...(args.planThresholds && typeof args.planThresholds === 'object'
+        ? { planThresholds: args.planThresholds } : {}),
       fetchOptions: {
         cookies: args.cookies,
         allowAnonymous: args.allowAnonymous === true,
@@ -102,6 +105,20 @@ export async function apply(ctx) {
     async execute(args) {
       const problems = validateZoomArgs(args);
       if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
+
+      // cellId → 该格的绝对时间区间（上一次分镜落下的表）。
+      // 找不到就明确报错并指路，而不是悄悄退回一个"猜的"窗口。
+      let from = args.from;
+      let to = args.to;
+      if (args.cellId !== undefined && args.cellId !== null) {
+        const hit = await lookupCell(args.input, args.cellId);
+        if (!hit) {
+          throw new Error(`no cell map recorded for this input (cellId ${args.cellId}). ` +
+            'Run video_storyboard on it first, or pass from/to.');
+        }
+        from = hit.from;
+        to = hit.to;
+      }
       const fetchOptions = {
         cookies: args.cookies,
         allowAnonymous: args.allowAnonymous === true,
@@ -123,8 +140,8 @@ export async function apply(ctx) {
       }
       const result = await runStoryboard({
         input: args.input,
-        from: args.from,
-        to: args.to,
+        from,
+        to,
         cells: args.cells ?? 6,
         sheets: 1,
         // **必须显式传**：runStoryboard 的默认值是 1.2，不传就永远是 1.2 ——

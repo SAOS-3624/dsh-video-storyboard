@@ -79,6 +79,8 @@ export const COVERAGE = {
  */
 export function suggest(meta) {
   const { duration, cuts = 0, motion, speechRate = 0, hasSubtitle = false, meanLufs } = meta;
+  // 阈值可覆盖：不同母带的响度能差 9 LU（实测 −23 … −14），写死的常数换一批片源就会误判。
+  const T = { ...PLAN_THRESHOLDS, ...(meta.thresholds ?? {}) };
   if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
   const shots = Math.max(1, cuts + 1);
   const avgShot = duration / shots;
@@ -97,15 +99,15 @@ export function suggest(meta) {
   // 内容类型分流（实测基准）：口播片最轻最吵（5.6 字/秒 @ −23 LUFS），音乐片最响最静
   // （0.3 字/秒 @ −14.2 LUFS）。响度与字/秒是反向的，两个一起看比任何主观判断都准。
   const musicDriven = Number.isFinite(meanLufs)
-    && meanLufs > PLAN_THRESHOLDS.musicLufs
-    && speechRate < PLAN_THRESHOLDS.musicSpeechRate;
+    && meanLufs > T.musicLufs
+    && speechRate < T.musicSpeechRate;
 
   let cells = Math.round(duration / perCell);
   cells = Math.min(cells, shots);            // 格数不该超过镜头数
   if (musicDriven) cells = Math.max(cells, 9);  // 音乐片的信息在画面上，别把格数压太低
   cells = snapCells(clamp(cells, 4, 16));
   if (!musicDriven && (hasSubtitle || speechRate > 0)
-    && speechRate > PLAN_THRESHOLDS.speechRateCut) {
+    && speechRate > T.speechRateCut) {
     cells = snapCells(clamp(Math.round(cells * 0.6), 4, 12));   // 台词承担信息，图只做锚点
   }
 
