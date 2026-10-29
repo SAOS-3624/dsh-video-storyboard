@@ -624,6 +624,9 @@ export async function runStoryboard(opts) {
       : null,
     plan: {
       ...planInfo,
+      // 实际出片格数：minGap 会把"要 16 格"压成 8 格，清单必须两个数都给，
+      // 否则首行写 16、末尾写 total 8，读起来像是出错了。
+      produced: cellRanges.length,
       bursts: findBursts(relCuts, winDur).map((b) => ({
         from: +(b.from + winStart).toFixed(2), to: +(b.to + winStart).toFixed(2),
         shots: b.shots, density: b.density,
@@ -1137,7 +1140,10 @@ function formatPlanLine(plan) {
   const fmt = (v) => (v === null || v === undefined || (typeof v === 'number' && !Number.isFinite(v))
     ? 'n/a' : String(v));
   const mode = plan.auto ? 'auto' : 'explicit';
-  return `plan: ${mode} ${plan.cells} cells — ${plan.reason ?? 'auto'} · ` +
+  const cellsText = plan.produced && plan.produced !== plan.cells
+    ? `${plan.produced}/${plan.cells} cells (minGap-limited)`
+    : `${plan.cells} cells`;
+  return `plan: ${mode} ${cellsText} — ${plan.reason ?? 'auto'} · ` +
     `meanLufs=${fmt(plan.inputs.meanLufs)} LUFS · ` +
     `speechRate=${fmt(plan.inputs.speechRate)} chars/s · ` +
     `motion=${fmt(plan.inputs.motion)} · cuts=${fmt(plan.inputs.cuts)} · ` +
