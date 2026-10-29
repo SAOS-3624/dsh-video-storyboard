@@ -56,7 +56,7 @@ test('formatSelector: B 站是 DASH，必须 bv*+ba 而不是 b', () => {
   // 渐进式单文件优先（快、不用合流），拿不到再退 DASH
   assert.equal(formatSelector(360), 'b[height<=360][acodec!=none]/bv*[height<=360]+ba/b[height<=360][acodec!=none]/bv*+ba/b');
   assert.equal(formatSelector(1080, { withAudio: false }), 'b[height<=1080]/bv*[height<=1080]/bv*/b');
-  assert.equal(formatSelector(0), 'bv*+ba/b[acodec!=none]');
+  assert.equal(formatSelector(0), 'bv*+ba/b[acodec!=none]/b');
 });
 
 test('formatSelector: 末尾必须留无筛选兜底（竖屏 height 是长边，会一个都匹配不到）', () => {

@@ -369,7 +369,9 @@ export function formatSelector(height, { withAudio = true } = {}) {
   // 渐进式最高一般只到 720p，但扫描只用 360p，够；拿不到再退回 DASH。
   // B 站有些版本会把 video-only 的 mp4 也塞进 `b`，所以要求它必须带音轨；
   // 拿不到就落到 `bv*+ba`（需要 ffmpeg 合流，fetchMedia 会把 DSH 的 ffmpeg 位置传给 yt-dlp）。
-  if (!cap) return withAudio ? 'bv*+ba/b[acodec!=none]' : 'bv*/b';
+  // 末尾的 /b 是给真正没有音轨的素材留的：bv*+ba 选不到音频时会失败，
+  // 不能因为"要求音轨"连一个无声视频都下不下来。
+  if (!cap) return withAudio ? 'bv*+ba/b[acodec!=none]/b' : 'bv*/b';
   return withAudio
     ? `b${cap}[acodec!=none]/bv*${cap}+ba/b${cap}[acodec!=none]/bv*+ba/b`
     : `b${cap}/bv*${cap}/bv*/b`;
@@ -503,23 +505,36 @@ export async function fetchMedia(input, opts = {}) {
       try {
         meta = JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8'));
       } catch { /* 老缓存没有 meta，退回最小信息 */ }
-      const cachedDirect = recallDirect(normalized, zoomHeight);
-      onProgress?.({ phase: 'cache-hit', path: target });
-      return {
-        path: target,
-        frameSource: cachedDirect
-          ? { uri: cachedDirect.url, userAgent: cachedDirect.userAgent, referer: cachedDirect.referer, height: cachedDirect.height, expiresAt: cachedDirect.expiresAt }
-          : null,
-        source: {
-          kind: 'url',
-          url,
-          bytes: st.size,
-          scanHeight,
-          ...(meta ?? {}),
-          // `cached` 必须排在展开之后：meta.json 里存的是写入那一刻的 false，会把这里覆盖掉
-          cached: true,
-        },
-      };
+      // 旧版本（或无 ffmpeg 的环境）可能把 video-only 的 mp4 缓存下来。
+      // 只修下载参数还不够：同一条链接再跑一次会直接命中这份坏缓存，用户按清单提示
+      // "装好 ffmpeg 再试"也仍然是无声的。用当时可用的 ffmpeg 路径做一次失效重试；
+      // 如果同一个 ffmpeg 仍然合不上，就把 audioMergeRetry 记进 meta，避免每次重下。
+      const staleMerge = Boolean(
+        meta?.audioMissing && isAbsolute(ffmpegPath) && meta.audioMergeRetry !== ffmpegPath,
+      );
+      if (staleMerge) {
+        onProgress?.({ phase: 'cache-invalid', path: target, reason: 'audio-missing' });
+        await rm(target, { force: true }).catch(() => {});
+        await rm(join(dir, 'meta.json'), { force: true }).catch(() => {});
+      } else {
+        const cachedDirect = recallDirect(normalized, zoomHeight);
+        onProgress?.({ phase: 'cache-hit', path: target });
+        return {
+          path: target,
+          frameSource: cachedDirect
+            ? { uri: cachedDirect.url, userAgent: cachedDirect.userAgent, referer: cachedDirect.referer, height: cachedDirect.height, expiresAt: cachedDirect.expiresAt }
+            : null,
+          source: {
+            kind: 'url',
+            url,
+            bytes: st.size,
+            scanHeight,
+            ...(meta ?? {}),
+            // `cached` 必须排在展开之后：meta.json 里存的是写入那一刻的 false，会把这里覆盖掉
+            cached: true,
+          },
+        };
+      }
     }
   }
 
@@ -653,6 +668,8 @@ export async function fetchMedia(input, opts = {}) {
     kind: 'url',
     ...(audioMissing ? { audioMissing: true } : {}),
     ...(audioMissing && companionAudio.length > 0 ? { audioMissingReason: 'unmerged-dash' } : {}),
+    // 让下一次命中知道"这份坏缓存已经用哪个 ffmpeg 重试过"；换了 ffmpeg 才值得再试。
+    ...(audioMissing && isAbsolute(ffmpegPath) ? { audioMergeRetry: ffmpegPath } : {}),
     url,
     cached: false,
     bytes: st.size,

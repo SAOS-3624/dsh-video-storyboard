@@ -9,7 +9,9 @@
   produced a video-only mp4 beside an unmerged m4a. `fetchMedia` now passes the resolved ffmpeg path to
   `yt-dlp` (`--ffmpeg-location`), and the combined selector requires an audio codec. If merging still
   leaves a separate audio file, the manifest says to install ffmpeg/set `DSH_FFMPEG_PATH` instead of
-  suggesting cookies. Reported in #18.
+  suggesting cookies. A cached copy from before the fix is invalidated once when a real ffmpeg path is
+  available, so the suggested retry does not hit the same silent file again; the no-cap selector keeps a
+  final unfiltered `b`, so genuinely silent videos still download. Reported in #18.
 
 ## [0.4.4] — 2026-10-29
 
