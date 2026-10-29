@@ -17,6 +17,7 @@ import { probeVideo } from './probe.js';
 import { formatMatches, matchSegments, recallSegments } from './locate.js';
 import { lookupCell } from './cells.js';
 import { DEFAULT_RAMP, DEFAULT_SEGMENT } from './batches.js';
+import { configuredLaunch, configuredPort } from './browser-time.js';
 import { makeBuilder, runWatchPass } from './watch-run.js';
 import { loopStatus, startWatchLoop, stopWatchLoop } from './watch-loop.js';
 import { wakeSession } from './timer.js';
@@ -223,7 +224,12 @@ async function registerAll(ctx) {
       const ramp = args.ramp === undefined ? [...DEFAULT_RAMP] : args.ramp;
       const callArgs = { ...args, segment, ramp };
 
+      // 机器配置只在这里读一次，然后显式传给库层
+      const browserPort = args.browserPort ?? configuredPort() ?? undefined;
+      const autoLaunch = configuredLaunch();
+
       const r = await runWatchPass(callArgs, {
+        browserPort, autoLaunch,
         cache: watchCache,
         runStoryboard,
         formatManifest,
@@ -247,6 +253,7 @@ async function registerAll(ctx) {
           segment, ramp, depth,
           // 循环负责"什么时候建"，这里给它"怎么建"
           deps: {
+            browserPort,
             build: makeBuilder({
               input: r.input, args: callArgs, runStoryboard, formatManifest, cache: watchCache,
             }),

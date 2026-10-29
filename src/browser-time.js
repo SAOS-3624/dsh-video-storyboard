@@ -59,6 +59,25 @@ export function configuredPort(env = process.env) {
 }
 
 /**
+ * 这个地址像不像"某个视频的页面"？
+ *
+ * 为什么需要：B 站**首页**上就挂着自动播放的推荐视频，`document.querySelector('video')` 也有值。
+ * 但 `https://www.bilibili.com/` 不是任何一条视频，拿去喂 yt-dlp 只会得到
+ * "this site is not supported"。判定要卡在地址上，而不是"页面上有没有 <video>"。
+ */
+export function looksLikeVideoUrl(url) {
+  if (typeof url !== 'string' || !url) return false;
+  if (url.startsWith('file://')) return true;
+  if (/^https?:\/\//i.test(url)) {
+    if (/bilibili\.com\/video\/(BV|av)/i.test(url)) return true;
+    if (/bilibili\.com\/bangumi\/play\//i.test(url)) return true;
+    if (/youtube\.com\/watch|youtu\.be\//i.test(url)) return true;
+    if (/\.(mp4|m3u8|webm|mkv)(\?|$)/i.test(url)) return true;
+  }
+  return false;
+}
+
+/**
  * `file:///D:/a%20b.mp4` → `D:/a b.mp4`
  * 本地视频用浏览器打开时，页面地址就是这个视频的路径 —— 正好当 input 用，不必再问用户。
  */

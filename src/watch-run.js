@@ -18,8 +18,7 @@ import {
 import { describeLatency, recordLatency } from './latency.js';
 import { makePlan } from './batches.js';
 import {
-  configuredLaunch, configuredPort, fileUrlToPath, hasDebugPort, launchBrowser, readBrowserPosition,
-  waitForPort,
+  fileUrlToPath, hasDebugPort, launchBrowser, looksLikeVideoUrl, readBrowserPosition, waitForPort,
 } from './browser-time.js';
 import { estimate, makeAnchor } from './position.js';
 import { resolvePlayingSource } from './resolve-playing.js';
@@ -114,8 +113,8 @@ export async function runWatchPass(args, deps) {
     saveImage, runStoryboard, formatManifest, cache = new Map(),
     probe = probePlayback,
     readBrowser = readBrowserPosition,
-    browserPort = configuredPort() ?? undefined,
-    autoLaunch = configuredLaunch(),
+    browserPort = undefined,
+    autoLaunch = false,
   } = deps;
   // 从"开始读进度"到"结果返回"的耗时 —— 这就是本机延迟的实测值，用来做提前量标定
   const tStart = Date.now();
@@ -138,7 +137,8 @@ export async function runWatchPass(args, deps) {
   if (!input) {
     // 浏览器开过调试端口时，**页面地址就是源**（能直接拿到 BV 号），比拿标题去搜准得多
     const b0 = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
-    if (b0?.url && /^https?:/i.test(b0.url)) {
+    // 只认"视频页地址"：B 站首页也有 <video>（自动播放的推荐），但它不是任何一条视频
+    if (b0?.url && looksLikeVideoUrl(b0.url) && /^https?:/i.test(b0.url)) {
       input = b0.url;
       resolved = { input: b0.url, matchedBy: 'browser-url' };
     } else if (fileUrlToPath(b0?.url)) {
@@ -165,7 +165,7 @@ export async function runWatchPass(args, deps) {
         waitedVideoSec += 2;
         const bv = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
         if (bv?.url) {
-          if (/^https?:/i.test(bv.url)) {
+          if (looksLikeVideoUrl(bv.url) && /^https?:/i.test(bv.url)) {
             input = bv.url;
             resolved = { input: bv.url, matchedBy: 'browser-url' };
           } else if (fileUrlToPath(bv.url)) {
@@ -326,9 +326,23 @@ export async function runWatchPass(args, deps) {
   let builtMs = 0;
   if (!entry?.png) {
     const t0 = Date.now();
-    entry = await buildSegment({
-      input, segStart, size, args, runStoryboard, formatManifest, cache,
-    });
+    try {
+      entry = await buildSegment({
+        input, segStart, size, args, runStoryboard, formatManifest, cache,
+      });
+    } catch (e) {
+      // 取流失败（比如地址是"首页"、站点 yt-dlp 不支持）不该把栈抛给宿主：
+      // 说清楚是哪一步、什么地址、下一步怎么办。
+      return {
+        ok: false,
+        reason: 'build-failed',
+        text: `could not build this segment for "${String(input).slice(0, 80)}".\n`
+          + `${String(e?.message ?? e).slice(0, 200)}\n\n`
+          + 'If that is a page URL, make sure it is the video page itself (not a homepage or a search page); '
+          + 'otherwise pass the direct file path or a supported link.',
+        images: [],
+      };
+    }
     builtMs = Date.now() - t0;
   }
 

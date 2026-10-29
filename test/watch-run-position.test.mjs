@@ -19,6 +19,9 @@ const makeDeps = (sessions, { dir } = {}) => ({
   runStoryboard: async () => ({ sheets: [{ png: Buffer.from('x'), cells: [] }] }),
   formatManifest: () => 'manifest',
   probe: async () => ({ ok: true, sessions }),
+  // 显式关掉浏览器通道：否则会读到本机 ~/.dsh/video.json 里配置的真浏览器
+  browserPort: null,
+  autoLaunch: false,
 });
 
 const mm = (s) => Math.round(s * 1000);

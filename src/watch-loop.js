@@ -17,7 +17,7 @@ import {
 } from './position.js';
 import { startTicker, wakeSession } from './timer.js';
 import { describePlan, makePlan } from './batches.js';
-import { configuredPort, readBrowserPosition } from './browser-time.js';
+import { readBrowserPosition } from './browser-time.js';
 import { consumeLine, loadLine, pickSession, probePlayback } from './watch.js';
 
 const mmss = (s) => `${String(Math.floor(Math.max(0, s) / 60)).padStart(2, '0')}:${String(Math.round(Math.max(0, s) % 60)).padStart(2, '0')}`;
@@ -118,7 +118,8 @@ export function startWatchLoop({
   // 拿不到（没开调试端口）就退回 SMTC，不报错。
   const readBrowser = deps.readBrowser ?? ((o) => readBrowserPosition(o));
   // 端口来源：显式参数 → ~/.dsh/video.json → 环境变量（桌面版读不到 setx 的 env，所以文件优先）
-  const browserPort = deps.browserPort ?? configuredPort() ?? undefined;
+  // 端口只从调用方传进来（工具层读配置）；库层不隐式读机器配置，否则单测会被本机状态影响
+  const browserPort = deps.browserPort ?? undefined;
   if (!sessionId) return { ok: false, reason: 'no-session-id' };
   // 段可以由批次表生成，所以只有"既没给段、也没给段长"才算没段
   if ((!Array.isArray(segments) || segments.length === 0) && !(Number(segment) > 0 || Array.isArray(ramp))) {
