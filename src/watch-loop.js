@@ -29,6 +29,8 @@ const ASK_AFTER_MS = 20_000;
 const ASK_COOLDOWN_MS = 300_000;
 /** 连续多久读不到就停表，等人给 cursor（别在那儿空转 20 分钟） */
 const UNKNOWN_GIVE_UP_MS = 600_000;
+/** 浏览器和 SMTC 都没有可用源超过这么久，就停（视频关了 / 浏览器退出了） */
+const NO_SOURCE_GIVE_UP_MS = 300_000;
 
 const loop = {
   active: false,
@@ -41,6 +43,7 @@ const loop = {
   aheadSec: 0,
   unknownSince: 0,
   askedAt: 0,
+  noSourceSince: 0,
   dur: null,
   lastProbeAt: 0,
   lastReason: '',
@@ -163,6 +166,10 @@ export function startWatchLoop({
           if (Number.isFinite(b.dur)) loop.dur = b.dur;
           if (b.url) loop.sourceUrl = b.url;
           loop.positionSource = 'browser';
+          if (b.ended) {
+            stopWatchLoop('video-ended');
+            return;
+          }
         } else {
           loop.positionSource = 'smtc';
           const p = await probe();
@@ -183,6 +190,17 @@ export function startWatchLoop({
               loop.anchor = makeAnchor(sg, tNow);
             }
             if (Number.isFinite(sg.dur)) loop.dur = sg.dur;
+          }
+          // 浏览器和 SMTC 都读不到东西：可能是视频关了、也可能浏览器退出了。
+          // 这时候每 15 秒还在起一次 python，纯属白烧 CPU —— 给一个宽限期后停表。
+          if (!sg) {
+            loop.noSourceSince = loop.noSourceSince || tNow;
+            if (tNow - loop.noSourceSince > NO_SOURCE_GIVE_UP_MS) {
+              stopWatchLoop('no-source');
+              return;
+            }
+          } else {
+            loop.noSourceSince = 0;
           }
         }
         const st = await readLatency();
@@ -298,4 +316,5 @@ export function __setAnchorForTest(anchor) {
 
 export const LOOP_LIMITS = Object.freeze({
   TICK_MS, PROBE_EVERY_MS, UNKNOWN_GIVE_UP_MS, MAX_EXTRAPOLATE_MS, ASK_AFTER_MS, ASK_COOLDOWN_MS,
+  NO_SOURCE_GIVE_UP_MS,
 });

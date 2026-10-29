@@ -179,6 +179,8 @@ video_storyboard({ input: "D:/video/xxx.mp4" })
 
 ## 一起看电影（`video_watch`）
 
+> **想让它准到毫秒、并且自动认出你在看什么？** 先配一次调试端口，见 [docs/WATCH.zh.md](docs/WATCH.zh.md)。
+
 按你的**播放进度**一段段把片看下去，而不是一次性出一张全片分镜。
 
 ```js
@@ -552,6 +554,7 @@ video_storyboard({ input: "materials.mp4", hotwords: "位错 滑移 柏氏矢量
 
 | 文档 | 内容 |
 |---|---|
+| [docs/WATCH.zh.md](docs/WATCH.zh.md) | **陪看配置**：开调试端口、端口/配置怎么填、三个坑、性能开销 |
 | [docs/INSTALL.zh.md](docs/INSTALL.zh.md) | 从零安装：依赖、自检、排错表 |
 | [docs/USAGE.zh.md](docs/USAGE.zh.md) | 完整手册：三条安装路径、六个工作流、每个参数 |
 | [docs/HISTORY.zh.md](docs/HISTORY.zh.md) | 从 v0.1 到现在，按"被什么打脸"组织 |

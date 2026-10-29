@@ -154,3 +154,40 @@ test('⑨ 换批次后立刻开始建再下一个（永远留一个余量）', a
   assert.ok(built.includes(240), `应已开始建第 3 段，实际 ${built.join(',')}`);
   stopWatchLoop('test');
 });
+
+test('⑩ 视频播完就停（不再白转）', async () => {
+  const sim = createSim({ refreshEveryMs: 30_000, duration: 200 });
+  // 让浏览器源报 ended
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'A',
+    segments: [{ from: 0, to: 120 }], size: 120, depth: 2,
+    deps: {
+      ...sim.deps,
+      // 只有显式给了端口才会去读浏览器（默认不读，避免抢到宿主的端口）
+      browserPort: 1,
+      readBrowser: async () => ({ pos: 199, dur: 200, paused: false, ended: true, url: 'file:///x.mp4' }),
+    },
+    log: () => {},
+  });
+  await sim.runTo(5);       // 假 ticker 只在 runTo 里被驱动，sleep 不会推进
+  assert.equal(loopStatus().active, false);
+  assert.equal(loopStatus().reason, 'video-ended');
+});
+
+test('⑪ 浏览器和 SMTC 都没有源，5 分钟后停（别一直起 python）', async () => {
+  const sim = createSim({ refreshEveryMs: 30_000 });
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'A',
+    segments: [{ from: 0, to: 120 }], size: 120, depth: 2,
+    deps: {
+      ...sim.deps,
+      probe: async () => ({ ok: true, sessions: [] }),   // SMTC 也没有会话
+    },
+    log: () => {},
+  });
+  await sim.runTo(200);
+  assert.equal(loopStatus().active, true, '宽限期内还在等');
+  await sim.runTo(340);
+  assert.equal(loopStatus().active, false);
+  assert.equal(loopStatus().reason, 'no-source');
+});
