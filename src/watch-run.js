@@ -16,7 +16,7 @@ import {
   sessionKey, WATCH_LEAD, WATCH_SEGMENT,
 } from './watch.js';
 import { describeLatency, recordLatency } from './latency.js';
-import { readBrowserPosition } from './browser-time.js';
+import { fileUrlToPath, readBrowserPosition } from './browser-time.js';
 import { estimate, makeAnchor } from './position.js';
 import { resolvePlayingSource } from './resolve-playing.js';
 import { saveLines } from './watch.js';
@@ -115,6 +115,10 @@ export async function runWatchPass(args, deps) {
     if (b0?.url && /^https?:/i.test(b0.url)) {
       input = b0.url;
       resolved = { input: b0.url, matchedBy: 'browser-url' };
+    } else if (fileUrlToPath(b0?.url)) {
+      // **本地视频用浏览器打开**：页面地址就是那个文件，直接当 input（不用下载、不用问用户）
+      input = fileUrlToPath(b0.url);
+      resolved = { input, matchedBy: 'browser-file' };
     }
   }
   if (!input) {

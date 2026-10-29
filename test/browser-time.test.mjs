@@ -29,3 +29,12 @@ test('没有页面目标就 null（不是抛错）', () => {
   assert.equal(pickVideoTarget([]), null);
   assert.equal(pickVideoTarget([{ type: 'service_worker', url: 'x' }]), null);
 });
+
+test('file:// 地址能还原成本地路径（本地视频用浏览器打开时靠它）', async () => {
+  const { fileUrlToPath } = await import('../src/browser-time.js');
+  assert.equal(fileUrlToPath('file:///D:/a%20b.mp4'), 'D:/a b.mp4');
+  assert.equal(fileUrlToPath('file:///D:/JiJiDown/x.mp4'), 'D:/JiJiDown/x.mp4');
+  assert.equal(fileUrlToPath('https://www.bilibili.com/video/BV1'), null);
+  assert.equal(fileUrlToPath(''), null);
+  assert.equal(fileUrlToPath(null), null);
+});
