@@ -22,8 +22,12 @@ const mmss = (s) => `${String(Math.floor(Math.max(0, s) / 60)).padStart(2, '0')}
 
 const TICK_MS = 2000;
 const PROBE_EVERY_MS = 15_000;
-/** 连续多久读不到可信位置就停表等人给 cursor（别在那儿空转 20 分钟） */
-const UNKNOWN_GIVE_UP_MS = 180_000;
+/** 读不到位置多久后主动问一次（静默比问一句更糟：用户不知道它在等什么） */
+const ASK_AFTER_MS = 20_000;
+/** 两次主动问之间至少隔这么久 */
+const ASK_COOLDOWN_MS = 300_000;
+/** 连续多久读不到就停表，等人给 cursor（别在那儿空转 20 分钟） */
+const UNKNOWN_GIVE_UP_MS = 600_000;
 
 const loop = {
   active: false,
@@ -35,6 +39,7 @@ const loop = {
   anchor: null,
   aheadSec: 0,
   unknownSince: 0,
+  askedAt: 0,
   lastProbeAt: 0,
   lastReason: '',
   ticker: null,
@@ -78,7 +83,14 @@ export function stopWatchLoop(reason = 'stopped') {
  */
 export function startWatchLoop({
   ctx, sessionId, input, segments, cursor = null, status = 'playing', log = () => {},
+  // 依赖可注入：进程内默认真实实现；测试/仿真用假的，于是"到点会不会说话"可以离线验证
+  deps = {},
 }) {
+  const probe = deps.probe ?? probePlayback;
+  const wake = deps.wake ?? ((c, o) => wakeSession(c, o));
+  const now = deps.now ?? (() => Date.now());
+  const ticker = deps.ticker ?? startTicker;
+  const readLatency = deps.loadLatency ?? loadLatency;
   if (!sessionId) return { ok: false, reason: 'no-session-id' };
   if (!Array.isArray(segments) || segments.length === 0) return { ok: false, reason: 'no-segments' };
 
@@ -97,6 +109,7 @@ export function startWatchLoop({
     spoken: [],
     aheadSec: 0,
     unknownSince: 0,
+    askedAt: 0,
     lastProbeAt: 0,
     lastReason: 'started',
     log,
@@ -107,20 +120,20 @@ export function startWatchLoop({
     ? makeAnchor({ pos: cursor, dur: null, status, updated: Date.now() })
     : null;
 
-  void loadLatency().then((st) => { loop.aheadSec = aheadSeconds(st); });
+  void readLatency().then((st) => { loop.aheadSec = aheadSeconds(st); });
 
-  loop.ticker = startTicker({
+  loop.ticker = ticker({
     everyMs: TICK_MS,
     tick: async () => {
-      const now = Date.now();
+      const tNow = now();
 
-      if (now - loop.lastProbeAt >= PROBE_EVERY_MS) {
-        loop.lastProbeAt = now;
-        const p = await probePlayback();
+      if (tNow - loop.lastProbeAt >= PROBE_EVERY_MS) {
+        loop.lastProbeAt = tNow;
+        const p = await probe();
         const s = p.ok ? pickSession(p.sessions ?? [], { input: loop.input }) : null;
         if (s) {
           if (loop.anchor) {
-            const { anchor, driftSec, refreshed, changedVideo } = updateAnchor(loop.anchor, s, now);
+            const { anchor, driftSec, refreshed, changedVideo } = updateAnchor(loop.anchor, s, tNow);
             if (changedVideo) {
               stopWatchLoop('video-changed');
               return;
@@ -132,9 +145,9 @@ export function startWatchLoop({
             }
             loop.anchor = anchor;
           } else {
-            loop.anchor = makeAnchor(s, now);
+            loop.anchor = makeAnchor(s, tNow);
           }
-          const st = await loadLatency();
+          const st = await readLatency();
           loop.aheadSec = aheadSeconds(st);
         }
       }
@@ -148,21 +161,36 @@ export function startWatchLoop({
         anchor: loop.anchor,
         segments: loop.segments,
         spoken: loop.spoken,
-        now,
+        now: tNow,
         lead: 15,
         aheadSec: loop.aheadSec,
       });
       loop.lastReason = r.reason ?? 'not-due';
 
       if (r.reason === 'position-unknown') {
-        if (!loop.unknownSince) loop.unknownSince = now;
-        if (now - loop.unknownSince > UNKNOWN_GIVE_UP_MS) {
+        if (!loop.unknownSince) loop.unknownSince = tNow;
+        const unknownFor = tNow - loop.unknownSince;
+
+        // 读不到就**问一次**，别静默。静默的后果是用户以为它坏了。
+        if (unknownFor >= ASK_AFTER_MS && tNow - (loop.askedAt ?? 0) >= ASK_COOLDOWN_MS) {
+          loop.askedAt = tNow;
+          const stale = Math.round((r.staleMs ?? 0) / 1000);
+          const w = await wake(loop.ctx, {
+            sessionId: loop.sessionId,
+            text: `[一起看] 读不到你的播放进度了（系统媒体控件最后一次更新在 ${stale} 秒前）。`
+              + '问一句"你看到几分几秒了"，拿到答复就带 cursor 再调 video_watch。',
+          });
+          loop.log(`[watch] ask-for-cursor (${stale}s stale) → ${w.ok ? 'ok' : w.reason}`);
+        }
+
+        if (unknownFor > UNKNOWN_GIVE_UP_MS) {
           // 读不到就别空转：停掉，等用户给 cursor 重新起
           stopWatchLoop('position-unreadable');
         }
         return;
       }
       loop.unknownSince = 0;
+      loop.askedAt = 0;
 
       if (!r.speak) return;
 
@@ -171,7 +199,7 @@ export function startWatchLoop({
       const text = `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 这一段该说话了`
         + `（用户大约看到 ${mmss(r.pos)}${r.confidence === 'extrapolated' ? '，按墙钟推算' : ''}）。`
         + '调 video_watch 拿这一段的画面，然后只说一句。';
-      const w = await wakeSession(loop.ctx, { sessionId: loop.sessionId, text });
+      const w = await wake(loop.ctx, { sessionId: loop.sessionId, text });
       loop.log(`[watch] wake ${r.segment}s (${r.confidence}) → ${w.ok ? 'ok' : w.reason}`);
     },
   });
@@ -186,5 +214,5 @@ export function __setAnchorForTest(anchor) {
 }
 
 export const LOOP_LIMITS = Object.freeze({
-  TICK_MS, PROBE_EVERY_MS, UNKNOWN_GIVE_UP_MS, MAX_EXTRAPOLATE_MS,
+  TICK_MS, PROBE_EVERY_MS, UNKNOWN_GIVE_UP_MS, MAX_EXTRAPOLATE_MS, ASK_AFTER_MS, ASK_COOLDOWN_MS,
 });
