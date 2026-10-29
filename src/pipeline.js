@@ -1296,8 +1296,11 @@ export function formatManifest(result, {
       `call again with cellRange: [${stoppedAt + 1}, ${hi}] and textOnly: true to read the rest]`);
   }
   if (result.transcript?.source === 'asr') {
-    lines.push('transcript is ASR output (not a subtitle track): technical terms and names may be ' +
-      'misheard — cross-check against on-screen text before quoting them.');
+    // OCR 真修过东西时这条泛泛的警告就多余了：具体修了哪句已经单独写了
+    if (!(result.ocr?.status === 'applied' && result.ocr.fixed > 0)) {
+      lines.push('transcript is ASR output (not a subtitle track): technical terms and names may be ' +
+        'misheard — cross-check against on-screen text before quoting them.');
+    }
     if (result.transcript.termsFixed > 0) {
       lines.push(`${result.transcript.termsFixed} term(s) corrected by the local dictionary (DSH_ASR_TERMS / asr.json "terms")`);
     }
@@ -1315,12 +1318,11 @@ export function formatManifest(result, {
   }
   if (result.ocr) {
     if (result.ocr.status === 'applied') {
+      // 报告行要短：它每一格都在清单里占 token，而"修了几条"本来就是次要信息
       lines.push(result.ocr.fixed > 0
-        ? `on-screen subtitles used to correct ${result.ocr.fixed} of ${result.ocr.checked} checked lines ` +
-          `(band y=${result.ocr.band.y0}-${result.ocr.band.y1}): ${result.ocr.changes
-            .map((c) => `${c.from.toFixed(1)}s "${c.was}" → "${c.now}"`).join(' · ')}`
-        : `on-screen subtitles checked ${result.ocr.checked} lines, nothing needed changing ` +
-          `(band y=${result.ocr.band.y0}-${result.ocr.band.y1}).`);
+        ? `on-screen subs corrected ${result.ocr.fixed}/${result.ocr.checked}: ${result.ocr.changes
+          .map((c) => `${c.from.toFixed(1)}s "${c.was}"→"${c.now}"`).join(' · ')}`
+        : `on-screen subs checked ${result.ocr.checked}, no change`);
     } else {
       lines.push(`on-screen subtitle correction skipped (${result.ocr.reason ?? result.ocr.status}) — ` +
         'transcript is ASR only.');
