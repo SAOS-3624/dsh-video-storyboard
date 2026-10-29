@@ -22,6 +22,45 @@ import { resolvePlayingSource } from './resolve-playing.js';
 // 模块级：latencyNote() 需要知道"这一轮从什么时候开始"
 let tStartForNote = Date.now();
 
+/**
+ * 建一段：分镜 + 清单，放进缓存。
+ * 抽出来是为了"当前段"和"下一段的预取"用同一条代码路径（预取跑偏了就是白烧 CPU）。
+ */
+async function buildSegment({ input, segStart, size, args, runStoryboard, formatManifest, cache }) {
+  const key = `${sessionKey(input)}|${segStart}`;
+  const hit = cache.get(key);
+  if (hit?.png) return hit;
+
+  const r = await runStoryboard({
+    input,
+    from: segStart,
+    to: segStart + size,
+    cells: Number(args.cells) > 0 ? Number(args.cells) : 5,
+    sheets: 1,
+    pick: 'sharp',
+    burn: 'index',
+    minGap: 0.5,
+    // 爆点细扫**保留**（默认就是 true）。我一度把它关了"省时间"，但那是测错了：
+    // 9.2s vs 5.0s 的差来自 ASR 冷启动；交替复跑两次都是 4.5–4.6s，几乎没差，
+    // 而它多找到 3 刀（40 vs 37），直接影响快闪段落摊不摊成 2×2/3×3。
+    transcript: args.transcript ?? 'auto',
+    // 陪看是持续调用：让本地 ASR 活过整段，别每段都冷启动一次（实测每段多 5 s）
+    asrIdleMs: size * 1000 + 30_000,
+    adaptive: false,
+    cookies: args.cookies,
+    allowAnonymous: args.allowAnonymous === true,
+  });
+  const entry = {
+    png: r.sheets?.[0]?.png ?? null,
+    manifest: formatManifest(r, { maxChars: 2600, maxCellChars: 80 }),
+    cells: r.sheets?.[0]?.cells?.length ?? 0,
+  };
+  cache.set(key, entry);
+  // 每段一张 PNG，一部电影会有几十段。只留最近 8 段，别把内存吃掉。
+  while (cache.size > 8) cache.delete(cache.keys().next().value);
+  return entry;
+}
+
 async function latencyNote() {
   const st = await recordLatency(Date.now() - tStartForNote);
   // 标定完成后就不再占 token 了
@@ -152,35 +191,24 @@ export async function runWatchPass(args, deps) {
   let builtMs = 0;
   if (!entry?.png) {
     const t0 = Date.now();
-    const r = await runStoryboard({
-      input,
-      from: segStart,
-      to: segStart + size,
-      cells: Number(args.cells) > 0 ? Number(args.cells) : 5,
-      sheets: 1,
-      pick: 'sharp',
-      burn: 'index',
-      minGap: 0.5,
-      // 爆点细扫**保留**（默认就是 true）。
-      // 我一度把它关了"省时间"，但那是测错了：9.2s vs 5.0s 的差其实来自 ASR 冷启动，
-      // 交替复跑（transcript off）两次都是 4.5–4.6s，几乎没差；而它多找到 3 刀（40 vs 37），
-      // 直接影响快闪段落要不要摊成 2×2/3×3 —— 对音乐视频/动作片是实打实的画质。
-      transcript: args.transcript ?? 'auto',
-      // 陪看是持续调用：让本地 ASR 活过整段，别每段都冷启动一次（实测每段多 5 s）
-      asrIdleMs: size * 1000 + 30_000,
-      adaptive: false,
-      cookies: args.cookies,
-      allowAnonymous: args.allowAnonymous === true,
+    entry = await buildSegment({
+      input, segStart, size, args, runStoryboard, formatManifest, cache,
     });
-    entry = {
-      png: r.sheets?.[0]?.png ?? null,
-      manifest: formatManifest(r, { maxChars: 2600, maxCellChars: 80 }),
-      cells: r.sheets?.[0]?.cells?.length ?? 0,
-    };
-    cache.set(key, entry);
-    // 每段一张 PNG，一部电影会有几十段。只留最近 8 段（前后各几段够回看），别把内存吃掉。
-    while (cache.size > 8) cache.delete(cache.keys().next().value);
     builtMs = Date.now() - t0;
+  }
+
+  // ---- 顺手把**下一段**也建好（后台，不阻塞本次返回）
+  // 用户的抱怨是"回复晚了十秒"，而这十秒里大部分是"到点才去建这一段"。
+  // 提前一段建好，到点时那次调用就是命中了。
+  const nextStart = segStart + size;
+  const inRange = !Number.isFinite(activeSession?.dur) || nextStart < activeSession.dur;
+  if (args.prefetch !== false && inRange) {
+    // 延后一拍再建：先把这个响应交出去，别让后台活挡住用户这一眼
+    setTimeout(() => {
+      void buildSegment({
+        input, segStart: nextStart, size, args, runStoryboard, formatManifest, cache,
+      }).catch(() => {});
+    }, 0).unref?.();
   }
 
   const measuredAt = new Date().toTimeString().slice(0, 8);
