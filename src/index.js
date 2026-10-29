@@ -224,7 +224,10 @@ async function registerAll(ctx) {
 
       // 起陪看循环：从这里往后每 120 秒一段，到点自己叫醒。
       // 没有会话 id 就不起（只是不会自动说话，工具本身照常可用）。
-      if (args.loop !== false && lastSessionId && Number.isFinite(r.cursor)) {
+      // tts 模式下不需要会话 id：脚本自己念，不叫醒任何人。
+      // 没有 session/event 的宿主里，这一条就是"台词到底会不会出声"的开关。
+      const canLoop = Boolean(lastSessionId) || args.tts === true;
+      if (args.loop !== false && canLoop && Number.isFinite(r.cursor)) {
         const size = r.size ?? 120;
         const startSeg = r.segment ?? 0;
         // 余量按**时间**算（默认 5 分钟）：开头段短就多备几段。

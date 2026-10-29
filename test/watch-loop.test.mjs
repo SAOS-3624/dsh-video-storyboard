@@ -100,3 +100,18 @@ test('不传 depth 时按时间算，status 报告 auto', () => {
   assert.equal(st.bufferSec, 300);
   stopWatchLoop('cleanup');
 });
+
+test('没有会话 id 但开了 tts：仍然起循环（脚本自己念，不需要叫醒谁）', () => {
+  const r = startWatchLoop({
+    ctx: ctxStub, sessionId: null, input: 'tts.mp4', segment: 60, ramp: [], tts: { enabled: true },
+  });
+  assert.equal(r.ok, true, 'tts 模式不该被 sessionId 挡住');
+  assert.equal(loopStatus().active, true);
+  stopWatchLoop('cleanup');
+});
+
+test('没有会话 id 又没开 tts：照旧拒绝（没人可叫，也没词可念）', () => {
+  const r = startWatchLoop({ ctx: ctxStub, sessionId: null, input: 'x.mp4', segment: 60, ramp: [] });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'no-session-id');
+});

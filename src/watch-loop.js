@@ -132,7 +132,10 @@ export function startWatchLoop({
   // 端口来源：显式参数 → ~/.dsh/video.json → 环境变量（桌面版读不到 setx 的 env，所以文件优先）
   // 端口只从调用方传进来（工具层读配置）；库层不隐式读机器配置，否则单测会被本机状态影响
   const browserPort = deps.browserPort ?? undefined;
-  if (!sessionId) return { ok: false, reason: 'no-session-id' };
+  // 没有会话 id 也不许起循环 —— **除非**开着 TTS：那种模式下脚本自己念，
+  // 不需要叫醒任何模型。以前一刀切，于是在"没有 session/event 的宿主"里
+  // tts: true 传了等于没传，台词一声都不出（用户只能以为坏了）。
+  if (!sessionId && !tts?.enabled) return { ok: false, reason: 'no-session-id' };
   // 段可以由批次表生成，所以只有"既没给段、也没给段长"才算没段
   if ((!Array.isArray(segments) || segments.length === 0) && !(Number(segment) > 0 || Array.isArray(ramp))) {
     return { ok: false, reason: 'no-segments' };
