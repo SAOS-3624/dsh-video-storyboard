@@ -20,7 +20,7 @@ import { decideCuts, scanShots, spikeCuts, suppressClose } from './scan.js';
 import { rememberSegments } from './locate.js';
 import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import { fitSegments, segmentsFromCuts, totalDur } from './segments.js';
-import { bestLayout, groupByCount, suggest, PLAN_THRESHOLDS } from './plan.js';
+import { bestLayout, fillLayout, groupByCount, suggest, PLAN_THRESHOLDS } from './plan.js';
 import { findBursts, planCellRanges } from './density.js';
 import { describeMemory, remember } from './memory.js';
 import { analyzeAudio, describeAudio, detectOnsets } from './audio.js';
@@ -432,9 +432,18 @@ export async function runStoryboard(opts) {
     sheets = sheets || suggestion.sheets;
   }
   sheets = sheets || 1;
+  // ---- 格数**往上补满**
+  // 5 格会排成 2×3（容量 6），右下留一个空格。空格和画面占的是同一张画布、同样的 token，
+  // 所以空着是纯损失 —— 把每张图的格数补到布局容量，再按补后的数去取帧。
+  // 往上补不往下砍：少一格等于少看一个瞬间，多一格只是多花一次取帧（约 0.3 s）。
+  const fitted = fillLayout(cells, info.aspect);
+  // 补过之后要能看出"你其实要了 5 格"：清单里两个数都给，否则模型会以为自己看的是 5 格。
+  const filledFrom = fitted.cells > cells ? cells : null;
+  cells = fitted.cells;
   // 本次实际输入 + 生效阈值。只记录，不做成十几个可配置旋钮。
   const planInfo = {
     cells, sheets, adaptive, pick, burn, minGap,
+    ...(filledFrom ? { filledFrom } : {}),
     reason: suggestion?.reason ?? 'explicit',
     auto: autoPlan,
     inputs: {
@@ -1191,7 +1200,10 @@ function formatPlanLine(plan) {
   const mode = plan.auto ? 'auto' : 'explicit';
   const cellsText = plan.produced && plan.produced !== plan.cells
     ? `${plan.produced}/${plan.cells} cells (minGap-limited)`
-    : `${plan.cells} cells`;
+    : plan.filledFrom
+      // 补满了就说清补过：否则"我要了 5 格，怎么给了 6 格"会像 bug
+      ? `${plan.cells} cells (filled from ${plan.filledFrom} — a blank slot costs the same tokens)`
+      : `${plan.cells} cells`;
   return `plan: ${mode} ${cellsText} — ${plan.reason ?? 'auto'} · ` +
     `meanLufs=${fmt(plan.inputs.meanLufs)} LUFS · ` +
     `speechRate=${fmt(plan.inputs.speechRate)} chars/s · ` +

@@ -50,6 +50,29 @@ export function bestLayout(n, aspect = DEFAULT_ASPECT) {
   return { cols, rows, capacity: cols * rows, canvasAspect: canvasAspect(cols, rows, aspect) };
 }
 
+/**
+ * 把"想要 n 格"补到布局能盛下的整格数。
+ *
+ * 为什么：5 格会排成 2×3（容量 6），右下留一个空格。空格和画面占的是**同一张画布、
+ * 同样的 token** —— 空着等于白丢一帧，纯损失。所以只往上补，绝不往下砍。
+ *
+ * 5 → 6、7 → 9、10 → 12、14 → 16；4/6/9/12/16 本来就是整格，不动。
+ * 补出来的数自己是 cols×rows 的乘积，再算一次布局通常就稳定了（最多再一轮）。
+ *
+ * **它只解决"因为布局取整而空出来的格"**。如果 minGap / 素材太短导致取不到那么多帧，
+ * 那属于几何上给不出，仍然会补灰 —— 那是事实，不是取整。
+ */
+export function fillLayout(n, aspect = DEFAULT_ASPECT) {
+  const requested = Math.max(1, Math.round(Number(n) || 0));
+  let cells = requested;
+  let layout = bestLayout(cells, aspect);
+  for (let i = 0; i < 3 && layout.capacity > cells; i += 1) {
+    cells = layout.capacity;
+    layout = bestLayout(cells, aspect);
+  }
+  return { ...layout, cells, requested };
+}
+
 /** coverage 档位 → 建议格数（n 由 bestLayout 决定具体行列）。显式指定时用它覆盖自动推荐。 */
 export const COVERAGE = {
   overview: 4,

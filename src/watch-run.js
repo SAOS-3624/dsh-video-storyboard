@@ -257,7 +257,6 @@ export async function runWatchPass(args, deps) {
   const state0 = await loadWatch();
   const sk0 = sessionKey(input);
   const lastDelivered = Number(state0[sk0]?.lastDelivered);
-  let deliveredNow = null;
 
   // ---- 0.4 两种"阻塞到条件成立"的等待（模型侧的节奏由它自己掌握）
   //
@@ -507,6 +506,7 @@ export async function runWatchPass(args, deps) {
   // 好处：完全不依赖 sessionController.prompt（那个能不能用还没验证过）。
   // 代价：等待期间这个会话被占着，用户插话要等它返回。
   let waitedSec = 0;
+  let alreadyDelivered = false;
   if (!d.due && args.wait === true) {
     const capSec = Math.min(600, Math.max(5, Number(args.maxWaitSec) || 180));
     const deadline = Date.now() + capSec * 1000;
@@ -522,9 +522,15 @@ export async function runWatchPass(args, deps) {
         const nd = deliveryState({ cursor, segment: segStart, size, lead });
         // 同一段已经交过一次就别再交：用户刚看完 00:00–01:00，
         // 再等到 00:59 把同一段塞给他一次，看起来像卡住了。
-        if (nd.due && segStart !== lastDelivered) {
-          d.due = true;
-          d.remaining = nd.remaining;
+        if (nd.due) {
+          if (segStart !== lastDelivered) {
+            d.due = true;
+            d.remaining = nd.remaining;
+          } else {
+            // 已经交过的段：不能干等到封顶（那会让会话挂着好几分钟）。
+            // 直接结束这次等待，下面回一句"这段已经给过了"。
+            alreadyDelivered = true;
+          }
           break;
         }
         if (cursor < segStart) break;            // 用户倒回到上一段去了，别干等
@@ -535,14 +541,30 @@ export async function runWatchPass(args, deps) {
     }
   }
 
-  deliveredNow = segStart;
-  // 记下来，下次 wait 就不会把同一段再交一次
-  {
-    const stD = await loadWatch();
-    stD[sk0] = { ...(stD[sk0] ?? {}), lastDelivered: segStart, at: Date.now() };
-    await saveWatch(stD).catch(() => {});
-  }
+  // **这里不能记 lastDelivered**：这一行以前写在"还没到点就返回"之前，于是每一次
+  // "not yet" 的调用都会把当前段标成"已交付"。下一次调用在等待途中真到了交付点，
+  // 去重判断 `segStart !== lastDelivered` 就会把它挡掉，一直挂到封顶也不交 ——
+  // 表现是这一段被推迟到**再下一次**调用才交出去（迟到一段，而不是重复一段）。
+  // 记账必须发生在真正交付的那条分支里（见下方第 4 步）。
   const waitNote = waitedSec > 0 ? ` · waited ${waitedSec}s` : '';
+
+  // 这一段已经交过一次（lastDelivered 命中）：不重复塞，也不继续挂着等
+  if (!d.due && alreadyDelivered) {
+    return {
+      ok: true,
+      speaking: false,
+      confidence,
+      input,
+      size,
+      cursor,
+      measuredAt,
+      segment: segStart,
+      text: `${head}${waitNote}\nalready delivered this segment — not sending it again. `
+        + 'Say something of your own, or call again after it moves past '
+        + `${mmss(segStart + size)}.`,
+      images: [],
+    };
+  }
 
   // ---- 3. 还没到交付点：保持安静
   if (!d.due) {
@@ -588,6 +610,8 @@ export async function runWatchPass(args, deps) {
   st[sk] = {
     ...(st[sk] ?? {}),
     spoken: Object.fromEntries(keptKeys.map((k) => [k, nextSpoken[k]])),
+    // **真的交出去了才记**：wait 模式靠这个字段防止同一段被反复交付。
+    lastDelivered: segStart,
     at: Date.now(),
   };
   await saveWatch(st);
@@ -613,7 +637,6 @@ export async function runWatchPass(args, deps) {
     measuredAt,
     segment: segStart,
     text: `${head}${waitNote}\n${guidance}${await latencyNote()}${nextHint}\n\n${entry.manifest}`,
-    segment: deliveredNow,
     images,
   };
 }

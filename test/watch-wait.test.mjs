@@ -73,6 +73,83 @@ test('wait 默认关闭：不传就立刻返回', async () => {
   }
 });
 
+test('没交付的那次调用不许把这一段记成"已交付"（否则会迟到一段）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wait-dedup-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    // 第一次：位置 100、段 0–120、lead 15 → 要到 105 才该说；封顶 3 秒、播放头不动 → not yet
+    const r1 = await runWatchPass(
+      { input: 'a.mp4', wait: true, maxWaitSec: 3, segment: 120, lead: 15 },
+      deps(() => 100),
+    );
+    assert.equal(r1.speaking, false, '没到点就不该交付');
+
+    // 第二次：从 100 起等着，播放头走到 105 之后就该交付。
+    // 修之前，第一次的 not-yet 已经把 lastDelivered 写成 0，等待循环里的去重判断
+    // 会把这一次的交付挡掉，一直挂到封顶才回 not yet。
+    let pos = 100;
+    const tick = setInterval(() => { pos += 0.8; }, 500);
+    let r2;
+    try {
+      r2 = await runWatchPass(
+        { input: 'a.mp4', wait: true, maxWaitSec: 15, segment: 120, lead: 15 },
+        deps(() => pos),
+      );
+    } finally {
+      clearInterval(tick);
+    }
+    assert.equal(r2.speaking, true, '等到交付点就该交，不能被上一次的 not-yet 记账挡掉');
+    assert.ok(r2.images.length === 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('已交付的段再 wait：立刻回来说"给过了"，不挂到封顶', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wait-again-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    // 先在 106 把第 0 段交出去
+    const first = await runWatchPass({ input: 'a.mp4', cursor: 106, segment: 120, lead: 15 }, deps(() => 106));
+    assert.equal(first.speaking, true);
+
+    // 再从头等到交付点：不该重复交付，也不该把会话挂满 30 秒
+    let pos = 100;
+    const tick = setInterval(() => { pos += 0.8; }, 500);
+    const t0 = Date.now();
+    let r;
+    try {
+      r = await runWatchPass(
+        { input: 'a.mp4', wait: true, maxWaitSec: 30, segment: 120, lead: 15 },
+        deps(() => pos),
+      );
+    } finally {
+      clearInterval(tick);
+    }
+    const sec = (Date.now() - t0) / 1000;
+    assert.equal(r.speaking, false);
+    assert.match(r.text, /already delivered/);
+    assert.ok(sec < 20, `不该挂到封顶，实得 ${sec}s`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('同一段交付过之后，再调用不重复交付', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wait-once-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    const args = { input: 'a.mp4', cursor: 106, segment: 120, lead: 15 };
+    const r1 = await runWatchPass({ ...args }, deps(() => 106));
+    assert.equal(r1.speaking, true);
+    const r2 = await runWatchPass({ ...args }, deps(() => 106));
+    assert.equal(r2.speaking, false, '同一段不该说两遍');
+    assert.match(r2.text, /already spoke/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 
 test('waitForVideo: 一直没视频就超时返回，并说清等了多少秒', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'waitv-'));

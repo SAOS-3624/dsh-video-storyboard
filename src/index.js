@@ -348,6 +348,11 @@ async function registerAll(ctx) {
     },
   });
 
+  // **disposers 必须在最前面声明**：它以前声明在 ctx.on 之后，于是 `disposers.push(off)`
+  // 撞上 const 的暂时性死区，抛 ReferenceError，又被下面的 catch 静默吞掉 ——
+  // 监听器注册成功了，解绑函数却从来没登记过（插件卸载时不会解绑，而且没人知道出过错）。
+  const disposers = [];
+
   // 当前会话：从 session/event 里拿（`session.header.id`）。这是 dsh-fish 的做法，
   // 比反射 ctx 安全得多 —— 反射会把整个应用搞崩（见 apply 的注释）。
   let lastSessionId = null;
@@ -358,16 +363,21 @@ async function registerAll(ctx) {
         if (id) lastSessionId = id;
       });
       if (typeof off === 'function') disposers.push(off);
-    } catch { /* 拿不到就退化成"只能手动触发" */ }
+    } catch (e) {
+      // 拿不到就退化成"只能手动触发"，但要说出来 —— 静默失败是这类 bug 的温床
+      try {
+        ctx?.logger?.warn?.(`[dsh-video-storyboard] session/event hook failed: ${e?.message ?? e}`);
+      } catch { /* 日志都没有就只能算了 */ }
+    }
   }
 
-  const disposers = [
+  disposers.push(
     ctx.tools.register(storyboard),
     ctx.tools.register(zoom),
     ctx.tools.register(probe),
     ctx.tools.register(locate),
     ctx.tools.register(watch),
-  ];
+  );
   return () => {
     for (const dispose of disposers.reverse()) dispose?.();
   };

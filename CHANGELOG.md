@@ -1,5 +1,41 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`video_watch` — the model watches and writes, the script speaks on cue.** Lines are a queue the
+  script fires from (`lines: [...]`), so the model never waits for a clock and never re-reads its own
+  line at the moment of speaking. `src/tts.js` voices them through the OS voice (SAPI via COM):
+  0 tokens, 0 seconds of model time. There is deliberately **no default cadence** — `speakEvery`,
+  how many lines per segment, and whether to speak at all are the caller's decision, and silence
+  is a valid one.
+- **Blocking waits that are conditions, not timers**: `waitUntil` (block until playback reaches a
+  position) and `waitForRefill` (block until the line stock drops below `refillBelow`, which stays
+  off by default).
+- **`nextLine`** returns one line at a time, so a delivered line reads as a message instead of a dump.
+
+### Fixed
+
+- **A grid never leaves a blank slot when the layout is what created it.** Asking for 5 cells picks a
+  2×3 layout, which left the bottom-right slot painted as padding — the same canvas, the same token,
+  one frame thrown away. Cell counts are now rounded *up* to the layout capacity (5 → 6, 7 → 9,
+  10 → 12) and the manifest says so (`6 cells (filled from 5 — …)`). Padding that comes from `minGap`
+  or a too-short window is left alone: that one is a fact about the material, not a rounding error.
+
+- **`wait: true` no longer loses a segment.** `lastDelivered` was written *before* the "not due yet"
+  return, so every silent call marked the current segment as delivered; the next call that reached
+  the due point inside its wait loop had its delivery suppressed and hung until the cap — the segment
+  arrived one call late. The bookkeeping now happens only on the delivery path, and a wait that
+  hits an already-delivered segment returns immediately instead of hanging.
+
+- **`src/index.js` unregistered its own session listener.** `disposers.push(off)` ran before
+  `const disposers` was declared, so it threw a TDZ ReferenceError that the surrounding `catch`
+  swallowed: the listener was registered, its disposer never was. The array is declared first now,
+  and a failure to hook `session/event` is logged instead of disappearing.
+
+- **`docs/WATCH.zh.md` repeated the Bilibili-subtitle section twice.**
+
 ## [0.4.4] — 2026-10-29
 
 ### Fixed

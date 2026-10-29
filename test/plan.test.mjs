@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  bestLayout, canvasAspect, cellSize, groupByCount, groupByDuration, planTotal,
+  bestLayout, canvasAspect, cellSize, fillLayout, groupByCount, groupByDuration, planTotal,
   planWindows, snapCells, suggest, validatePlan, COVERAGE, IMAGE_TOKEN_CAP, MIN_CELL_H, MIN_CELL_W,
 } from '../src/plan.js';
 
@@ -45,6 +45,41 @@ test('bestLayout: 画布从不偏离源比例超过 50%（n=4..16）', () => {
     const ca = bestLayout(n, L).canvasAspect;
     const ratio = ca / L;
     assert.ok(ratio <= 1.5 && ratio >= 0.6, `n=${n} ratio=${ratio.toFixed(2)}`);
+  }
+});
+
+/* ---------------------------------------------------------------- 填满布局：不许留空格 */
+
+test('fillLayout: 5 格补成 2×3 的 6 格（空格和画面是同样的 token）', () => {
+  const f = fillLayout(5, L);
+  assert.equal(f.cells, 6, '5 格排成 2×3 会空一格，要补到 6');
+  assert.deepEqual([f.cols, f.rows], [2, 3]);
+  assert.equal(f.capacity, f.cells, '补完必须刚好填满');
+  assert.equal(f.requested, 5, '要记住原来要了几格，清单得说得清');
+});
+
+test('fillLayout: 本来就整格的数不动', () => {
+  for (const n of [1, 2, 4, 6, 9, 12, 16]) {
+    const f = fillLayout(n, L);
+    assert.equal(f.cells, n, `n=${n} 不该被改动`);
+    assert.equal(f.capacity, n);
+  }
+});
+
+test('fillLayout: 非整格一律往上补到容量，绝不往下砍', () => {
+  for (let n = 1; n <= 20; n++) {
+    const f = fillLayout(n, L);
+    assert.ok(f.cells >= n, `n=${n} 被砍到 ${f.cells}`);
+    assert.equal(f.cells, f.capacity, `n=${n} 补完还剩空位（${f.cells} vs ${f.capacity}）`);
+    // 再补一次必须收敛，否则取帧数会无限膨胀
+    assert.equal(fillLayout(f.cells, L).cells, f.cells, `n=${n} 二次取整不收敛`);
+  }
+});
+
+test('fillLayout: 竖屏同样填满', () => {
+  for (const n of [5, 7, 10, 14]) {
+    const f = fillLayout(n, P);
+    assert.equal(f.cells, f.capacity, `n=${n} 竖屏仍留空位`);
   }
 });
 
