@@ -16,6 +16,7 @@ import {
   sessionKey, WATCH_LEAD, WATCH_SEGMENT,
 } from './watch.js';
 import { describeLatency, recordLatency } from './latency.js';
+import { makePlan } from './batches.js';
 import { configuredPort, fileUrlToPath, readBrowserPosition } from './browser-time.js';
 import { estimate, makeAnchor } from './position.js';
 import { resolvePlayingSource } from './resolve-playing.js';
@@ -99,7 +100,12 @@ export async function runWatchPass(args, deps) {
   // 从"开始读进度"到"结果返回"的耗时 —— 这就是本机延迟的实测值，用来做提前量标定
   const tStart = Date.now();
   tStartForNote = tStart;
-  const size = Number(args.segment) > 0 ? Number(args.segment) : WATCH_SEGMENT;
+  // 批次表：开头短、逐段加长、最后稳定。段边界由它统一提供，
+  // 否则"说的是哪一段"和"建的是哪一段"会各算各的。
+  const plan = makePlan({
+    segment: Number(args.segment) > 0 ? Number(args.segment) : WATCH_SEGMENT,
+    ramp: args.ramp === undefined ? null : args.ramp,
+  });
   const lead = args.lead !== undefined ? Number(args.lead) : WATCH_LEAD;
 
   // ---- 0. 源：没给 input 就自己从"系统里在播什么"反推
@@ -233,7 +239,9 @@ export async function runWatchPass(args, deps) {
       + `${est.confidence === 'extrapolated' ? `, measured ${Math.round(est.staleMs / 1000)}s ago` : ''})`;
   }
 
-  const segStart = segmentStart(cursor, size);
+  const cur = plan.segmentAt(cursor);
+  const segStart = cur.from;
+  const size = cur.size;
   const d = deliveryState({ cursor, segment: segStart, size, lead });
   const key = `${sessionKey(input)}|${segStart}`;
 

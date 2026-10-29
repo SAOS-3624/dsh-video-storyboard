@@ -191,3 +191,34 @@ test('⑪ 浏览器和 SMTC 都没有源，5 分钟后停（别一直起 python�
   assert.equal(loopStatus().active, false);
   assert.equal(loopStatus().reason, 'no-source');
 });
+
+test('⑫ 变速启动：第一批 1 分钟，50 秒左右就说第一次，不用等 5 分钟', async () => {
+  const sim = createSim({ refreshEveryMs: 30_000, duration: 1200 });
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'A',
+    segment: 300, ramp: [60, 120, 180, 240], depth: 2,
+    deps: sim.deps, log: () => {},
+  });
+  const plan = loopStatus().batchPlan;
+  assert.match(plan, /1m → 2m → 3m → 4m → 5m/);
+
+  await sim.runTo(55);
+  assert.equal(sim.wakes.length, 1, '第一批只有 60 秒，55 秒时应该已经说过一次');
+  // 第一批的段末前 15 秒 = 45 秒
+  const first = sim.wakes[0].at / 1000;
+  assert.ok(first >= 45 && first <= 55, `第一次应在 45–55 秒之间，实得 ${first}`);
+  stopWatchLoop('test');
+});
+
+test('⑬ 段边界随阶梯走：第二批是 60–180 秒', async () => {
+  const sim = createSim({ refreshEveryMs: 30_000, duration: 1200 });
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'A',
+    segment: 300, ramp: [60, 120, 180, 240], depth: 2,
+    deps: { ...sim.deps, build: null }, log: () => {},
+  });
+  await sim.runTo(200);
+  const texts = sim.wakes.map((w) => w.text);
+  assert.ok(texts.some((t) => /01:00–03:00/.test(t)), `第二批应是 01:00–03:00，实际：${texts.join(' | ')}`);
+  stopWatchLoop('test');
+});

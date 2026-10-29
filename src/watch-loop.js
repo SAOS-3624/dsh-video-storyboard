@@ -16,6 +16,7 @@ import {
   MAX_EXTRAPOLATE_MS, estimate, makeAnchor, shouldSpeak, updateAnchor,
 } from './position.js';
 import { startTicker, wakeSession } from './timer.js';
+import { describePlan, makePlan } from './batches.js';
 import { configuredPort, readBrowserPosition } from './browser-time.js';
 import { consumeLine, loadLine, pickSession, probePlayback } from './watch.js';
 
@@ -58,6 +59,7 @@ export function loopStatus() {
     session: loop.sessionId,
     input: loop.input,
     segments: loop.segments.length,
+    batchPlan: loop.plan ? describePlan(loop.plan) : null,
     spoken: loop.spoken.length,
     pos: est ? +est.pos.toFixed(1) : null,
     confidence: est?.confidence ?? 'none',
@@ -88,7 +90,7 @@ export function stopWatchLoop(reason = 'stopped') {
  */
 export function startWatchLoop({
   ctx, sessionId, input, segments, cursor = null, status = 'playing', log = () => {},
-  size = 120, depth = 2,
+  size = 120, depth = 2, segment, ramp,
   // 依赖可注入：进程内默认真实实现；测试/仿真用假的，于是"到点会不会说话"可以离线验证
   deps = {},
 }) {
@@ -107,26 +109,37 @@ export function startWatchLoop({
   // 端口来源：显式参数 → ~/.dsh/video.json → 环境变量（桌面版读不到 setx 的 env，所以文件优先）
   const browserPort = deps.browserPort ?? configuredPort() ?? undefined;
   if (!sessionId) return { ok: false, reason: 'no-session-id' };
-  if (!Array.isArray(segments) || segments.length === 0) return { ok: false, reason: 'no-segments' };
+  // 段可以由批次表生成，所以只有"既没给段、也没给段长"才算没段
+  if ((!Array.isArray(segments) || segments.length === 0) && !(Number(segment) > 0 || Array.isArray(ramp))) {
+    return { ok: false, reason: 'no-segments' };
+  }
 
   stopWatchLoop('restart');
+
+  // 批次表：开头短、逐段加长、最后稳定到 segment。
+  // 传了 segments 就用它推断等长档（保持旧调用方/测试的行为）；传了 ramp 就走阶梯。
+  const seedSize = Number(segment) > 0
+    ? Number(segment)
+    : (segments?.[0] ? Number(segments[0].to) - Number(segments[0].from) : Number(size) || 120);
+  const plan = makePlan({ segment: seedSize, ramp: ramp ?? null });
 
   Object.assign(loop, {
     active: true,
     ctx,
     sessionId,
     input,
-    segments: segments.map((s) => ({
-      from: Number(s.from),
-      to: Number(s.to),
-      sayAt: Number.isFinite(s.sayAt) ? s.sayAt : Number(s.to) - 15,
-    })),
+    plan,
+    segments: segments?.length
+      ? segments.map((s) => ({
+        from: Number(s.from),
+        to: Number(s.to),
+        sayAt: Number.isFinite(s.sayAt) ? s.sayAt : Number(s.to) - 15,
+      }))
+      : plan.from(0, Math.max(1, Number(depth) || 2) * 2),
     spoken: [],
-    size: Math.max(20, Number(size) || 120),
     // **双缓冲**：始终保留 depth 个批次（当前 + 下一个）。
     // 前面的用完了，后面的立刻顶上，同时开始算再下一个 —— 永远有余量。
     depth: Math.max(1, Number(depth) || 2),
-    get lookahead() { return this.size * this.depth; },
     built: new Set(),        // 已经建好的批次（按 from 记）
     building: null,          // 正在建的那一个（同时只建一个，别把 CPU 打满）
     aheadSec: 0,
@@ -216,10 +229,11 @@ export function startWatchLoop({
       // 一个时刻只建一个批次 —— 这台机器解码是 CPU 密集的，并行只会互相拖慢。
       if (build && !loop.building) {
         const nowEst = estimate(loop.anchor, tNow);
-        // 从**当前批次的开头**算窗口：depth=2 就是"正在看的这一段 + 下一段"，不是再加两段余量
-        const segNow = Math.floor(nowEst.pos / loop.size) * loop.size;
-        const horizon = segNow + loop.lookahead;
-        const next = loop.segments.find((sg) => sg.to > nowEst.pos && sg.from < horizon && !loop.built.has(sg.from));
+        // **双缓冲**：只管"当前段 + 后面 depth-1 段"。段长由批次表决定，不按固定 size 取整。
+        const idxNow = plan.indexAt(nowEst.pos);
+        const next = loop.segments
+          .slice(idxNow, idxNow + loop.depth)
+          .find((sg) => !loop.built.has(sg.from));
         if (next) {
           loop.building = (async () => {
             const t = Date.now();
@@ -241,14 +255,13 @@ export function startWatchLoop({
       // 循环就再也没被重启过 —— 6 分钟之后它会在 not-due 里静静躺着，再也不说话。
       {
         const nowEst = estimate(loop.anchor, tNow);
-        const horizon = Math.floor(nowEst.pos / loop.size) * loop.size + loop.lookahead;
+        const want = plan.indexAt(nowEst.pos) + 1 + loop.depth;
         let guard = 0;
-        while (guard < 200) {
-          const last = loop.segments[loop.segments.length - 1];
-          if (!last || last.to >= horizon) break;
-          const from = last.to;
-          if (Number.isFinite(loop.dur) && from >= loop.dur) break;
-          loop.segments.push({ from, to: from + loop.size, sayAt: from + loop.size - 15 });
+        while (loop.segments.length < want && guard < 200) {
+          const i = loop.segments.length;
+          const seg = plan.from(i, 1)[0];
+          if (Number.isFinite(loop.dur) && seg.from >= loop.dur) break;
+          loop.segments.push(seg);
           guard += 1;
         }
       }

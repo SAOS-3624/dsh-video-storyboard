@@ -16,6 +16,7 @@ import { DETAIL_CHARS, runStoryboard, formatManifest, formatProbe, formatRemoteP
 import { probeVideo } from './probe.js';
 import { formatMatches, matchSegments, recallSegments } from './locate.js';
 import { lookupCell } from './cells.js';
+import { DEFAULT_RAMP, DEFAULT_SEGMENT } from './batches.js';
 import { makeBuilder, runWatchPass } from './watch-run.js';
 import { loopStatus, startWatchLoop, stopWatchLoop } from './watch-loop.js';
 import { isHttpUrl, probeUrl, resolveDirectUrl, resolveInput } from './fetch.js';
@@ -200,7 +201,12 @@ async function registerAll(ctx) {
       // 只看钟的状态，不读进度、不出图 —— 排查"它为什么不说话"时用
       if (args.statusOnly === true) return { text: JSON.stringify(loopStatus()), images: [] };
       if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
-      const r = await runWatchPass(args, {
+      // 批次表的默认值在这里定一次，工具和循环共用同一份（否则两边段边界会各算各的）
+      const segment = Number(args.segment) > 0 ? Number(args.segment) : DEFAULT_SEGMENT;
+      const ramp = args.ramp === undefined ? [...DEFAULT_RAMP] : args.ramp;
+      const callArgs = { ...args, segment, ramp };
+
+      const r = await runWatchPass(callArgs, {
         cache: watchCache,
         runStoryboard,
         formatManifest,
@@ -215,22 +221,17 @@ async function registerAll(ctx) {
         const size = r.size ?? 120;
         const startSeg = r.segment ?? 0;
         // **双缓冲**：始终保留 depth 个批次（默认 2 个 = 当前 + 下一个）。
-        // 前面的用完，后面的顶上，同时算再下一个 —— 永远有余量，且不会排到整片。
+        // 段边界不再在这里算 —— 交给批次表（开头短、逐段加长）。
         const depth = Math.max(1, Number(args.depth) || 2);
-        const count = depth;
-        const segments = Array.from({ length: count }, (_, i) => {
-          const from = startSeg + (i + 1) * size;
-          return { from, to: from + size, sayAt: from + size - 15 };
-        });
         startWatchLoop({
-          ctx, sessionId: lastSessionId, input: r.input, segments,
+          ctx, sessionId: lastSessionId, input: r.input,
           cursor: r.cursor, status: r.status,
-          // 段长 / 缓冲深度交给循环：之后它自己往前滚、自己补建，不必等下一次工具调用
-          size, depth,
+          // 段长 / 阶梯 / 缓冲深度交给循环：之后它自己往前滚、自己补建
+          segment, ramp, depth,
           // 循环负责"什么时候建"，这里给它"怎么建"
           deps: {
             build: makeBuilder({
-              input: r.input, args: { ...args, segment: size }, runStoryboard, formatManifest, cache: watchCache,
+              input: r.input, args: callArgs, runStoryboard, formatManifest, cache: watchCache,
             }),
           },
           log: () => {},

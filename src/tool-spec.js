@@ -513,7 +513,15 @@ export function watchToolSpec() {
       },
       segment: {
         type: 'number',
-        description: 'Segment length in seconds (default 120). Shorter = more connected, more tokens.',
+        description: 'Steady-state batch length in seconds (default 300 = 5 minutes). This is what the batch '
+          + 'length settles to after the ramp-up.',
+      },
+      ramp: {
+        type: 'array',
+        items: { type: 'json' },
+        description: 'Ramp-up schedule in seconds, e.g. [60, 120, 180, 240]. The first batches are short so '
+          + 'the user gets a first comment quickly instead of waiting a full 5 minutes; each batch is longer '
+          + 'than the last, then segment applies. Pass [] for uniform batches. Default [60,120,180,240] -> 300.',
       },
       lead: {
         type: 'number',
