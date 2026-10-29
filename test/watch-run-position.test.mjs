@@ -57,18 +57,19 @@ test('刷新 20 秒前：按墙钟推算，并在文案里说明是推算的', a
   }
 });
 
-test('刷新太久（>45s）：拒绝猜，要求 cursor', async () => {
+test('刷新太久（超过 3 分钟外推上限）：拒绝猜，要求 cursor', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'wr3-'));
   process.env.DSH_VIDEO_CACHE_DIR = dir;
   try {
     const now = Date.now();
     const deps = makeDeps([{
-      app: 'MSEdge', status: 4, pos: 1.1, dur: 1087, title: 'x', updated: now - 155_000,
+      app: 'MSEdge', status: 4, pos: 1.1, dur: 1087, title: 'x', updated: now - 400_000,
     }]);
     const r = await runWatchPass({ input: 'a.mp4' }, deps);
     assert.equal(r.ok, false);
     assert.equal(r.confidence, 'unknown');
-    assert.match(r.text, /unreadable|last updated 155s ago/);
+    assert.match(r.text, /unreadable/);
+    assert.match(r.text, /last updated 400s ago/, '要把"多久没更新"说出来');
     assert.match(r.text, /cursor/, '要给出路：让调用方传 cursor');
     assert.equal(r.images.length, 0);
   } finally {

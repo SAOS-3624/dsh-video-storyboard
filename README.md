@@ -504,6 +504,27 @@ video_storyboard({ input: "materials.mp4", hotwords: "位错 滑移 柏氏矢量
 
 > 仓库右上角的 **Sponsor** 按钮也指向这里（`.github/FUNDING.yml`）。
 
+## 开发者：不用 DSH 也能验证陪看逻辑
+
+"到点该不该说话"是纯逻辑问题，不需要重启宿主、不需要真看片：
+
+```bash
+npm run sim                 # 跑 5 个场景，打印时间线
+SIM_VERBOSE=1 npm run sim   # 连每次判定的原因一起打印
+npm run sim -- paused       # 只跑某一个
+```
+
+```
+【每 150 秒刷新（Edge 真实）】
+  说话 2 次：01:50, 03:50
+  求助 0 次
+  结束状态：not-due
+```
+
+把三样东西换成假的就行：**时钟**（虚拟时间）、**SMTC**（只在刷新点更新快照，
+中间返回冻结值——这正是 Edge 的真实行为）、**会话推送**（记录消息而不真发）。
+`src/watch-loop.js` 的依赖都可注入，所以同一份判定逻辑既能在 DSH 里跑，也能在测试里跑。
+
 ## 许可
 
 见 [LICENSE](LICENSE)。

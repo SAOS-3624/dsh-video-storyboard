@@ -39,11 +39,19 @@ test('推太久就承认不知道（unknown），不硬推', () => {
   assert.ok(e.pos <= 100 + MAX_EXTRAPOLATE_MS / 1000 + 0.01, '位置不能无限外推');
 });
 
-test('暂停：位置就是刷新值，且不会自己走', () => {
+test('暂停：位置就是刷新值，且永远可信（不能因为"旧"就判成读不到）', () => {
   const a = makeAnchor({ pos: 213.5, dur: 1087, status: 5, updated: T0 }, T0);
   const e = estimate(a, T0 + 60_000);
   assert.ok(Math.abs(e.pos - 213.5) < 0.01, '暂停一分钟位置都不该变');
   assert.equal(e.why, 'paused');
+  assert.equal(e.confidence, 'fresh', '暂停是已知状态，不是"读不到"');
+});
+
+test('暂停时不说话（哪怕位置已经过了边界）', () => {
+  const a = makeAnchor({ pos: 118, dur: 1087, status: 5, updated: T0 }, T0);
+  const r = shouldSpeak({ anchor: a, segments: [{ from: 0, to: 120 }], now: T0 + 60_000 });
+  assert.equal(r.speak, false);
+  assert.equal(r.reason, 'paused');
 });
 
 test('refresh 会带来真值，并算出我们外推错了多少（drift）', () => {
@@ -76,13 +84,13 @@ test('该说：新鲜时到点就说', () => {
 });
 
 test('该说：外推的必须越过安全余量才说（不抢话）', () => {
-  const a = makeAnchor({ pos: 100, dur: 1087, status: 4, updated: T0 }, T0);
-  // 刷新已过 12 秒（超出 FRESH_MS=10s，属于外推）→ 外推到 112，刚过 sayAt=105 但没越过 15 秒余量
-  const near = shouldSpeak({ anchor: a, segments: [{ from: 0, to: 120 }], now: T0 + 12_000, lead: 15 });
+  // 锚点 95 秒、sayAt=105、安全余量 5 → 外推到 106 时还差 4 秒，不能开口
+  const a = makeAnchor({ pos: 95, dur: 1087, status: 4, updated: T0 }, T0);
+  const near = shouldSpeak({ anchor: a, segments: [{ from: 0, to: 120 }], now: T0 + 11_000, lead: 15 });
   assert.equal(near.speak, false);
   assert.equal(near.reason, 'extrapolated-not-confirmed');
-  // 外推到 125（超过 sayAt+15）
-  const past = shouldSpeak({ anchor: a, segments: [{ from: 0, to: 120 }], now: T0 + 25_000, lead: 15 });
+  // 外推到 111（≥ 105+5）才说
+  const past = shouldSpeak({ anchor: a, segments: [{ from: 0, to: 120 }], now: T0 + 16_000, lead: 15 });
   assert.equal(past.speak, true);
 });
 

@@ -29,8 +29,15 @@
 
 /** 刷新在这个时间内，认为位置是新鲜的 */
 export const FRESH_MS = 10_000;
-/** 外推最多推这么久；超过就承认"不知道" */
-export const MAX_EXTRAPOLATE_MS = 45_000;
+/**
+ * 外推最多推这么久。
+ *
+ * 这个数要**大于实测的刷新间隔**（Edge 在 B 站上隔过 143 s、216 s），否则每次刷新只留几十秒的
+ * 可信窗口，段落边界一错开就永远说不上话 —— 那等于把"读得到"换成了"永远读不到"。
+ * 代价是：如果用户在间隔里暂停且播放器没刷新（罕见，实测暂停**会**刷新），我们会提前说话。
+ * 所以超过这个上限就升级成别的策略（见 shouldSpeak 的 unknown 分支），不再线性外推。
+ */
+export const MAX_EXTRAPOLATE_MS = 180_000;
 
 const clampPos = (v, dur) => {
   const n = Number(v);
@@ -76,11 +83,10 @@ export function estimate(anchor, now = Date.now(), {
   if (!anchor) return { pos: 0, confidence: 'unknown', staleMs: Infinity, why: 'no-anchor' };
   const staleMs = Math.max(0, now - anchor.updated);
 
-  // 暂停 / 停止：位置不会自己走，直接用刷新值
+  // 暂停：位置不会自己走，刷新值就是当前值 —— **永远可信**。
+  // （早先这里用 stale 去降级，结果暂停时被判成"读不到进度"，于是不停打扰用户。）
   if (isPaused(anchor.status)) {
-    return {
-      pos: anchor.pos, confidence: staleMs <= freshMs ? 'fresh' : 'unknown', staleMs, why: 'paused',
-    };
+    return { pos: anchor.pos, confidence: 'fresh', staleMs, why: 'paused' };
   }
   if (!isPlaying(anchor.status)) {
     return { pos: anchor.pos, confidence: 'unknown', staleMs, why: 'not-playing' };
@@ -136,15 +142,19 @@ export function updateAnchor(prev, sample, now = Date.now()) {
  *
  * 规则：
  *   - 新鲜（刚刷新过）→ 到了就说
- *   - 外推的 → 必须**越过边界一段安全余量**才说（宁可晚 15 秒，也不要因为推快了而抢话）
+ *   - 外推的 → 必须**越过边界一段安全余量**才说（余量 5 秒：够挡住"推快了"的误差，
+ *               又不至于把 15 秒的提前量全吃掉，否则就等于卡在段末才开口）
  *   - 完全不知道 → 不说，交给上层去问用户
  */
 export function shouldSpeak({
   anchor, segments = [], spoken = [], now = Date.now(),
-  lead = 15, safetySec = 15, aheadSec = 0,
+  lead = 15, safetySec = 5, aheadSec = 0,
   freshMs = FRESH_MS, maxExtrapolateMs = MAX_EXTRAPOLATE_MS,
 } = {}) {
   const est = estimate(anchor, now, { freshMs, maxExtrapolateMs });
+  if (est.why === 'paused') {
+    return { speak: false, ...est, reason: 'paused' };
+  }
   if (est.confidence === 'unknown') {
     return { speak: false, ...est, reason: 'position-unknown' };
   }
