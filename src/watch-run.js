@@ -379,6 +379,9 @@ export async function runWatchPass(args, deps) {
     + ` · ${Math.max(0, d.remaining)}s left`
     + (builtMs ? ` · built in ${(builtMs / 1000).toFixed(1)}s` : ' · ready');
 
+  // ---- 2.4 高频模式（speakNow）：循环按固定节奏叫醒时，不必等到段末才交付
+  if (args.speakNow === true) d.due = true;
+
   // ---- 2.5 阻塞等待（wait: true）
   // 用户的思路：与其"结束这轮、等定时器把我叫醒"，不如**让这次调用一直挂着**，
   // 就像等 npm 上传结果一样 —— 到点了工具自己返回，对话根本没断过。

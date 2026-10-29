@@ -222,3 +222,37 @@ test('⑬ 段边界随阶梯走：第二批是 60–180 秒', async () => {
   assert.ok(texts.some((t) => /01:00–03:00/.test(t)), `第二批应是 01:00–03:00，实际：${texts.join(' | ')}`);
   stopWatchLoop('test');
 });
+
+test('⑭ 高频模式：每 10 秒叫一次，不受批次边界限制', async () => {
+  const sim = createSim({ refreshEveryMs: 30_000, duration: 600 });
+  let wakes = 0;
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'A',
+    segment: 300, ramp: [], depth: 2, speakEvery: 10,
+    deps: { ...sim.deps, wake: async () => { wakes += 1; return { ok: true }; } },
+    log: () => {},
+  });
+  await sim.runTo(55);
+  // 10/20/30/40/50 秒各一次 → 大约 5 次（第一次从 0 起算，可能多一次）
+  assert.ok(wakes >= 4 && wakes <= 6, `应叫 4–6 次，实得 ${wakes}`);
+  stopWatchLoop('test');
+});
+
+test('⑮ 高频模式在暂停时闭嘴', async () => {
+  const sim = createSim({ refreshEveryMs: 30_000, paused: [{ from: 5, to: 300 }] });
+  let wakes = 0;
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'A',
+    segment: 300, ramp: [], depth: 2, speakEvery: 5,
+    deps: {
+      ...sim.deps,
+      // 暂停状态要读得勤才知道：默认 15 秒一次，测试里缩到 2 秒
+      probeEveryMs: 2000,
+      wake: async () => { wakes += 1; return { ok: true }; },
+    },
+    log: () => {},
+  });
+  await sim.runTo(40);
+  assert.ok(wakes <= 3, `暂停后不该继续叫（读取有延迟，允许头几次），实得 ${wakes}`);
+  stopWatchLoop('test');
+});

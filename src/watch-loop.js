@@ -97,7 +97,7 @@ export function stopWatchLoop(reason = 'stopped') {
  */
 export function startWatchLoop({
   ctx, sessionId, input, segments, cursor = null, status = 'playing', log = () => {},
-  size = 120, depth = 2, segment, ramp,
+  size = 120, depth = 2, segment, ramp, speakEvery = 0,
   // 依赖可注入：进程内默认真实实现；测试/仿真用假的，于是"到点会不会说话"可以离线验证
   deps = {},
 }) {
@@ -172,6 +172,8 @@ export function startWatchLoop({
     // **双缓冲**：始终保留 depth 个批次（当前 + 下一个）。
     // 前面的用完了，后面的立刻顶上，同时开始算再下一个 —— 永远有余量。
     depth: Math.max(1, Number(depth) || 2),
+    speakEvery: Math.max(0, Number(speakEvery) || 0),
+    lastSpeakAt: 0,
     built: new Set(),        // 已经建好的批次（按 from 记）
     building: null,          // 正在建的那一个（同时只建一个，别把 CPU 打满）
     aheadSec: 0,
@@ -295,6 +297,26 @@ export function startWatchLoop({
           if (Number.isFinite(loop.dur) && seg.from >= loop.dur) break;
           loop.segments.push(seg);
           guard += 1;
+        }
+      }
+
+      // ---- 高频模式：不受批次边界限制，每 speakEvery 秒叫一次（测试/密集解说用）
+      if (loop.speakEvery > 0) {
+        const est = estimate(loop.anchor, tNow);
+        const gap = tNow - (loop.lastSpeakAt || 0);
+        const within = Number.isFinite(loop.dur) ? est.pos < loop.dur - 1 : true;
+        if (gap >= loop.speakEvery * 1000 && within && est.why !== 'paused') {
+          loop.lastSpeakAt = tNow;
+          const seg = plan.segmentAt(est.pos);
+          const w = await wake(loop.ctx, {
+            sessionId: loop.sessionId,
+            text: `[一起看·高频] 现在 ${mmss(est.pos)}（这一段 ${mmss(seg.from)}–${mmss(seg.to)}）。`
+              + '调 video_watch({ speakNow: true }) 拿当前画面，然后说一句。',
+          });
+          loop.lastWake = { at: new Date().toTimeString().slice(0, 8), ok: Boolean(w?.ok), reason: w?.reason ?? null, segment: seg.from };
+          if (!w?.ok) { loop.wakeFails += 1; loop.lastReason = 'wake-failed'; }
+          note(`speak-now ${Math.round(est.pos)}s → ${w?.ok ? 'ok' : w?.reason ?? 'failed'}`);
+          return;
         }
       }
 

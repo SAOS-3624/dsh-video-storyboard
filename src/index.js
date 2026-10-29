@@ -260,11 +260,12 @@ async function registerAll(ctx) {
         // **双缓冲**：始终保留 depth 个批次（默认 2 个 = 当前 + 下一个）。
         // 段边界不再在这里算 —— 交给批次表（开头短、逐段加长）。
         const depth = Math.max(1, Number(args.depth) || 2);
+        const speakEvery = Math.max(0, Number(args.speakEvery) || 0);
         startWatchLoop({
           ctx, sessionId: lastSessionId, input: r.input,
           cursor: r.cursor, status: r.status,
           // 段长 / 阶梯 / 缓冲深度交给循环：之后它自己往前滚、自己补建
-          segment, ramp, depth,
+          segment, ramp, depth, speakEvery,
           // 循环负责"什么时候建"，这里给它"怎么建"
           deps: {
             browserPort,

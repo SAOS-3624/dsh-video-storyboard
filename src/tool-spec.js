@@ -535,6 +535,17 @@ export function watchToolSpec() {
         type: 'boolean',
         description: 'Stop the background watch loop (it wakes the session on its own). Idempotent.',
       },
+      speakEvery: {
+        type: 'number',
+        description: 'High-frequency mode in seconds: the loop wakes you every N seconds regardless of batch '
+          + 'boundaries (10 is fine). Pair it with video_watch({ speakNow: true }) inside the wake. Use 0 for '
+          + 'the normal one-comment-per-batch rhythm.',
+      },
+      speakNow: {
+        type: 'boolean',
+        description: 'Deliver the current batch immediately instead of waiting for its end. This is what the '
+          + 'high-frequency wake asks you to call.',
+      },
       waitForVideo: {
         type: 'boolean',
         description: 'If nothing is playing yet, block until a video appears (browser tab or OS media '

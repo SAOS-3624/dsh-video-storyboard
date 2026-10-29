@@ -16,6 +16,7 @@
  * 我们无权杀 —— 杀了会把正在用它的任务打断。
  */
 
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -151,7 +152,9 @@ export function keepAlive() {
  *  - owned=false 表示它本来就在跑，不碰
  */
 export async function ensureAsr({
-  baseUrl, config, env = process.env, spawnImpl, fetchImpl = fetch, log = () => {},
+  // spawnImpl 以前没有默认值：任何不传它的调用都会在启动时抛 "spawnImpl is not a function"，
+  // 而这个错误只会在"本地服务没起来、需要拉一次"的时候出现 —— 平时测不到。
+  baseUrl, config, env = process.env, spawnImpl = spawn, fetchImpl = fetch, log = () => {},
 } = {}) {
   const life = lifecycleConfig(config);
   const alive = await probeEndpoint(baseUrl, { fetchImpl, healthPath: life?.healthPath });

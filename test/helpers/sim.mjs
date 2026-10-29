@@ -57,20 +57,34 @@ export function createSim({
 
   refresh(0);
 
+  const fired = new Set();
+
   /** 每次 tick 之前推进虚拟时间，并按刷新策略更新快照 */
   function advance(ms) {
     t = ms;
-    // 换片：立刻刷新
+    // 换片：越过那个时刻就立刻刷新一次
     for (const c of changes) {
-      if (Math.round(c.at * 1000) === ms) {
+      const at = Math.round(c.at * 1000);
+      if (ms >= at && !fired.has(`change:${at}`)) {
+        fired.add(`change:${at}`);
         current = { title: c.title ?? current.title, duration: c.duration ?? current.duration };
         refresh(ms);
         return;
       }
     }
-    // 暂停/恢复：立刻刷新（真机行为：暂停动作会把 SMTC 刷一次）
-    const justPaused = paused.some((p) => Math.round(p.from * 1000) === ms || Math.round(p.to * 1000) === ms);
-    if (justPaused) { refresh(ms); return; }
+    // 暂停/恢复：真机上这两个动作都会把 SMTC 刷一次
+    // 注意用 `>=` 而不是 `===`：tick 步长和暂停时刻通常对不齐（2000 和 5000），
+    // 用等号会永远不触发，快照就冻在 t=0 —— 之前有几个测试就是被这个坑害的。
+    for (const p of paused) {
+      for (const edge of [p.from, p.to]) {
+        const at = Math.round(edge * 1000);
+        if (ms >= at && !fired.has(`pause:${at}`)) {
+          fired.add(`pause:${at}`);
+          refresh(ms);
+          return;
+        }
+      }
+    }
     // 常规刷新
     if (ms - lastRefreshAt >= refreshEveryMs) refresh(ms);
   }
