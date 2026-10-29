@@ -320,3 +320,27 @@ test('清单：没有登录门槛时不该出现这条提示', () => {
   const text = formatManifest(r, { maxChars: 200_000 });
   assert.doesNotMatch(text, /NEEDS LOGIN/);
 });
+
+test('清单：OCR 说"抽检"，不说"全片已核对"', () => {
+  const r = makeResult();
+  r.ocr = { status: 'applied', fixed: 1, checked: 16, band: { y0: 0.4, y1: 0.6 }, basedOn: 'source',
+    changes: [{ from: 4.4, was: '他也忘记。', now: '也要忘记吗' }] };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /spot-checked 16 lines, corrected 1/);
+  assert.doesNotMatch(text, /verified|全部核对|all lines/i);
+});
+
+test('清单：URL 模式要写明校正基于低清副本', () => {
+  const r = makeResult();
+  r.ocr = { status: 'applied', fixed: 2, checked: 16, band: { y0: 0.4, y1: 0.6 },
+    basedOn: 'low-res-copy', copyHeight: 360, changes: [{ from: 1, was: 'a', now: 'b' }] };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /from the 360p scan copy/);
+});
+
+test('清单：没修任何东西时不写 OCR 行（省 token）', () => {
+  const r = makeResult();
+  r.ocr = { status: 'applied', fixed: 0, checked: 16, band: { y0: 0.4, y1: 0.6 }, basedOn: 'source', changes: [] };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.doesNotMatch(text, /on-screen subs/);
+});

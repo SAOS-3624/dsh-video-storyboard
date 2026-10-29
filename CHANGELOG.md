@@ -16,6 +16,16 @@
 
 ### Changed
 
+- **The OCR line says "spot-checked", not "verified".** It is 16 sampled lines, so the manifest now reads
+  `on-screen subs: spot-checked 16 lines, corrected 1: …` — anything that could be read as "the whole
+  transcript was checked" is wrong, and a test asserts it.
+
+- **URL sources say the correction ran on the low-res copy.** With a Bilibili link the OCR runs against the
+  downloaded 360p scan, where hardcoded subtitles are already blurry and `scale=1280` invents no detail. The
+  line now carries `[from the 360p scan copy]` instead of implying source-quality evidence.
+
+- Nothing is printed when the pass changed nothing — that is the expected default and only costs tokens.
+
 - Segments dropped as non-speech now say what they most likely are ("singing or music, NOT dialogue") and
   that they are **excluded rather than guessed**.
 

@@ -325,6 +325,9 @@ export async function runStoryboard(opts) {
   if (ocr && transcriptInfo?.source === 'asr' && (transcriptInfo.segments?.length ?? 0) > 0) {
     ocrReport = await correctByOnScreenSubs({
       input, winStart, winDur, ffmpegPath, segments: transcriptInfo.segments, remoteFrame,
+      // URL 模式下 input 是下载的扫描副本（默认 360p）。scale=1280 放大不回细节，
+      // 所以这份校正是"基于低清副本做的"，必须让清单说清楚，而不是假装和原流一样准。
+      sourceCopyHeight: sourceInfo ? (sourceInfo.scanActual ?? sourceInfo.scanHeight ?? null) : null,
     }).catch((e) => {
       if (process.env.DSH_OCR_DEBUG) console.error('[ocr]', e?.message ?? e);
       return { status: 'failed', reason: String(e?.message ?? e).slice(0, 160) };
@@ -765,7 +768,9 @@ async function mapPool(items, limit, fn) {
  * 只有三条都成立才替换（见 shouldReplace）：OCR 置信度够、长度差不多、相似度落在 0.2–0.9。
  * 剩下的情况一律保留 ASR 原文 —— 宁可留一个已知的错字，也不要引入一个来源不明的句子。
  */
-async function correctByOnScreenSubs({ input, winStart, winDur, ffmpegPath, segments, remoteFrame }) {
+async function correctByOnScreenSubs({
+  input, winStart, winDur, ffmpegPath, segments, remoteFrame, sourceCopyHeight = null,
+}) {
   // 直链是另一套取帧路径（带 header），第一版不做 —— 明确说"跳过"，而不是悄悄不生效
   if (remoteFrame?.uri) return { status: 'skipped', reason: 'remote-frame-source' };
   const python = ocrPython();
@@ -829,6 +834,11 @@ async function correctByOnScreenSubs({ input, winStart, winDur, ffmpegPath, segm
       fixed: changes.length,
       checked: picks.length,
       band: { y0: +y0.toFixed(3), y1: +y1.toFixed(3), detected: band.detected },
+      // URL 模式下跑的是下载的扫描副本：字幕本身就糊，校正的可信度低于本地高清文件。
+      // 这个事实必须传到清单，否则读起来像"原片台词已核对"。
+      ...(sourceCopyHeight
+        ? { basedOn: 'low-res-copy', copyHeight: sourceCopyHeight }
+        : { basedOn: 'source' }),
       changes: changes.slice(0, 5),
       segments: out,
     };
@@ -1319,10 +1329,12 @@ export function formatManifest(result, {
   if (result.ocr) {
     if (result.ocr.status === 'applied') {
       // 报告行要短：它每一格都在清单里占 token，而"修了几条"本来就是次要信息
-      lines.push(result.ocr.fixed > 0
-        ? `on-screen subs corrected ${result.ocr.fixed}/${result.ocr.checked}: ${result.ocr.changes
-          .map((c) => `${c.from.toFixed(1)}s "${c.was}"→"${c.now}"`).join(' · ')}`
-        : `on-screen subs checked ${result.ocr.checked}, no change`);
+      if (result.ocr.fixed > 0) {
+        // 措辞必须撑住"这是抽检"：不能让人读成"整片台词已核对"
+        const basis = result.ocr.basedOn === 'low-res-copy' ? ` [from the ${result.ocr.copyHeight}p scan copy]` : '';
+        lines.push(`on-screen subs: spot-checked ${result.ocr.checked} lines, corrected ${result.ocr.fixed}` +
+          `${basis}: ${result.ocr.changes.map((c) => `${c.from.toFixed(1)}s "${c.was}"→"${c.now}"`).join(' · ')}`);
+      }
     } else {
       lines.push(`on-screen subtitle correction skipped (${result.ocr.reason ?? result.ocr.status}) — ` +
         'transcript is ASR only.');

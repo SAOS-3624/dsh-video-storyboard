@@ -3,6 +3,8 @@
 > 让 AI 真正"看过"一段视频：**一张分镜图 + 一份带时间码的文本清单**，模型据此回答"第 3 分钟发生了什么""这句话对应哪一格"。
 >
 > English: [README.en.md](README.en.md)
+>
+> 已收录于 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin)。
 
 ---
 
@@ -310,6 +312,12 @@ DSH_ASR_KEY        DSH_ASR_KEY_ENV
 ```
 
 **实测**（同一段 PV）：ASR 出「所以。他也忘记。」，画面是「你连，也要忘记吗」——OCR 把整句救回来了。
+
+**这是抽检，不是全片校对。** 默认只抽查 16 条，清单里写的是
+`spot-checked N lines, corrected M` —— 请按这个口径读，别当成"整片台词已核对"。
+
+**贴链接时**（URL 模式）跑的是下载的 360p 扫描副本，`scale=1280` 放大不回细节，硬字幕本来就糊；
+清单会标 `[from the 360p scan copy]`。想要更准就用本地高清文件。
 
 **全程本地、不花 token。** 需要 `rapidocr_onnxruntime`：
 
