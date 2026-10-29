@@ -30,6 +30,7 @@ import {
 } from './asr.js';
 import { detectSubtitleBand, OCR_MAX_ITEMS, ocrPython, readBand, shouldReplace } from './ocr.js';
 import { cacheKey, pruneCache, withCache } from './cache.js';
+import { saveCells } from './cells.js';
 import { ffmpegVersion, sha256File } from './provenance.js';
 import { findInjection } from './injection.js';
 import {
@@ -119,6 +120,9 @@ export async function runStoryboard(opts) {
     // undefined = 按 env / $DSH_HOME/asr.json 解析；显式 null = 明确不用 env/file 里的 key
     // （云端因此变成 no-key；本机服务按设计不需要 key，仍会尝试。要彻底关掉转写用 transcript:'off'）
     asrKey,
+    // 内容分类阈值（musicLufs / musicSpeechRate / speechRateCut）可覆盖：
+    // 不同母带响度能差 9 LU，写死的常数换一批片源就误判。实际生效的那组会写进清单。
+    planThresholds = null,
     cache = true,
     textOnly = false,
     precomputed = null,
@@ -396,6 +400,7 @@ export async function runStoryboard(opts) {
       speechRate,
       hasSubtitle: info.hasSubtitle,
       meanLufs: audio?.mean,
+      ...(planThresholds ? { thresholds: planThresholds } : {}),
     });
     cells = suggestion.cells;
     sheets = sheets || suggestion.sheets;
@@ -415,7 +420,7 @@ export async function runStoryboard(opts) {
       cuts: cuts.length,
       hasSubtitle: Boolean(info.hasSubtitle),
     },
-    thresholds: { ...PLAN_THRESHOLDS },
+    thresholds: { ...PLAN_THRESHOLDS, ...(planThresholds ?? {}) },
   };
 
   // 两条路：自适应按密度分配格位（快切区多给格），否则退回"并段到 k 格"
@@ -635,6 +640,20 @@ export async function runStoryboard(opts) {
     sheets: out,
     totalDuration,
   };
+
+  // 记下"这一格 = 这段绝对时间"，供 video_zoom({ cellId }) 直接寻址（清单里的 t_start 是窗口相对值）。
+  // 不 await：写失败不该影响出图，寻址会退回 from/to。
+  if (!textOnly) {
+    const cellTimes = [];
+    for (const sheet of out) {
+      for (const c of sheet.cells) {
+        cellTimes.push({ i: c.i, from: c.t_start + winStart, to: c.t_end + winStart });
+      }
+    }
+    void saveCells(input, cellTimes);
+  }
+
+  return result;
 }
 
 /**
@@ -1119,7 +1138,8 @@ export function formatTimeline(rows, { title = 'batch timeline' } = {}) {
     `# ${title}`,
     '',
     `- windows: **${rows.length}** · total ${tc(total)} · cells ${totalCells} · transcript ${totalChars} chars`,
-    `- tokens: ${rows.length} image(s) ≈ **${rows.length * 384}** (DSH estimate; one image per window)`,
+    `- tokens: ${rows.length} image(s) ≈ **${rows.length * 384}** (DSH host billing estimate, ` +
+      `384/image; an API host bills by pixels — use the size above)`,
     '',
     '| # | window | cells | cuts | chars | image |',
     '|---|---|---|---|---|---|',
@@ -1190,7 +1210,11 @@ export function formatManifest(result, {
 
   const cellAttr = hasSheets && Number.isFinite(sheet0?.cellW) && Number.isFinite(sheet0?.cellH)
     ? ` cell="${sheet0.cellW}x${sheet0.cellH}"` : '';
-  const tokensAttr = hasSheets ? ` tokens="${result.sheets.length * 384} (DSH estimate)"` : '';
+  // 384 是**按 DSH 宿主的图片计费**估的（每图约 384 token）。走 API 按像素算会差几倍，
+  // 所以这里必须写清口径，否则读者只能猜。真实尺寸在同行的 image=/cell= 里。
+  const tokensAttr = hasSheets
+    ? ` tokens="${result.sheets.length * 384} (est@384/img, DSH host billing; an API host bills by pixels)"`
+    : '';
   const lines = [
     `<storyboard path="${info.path ?? 'video'}" duration="${info.duration.toFixed(2)}" ` +
       `window="${win.from.toFixed(2)}-${win.to.toFixed(2)}" ` +

@@ -86,6 +86,18 @@ export function storyboardToolSpec() {
           '[{from,to,text}] / Bilibili {body:[{from,to,content}]}). When given, the subtitle track ' +
           'and ASR are both skipped — use this when the site already has captions.',
       },
+      planThresholds: {
+        type: 'object',
+        description: 'Override the content-classification thresholds for this call. Defaults -18 / 1 / 3 ' +
+          'are tuned on one master; loudness varies by up to 9 LU across material, so pass your own when ' +
+          'the auto plan misfires. The values actually used are always printed in the manifest.',
+        properties: {
+          musicLufs: { type: 'number', description: 'Louder than this + low speech rate = music-driven' },
+          musicSpeechRate: { type: 'number', description: 'Below this chars/s counts as music-like' },
+          speechRateCut: { type: 'number', description: 'Above this chars/s, give the transcript more weight' },
+        },
+        additionalProperties: false,
+      },
       ocr: {
         type: 'boolean',
         description: 'Correct ASR text against burned-in on-screen subtitles (local OCR, no extra tokens). ' +
@@ -213,6 +225,12 @@ export function zoomToolSpec() {
         type: 'string',
         enum: ['auto', 'off'],
         description: 'Include subtitle/ASR text for this window. Default "auto".',
+      },
+      cellId: {
+        type: 'integer',
+        description: 'Zoom by cell number from the last storyboard of this same input (e.g. 3 = the cell ' +
+          'labelled 3 in the sheet). Resolves to that cell\'s absolute time range, so you never copy ' +
+          'timestamps by hand. Falls back to an error if no cell map is recorded — then pass from/to.',
       },
       minGap: {
         type: 'number',
@@ -365,8 +383,13 @@ export function validateToolArgs(args) {
 export function validateZoomArgs(args) {
   const problems = [];
   if (!args?.input || typeof args.input !== 'string') problems.push('input is required');
-  if (!(args?.from >= 0)) problems.push('from is required and must be >= 0');
-  if (!(args?.to > 0)) problems.push('to is required and must be > 0');
+  const hasCell = args?.cellId !== undefined && args?.cellId !== null;
+  if (!hasCell) {
+    if (!(args?.from >= 0)) problems.push('from is required and must be >= 0 (or pass cellId)');
+    if (!(args?.to > 0)) problems.push('to is required and must be > 0 (or pass cellId)');
+  } else if (!Number.isInteger(args.cellId) || args.cellId < 1) {
+    problems.push('cellId must be a positive integer');
+  }
   if (args?.from !== undefined && args?.to !== undefined && args.to <= args.from) {
     problems.push('to must be greater than from');
   }
