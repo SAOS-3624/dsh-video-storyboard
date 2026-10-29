@@ -90,3 +90,32 @@ test('⑤ 时间轴冻结：前 3 分钟还能靠外推，之后不再猜、先�
   assert.equal(loopStatus().active, false, '长时间读不到就停表，不空转');
   assert.match(loopStatus().reason, /position-unreadable/);
 });
+
+test('⑥ 窗口自己往前滚：不靠外部再调一次工具', async () => {
+  // 只给 2 段（240 秒），lookahead 300 → 循环应自己补出第 3、4 段
+  const sim = createSim({ refreshEveryMs: 30_000, duration: 900 });
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'A',
+    segments: [{ from: 0, to: 120 }, { from: 120, to: 240 }],
+    size: 120, lookahead: 300, deps: sim.deps, log: () => {},
+  });
+  const first = loopStatus().segments;
+  await sim.runTo(400);
+  assert.ok(loopStatus().segments > first, `窗口应随进度增长（起始 ${first}）`);
+  assert.ok(sim.wakes.length >= 3, `应说至少 3 次，实得 ${sim.wakes.length}`);
+  stopWatchLoop('test');
+});
+
+test('⑦ 窗口不会无限长（跟着 lookahead 走）', async () => {
+  const sim = createSim({ refreshEveryMs: 30_000, duration: 900 });
+  startWatchLoop({
+    ctx: ctxStub, sessionId: 's1', input: 'A',
+    segments: [{ from: 0, to: 120 }],
+    size: 120, lookahead: 300, deps: sim.deps, log: () => {},
+  });
+  await sim.runTo(600);
+  const n = loopStatus().segments;
+  // 10 分钟 / 2 分钟一段 = 5 段，加 lookahead 3 段 → 最多约 8 段
+  assert.ok(n <= 10, `不该排到整片，实得 ${n} 段`);
+  stopWatchLoop('test');
+});

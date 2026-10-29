@@ -225,7 +225,9 @@ async function registerAll(ctx) {
         });
         startWatchLoop({
           ctx, sessionId: lastSessionId, input: r.input, segments,
-          cursor: r.cursor, status: r.status, log: () => {},
+          cursor: r.cursor, status: r.status,
+          // 把段长和窗口交给循环：之后它自己往前滚，不必等下一次工具调用
+          size, lookahead, log: () => {},
         });
       }
       return { text: r.text, images: r.images };

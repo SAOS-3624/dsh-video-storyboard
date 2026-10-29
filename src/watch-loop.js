@@ -40,6 +40,7 @@ const loop = {
   aheadSec: 0,
   unknownSince: 0,
   askedAt: 0,
+  dur: null,
   lastProbeAt: 0,
   lastReason: '',
   ticker: null,
@@ -83,6 +84,7 @@ export function stopWatchLoop(reason = 'stopped') {
  */
 export function startWatchLoop({
   ctx, sessionId, input, segments, cursor = null, status = 'playing', log = () => {},
+  size = 120, lookahead = 300,
   // 依赖可注入：进程内默认真实实现；测试/仿真用假的，于是"到点会不会说话"可以离线验证
   deps = {},
 }) {
@@ -110,6 +112,9 @@ export function startWatchLoop({
       sayAt: Number.isFinite(s.sayAt) ? s.sayAt : Number(s.to) - 15,
     })),
     spoken: [],
+    size: Math.max(20, Number(size) || 120),
+    // 往后排多少秒。**窗口是滚动的**：不靠外部调用，自己随进度往前长。
+    lookahead: Math.max(0, Number(lookahead) || 300),
     aheadSec: 0,
     unknownSince: 0,
     askedAt: 0,
@@ -146,9 +151,11 @@ export function startWatchLoop({
               // 不惩罚，只是用新锚点重算。
               loop.log(`[watch] re-anchored, drift ${driftSec}s`);
             }
-            loop.anchor = anchor;
+              loop.anchor = anchor;
+            if (Number.isFinite(s.dur)) loop.dur = s.dur;
           } else {
             loop.anchor = makeAnchor(s, tNow);
+            if (Number.isFinite(s.dur)) loop.dur = s.dur;
           }
           const st = await readLatency();
           loop.aheadSec = aheadSeconds(st);
@@ -158,6 +165,23 @@ export function startWatchLoop({
       if (!loop.anchor) {
         loop.lastReason = 'no-anchor';
         return;
+      }
+
+      // ---- 窗口自增长：只排到"当前位置 + lookahead"，然后随进度往前滚。
+      // 早先这里只在起循环时排一次（3 段），如果 agent 用了预设台词而不调工具，
+      // 循环就再也没被重启过 —— 6 分钟之后它会在 not-due 里静静躺着，再也不说话。
+      {
+        const nowEst = estimate(loop.anchor, tNow);
+        const horizon = nowEst.pos + loop.lookahead;
+        let guard = 0;
+        while (guard < 200) {
+          const last = loop.segments[loop.segments.length - 1];
+          if (!last || last.to >= horizon) break;
+          const from = last.to;
+          if (Number.isFinite(loop.dur) && from >= loop.dur) break;
+          loop.segments.push({ from, to: from + loop.size, sayAt: from + loop.size - 15 });
+          guard += 1;
+        }
       }
 
       const r = shouldSpeak({
