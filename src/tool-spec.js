@@ -696,6 +696,13 @@ export function watchToolSpec() {
           + 'The batch table starts at 1/2/3/4 minutes, so "2 segments" means only 2 minutes of headroom at the '
           + 'beginning — which is why the default is now a duration, not a count.',
       },
+      idleTimeoutSec: {
+        type: 'number',
+        description: 'How long playback has to sit still before the tool gives up, in seconds. '
+          + 'Default is twice the longest batch (a 5-minute batch means 10 minutes) - long enough that '
+          + 'buffering is not mistaken for walking away, short enough that it stops holding the session. '
+          + 'Applies to the blocking wait and to the background loop.',
+      },
       lookahead: {
         type: 'number',
         description: 'How much *time* to keep ready ahead of the playhead, in seconds (default 300 = 5 minutes). '

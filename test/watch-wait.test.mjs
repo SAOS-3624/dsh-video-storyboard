@@ -215,3 +215,28 @@ test('waitForVideo: 视频一出现就认出来（不再 2 秒一拍地等）', 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('位置长时间不动就自己收工（不永远挂着）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'waitidle-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    const d = {
+      ...deps(() => 100),
+      browserPort: 1,
+      autoLaunch: false,
+      // 在"播放"，但位置一直是 100 —— 缓冲卡死/页签挂起的样子
+      readBrowser: async () => ({ pos: 100, dur: 600, paused: false, url: 'file:///a.mp4' }),
+    };
+    const t0 = Date.now();
+    const r = await runWatchPass({
+      input: 'a.mp4', wait: true, maxWaitSec: 60, segment: 120, lead: 15, idleTimeoutSec: 1,
+    }, d);
+    const sec = (Date.now() - t0) / 1000;
+    assert.equal(r.reason, 'idle', '应该报 idle');
+    assert.equal(r.speaking, false);
+    assert.match(r.text, /has not moved/);
+    assert.ok(sec < 8, `应在空闲判定后一两秒收工，实得 ${sec}s`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

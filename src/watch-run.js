@@ -548,9 +548,20 @@ export async function runWatchPass(args, deps) {
   let waitedSec = 0;
   const tWaitStart = Date.now();
   let alreadyDelivered = false;
+  // **空闲自关**：位置两倍最长分段都没动过，就当用户已经不看了，主动收工。
+  // 为什么是两倍：一段 5 分钟，正常播放最慢也会在一段内推进一次；两段都没动静，
+  // 只能是页签挂起/缓冲卡死/人走了 —— 继续挂着只会把会话占死。
+  const idleSec = Number(args.idleTimeoutSec) > 0
+    ? Number(args.idleTimeoutSec)
+    : Math.max(60, 2 * Number(plan.segment));
+  const idleMs = idleSec * 1000;
+  let idleHit = false;
   if (!d.due && args.wait === true) {
-    const capSec = Math.min(600, Math.max(5, Number(args.maxWaitSec) || 180));
+    const capSec = Math.min(600, Math.max(5, Number(args.maxWaitSec)
+      || Math.round(idleMs / 1000)));
     const deadline = Date.now() + capSec * 1000;
+    let lastSeenPos = cursor;
+    let lastMoveAt = Date.now();
     while (Date.now() < deadline) {
       // 位置来源：浏览器（准）> 上次测得的 SMTC 快照（凑合能用来判断"到没到"）
       const np = browserPort
@@ -577,6 +588,14 @@ export async function runWatchPass(args, deps) {
         }
         if (cursor < segStart) break;            // 用户倒回到上一段去了，别干等
         if (np?.paused) break;                   // 暂停了就别挂着了，让用户能说话
+        // 位置有没有真的在走？（播放中但一秒都不动 = 缓冲卡死/页签挂起）
+        if (Math.abs(posNow - lastSeenPos) >= 0.5) {
+          lastSeenPos = posNow;
+          lastMoveAt = Date.now();
+        } else if (Date.now() - lastMoveAt >= idleMs) {
+          idleHit = true;
+          break;
+        }
       }
       await new Promise((r) => setTimeout(r, 500));
       waitedSec = +((Date.now() - tWaitStart) / 1000).toFixed(1);   // 没有浏览器读数也按墙钟推进
@@ -589,6 +608,24 @@ export async function runWatchPass(args, deps) {
   // 表现是这一段被推迟到**再下一次**调用才交出去（迟到一段，而不是重复一段）。
   // 记账必须发生在真正交付的那条分支里（见下方第 4 步）。
   const waitNote = waitedSec > 0 ? ` · waited ${Math.round(waitedSec)}s` : '';
+
+  // 位置长时间没动：收工，并把"停在哪儿、多久"说清楚，别让会话悄无声息地占着
+  if (!d.due && idleHit) {
+    return {
+      ok: false,
+      reason: 'idle',
+      speaking: false,
+      confidence,
+      input,
+      size,
+      cursor,
+      waitedSec,
+      text: `${head}${waitNote}\nplayback has not moved for ${Math.round(idleMs / 60_000)} minutes `
+        + `(${mmss(cursor ?? 0)}). Nothing to watch right now - stopping the wait. `
+        + 'Call again when they are watching again.',
+      images: [],
+    };
+  }
 
   // 这一段已经交过一次（lastDelivered 命中）：不重复塞，也不继续挂着等
   if (!d.due && alreadyDelivered) {

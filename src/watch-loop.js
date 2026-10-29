@@ -205,6 +205,8 @@ export function startWatchLoop({
     built: new Set(),        // 已经建好的批次（按 from 记）
     building: null,          // 正在建的那一个（同时只建一个，别把 CPU 打满）
     aheadSec: 0,
+    lastIdlePos: null,
+    lastMoveAt: 0,
     unknownSince: 0,
     askedAt: 0,
     lastProbeAt: 0,
@@ -285,6 +287,24 @@ export function startWatchLoop({
       if (!loop.anchor) {
         loop.lastReason = 'no-anchor';
         return;
+      }
+
+      // ---- 空闲自关：位置两倍最长分段都没动过，就别再空转。
+      // 正常播放（哪怕在缓冲）两段之内总会推进一次；两段都没动静，
+      // 多半是页签被挂起、播放器崩了、或者人已经走了。继续跑只会白烧 CPU。
+      {
+        const estIdle = estimate(loop.anchor, tNow);
+        const idleMs = Math.max(60_000, 2 * Number(plan.segment) * 1000);
+        if (Number.isFinite(estIdle.pos)) {
+          if (Math.abs(estIdle.pos - (loop.lastIdlePos ?? -1)) >= 0.5) {
+            loop.lastIdlePos = estIdle.pos;
+            loop.lastMoveAt = tNow;
+          } else if (loop.lastMoveAt && tNow - loop.lastMoveAt >= idleMs) {
+            loop.log(`[watch] idle ${Math.round(idleMs / 60_000)} min at ${Math.round(estIdle.pos)}s - stopping`);
+            stopWatchLoop('idle');
+            return;
+          }
+        }
       }
 
       // ---- 预取：保证"当前段 + 后面的余量"里，还没建好的那一个有人在建。

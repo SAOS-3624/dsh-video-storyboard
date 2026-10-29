@@ -17,6 +17,12 @@
 
 ### Changed
 
+- **Everything gives up when the playhead stops moving.** A blocking wait, the background loop and the
+  speaking script all had open-ended lifetimes: a backgrounded tab, a stalled buffer or a user who simply
+  walked away left them polling forever, holding the session. The idle limit is twice the longest batch
+  (a 5-minute batch means 10 minutes), overridable with `idleTimeoutSec`; the wait returns
+  `reason: "idle"` with where it stopped, the loop stops with `idle`, and the script exits.
+
 - **Finding the video is polled fast, and probing SMTC is not on the same clock.** The wait loop used to
   sleep two seconds and *then* spawn the SMTC python probe, so one check could cost 2 s + the probe's own
   latency — the user could already be 30 s into the video while it still insisted nothing was playing.
