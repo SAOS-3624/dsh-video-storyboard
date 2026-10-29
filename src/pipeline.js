@@ -123,6 +123,8 @@ export async function runStoryboard(opts) {
     // 内容分类阈值（musicLufs / musicSpeechRate / speechRateCut）可覆盖：
     // 不同母带响度能差 9 LU，写死的常数换一批片源就误判。实际生效的那组会写进清单。
     planThresholds = null,
+    // 本次运行结束后，本地 ASR 至少再活这么久（毫秒）。陪看用它跨段保活。
+    asrIdleMs = null,
     cache = true,
     textOnly = false,
     precomputed = null,
@@ -586,7 +588,10 @@ export async function runStoryboard(opts) {
   // （own 的才停 —— 别人启动的实例无权杀，杀了会打断正在用它的任务）
   if (asrLife?.owned || isOwned()) {
     const c = resolveAsrConfig();
-    scheduleStop({ owned: true, config: c, baseUrl: c.baseUrl });
+    scheduleStop({
+      owned: true, config: c, baseUrl: c.baseUrl,
+      minIdleMs: Number.isFinite(asrIdleMs) ? asrIdleMs : undefined,
+    });
   }
 
   return {
