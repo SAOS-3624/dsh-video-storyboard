@@ -84,7 +84,7 @@ export function stopWatchLoop(reason = 'stopped') {
  */
 export function startWatchLoop({
   ctx, sessionId, input, segments, cursor = null, status = 'playing', log = () => {},
-  size = 120, lookahead = 300,
+  size = 120, depth = 2,
   // 依赖可注入：进程内默认真实实现；测试/仿真用假的，于是"到点会不会说话"可以离线验证
   deps = {},
 }) {
@@ -96,6 +96,7 @@ export function startWatchLoop({
   // 读进度的间隔可注入：真机 15 秒够了（起一次 python ≈1 s）；
   // 但仿真用倍速跑，倍速越高越要读得勤，否则一整段会在两次采样之间被跳过。
   const probeEveryMs = deps.probeEveryMs ?? PROBE_EVERY_MS;
+  const build = deps.build ?? null;
   if (!sessionId) return { ok: false, reason: 'no-session-id' };
   if (!Array.isArray(segments) || segments.length === 0) return { ok: false, reason: 'no-segments' };
 
@@ -113,8 +114,12 @@ export function startWatchLoop({
     })),
     spoken: [],
     size: Math.max(20, Number(size) || 120),
-    // 往后排多少秒。**窗口是滚动的**：不靠外部调用，自己随进度往前长。
-    lookahead: Math.max(0, Number(lookahead) || 300),
+    // **双缓冲**：始终保留 depth 个批次（当前 + 下一个）。
+    // 前面的用完了，后面的立刻顶上，同时开始算再下一个 —— 永远有余量。
+    depth: Math.max(1, Number(depth) || 2),
+    get lookahead() { return this.size * this.depth; },
+    built: new Set(),        // 已经建好的批次（按 from 记）
+    building: null,          // 正在建的那一个（同时只建一个，别把 CPU 打满）
     aheadSec: 0,
     unknownSince: 0,
     askedAt: 0,
@@ -167,12 +172,36 @@ export function startWatchLoop({
         return;
       }
 
+      // ---- 预取（双缓冲）：始终保证"当前 + depth 个批次"里，还没建好的那一个有人在建。
+      // 一个时刻只建一个批次 —— 这台机器解码是 CPU 密集的，并行只会互相拖慢。
+      if (build && !loop.building) {
+        const nowEst = estimate(loop.anchor, tNow);
+        // 从**当前批次的开头**算窗口：depth=2 就是"正在看的这一段 + 下一段"，不是再加两段余量
+        const segNow = Math.floor(nowEst.pos / loop.size) * loop.size;
+        const horizon = segNow + loop.lookahead;
+        const next = loop.segments.find((sg) => sg.to > nowEst.pos && sg.from < horizon && !loop.built.has(sg.from));
+        if (next) {
+          loop.building = (async () => {
+            const t = Date.now();
+            try {
+              await build(next.from);
+              loop.built.add(next.from);
+              loop.log(`[watch] built ${Math.round(next.from)}s in ${((Date.now() - t) / 1000).toFixed(1)}s`);
+            } catch (e) {
+              loop.log(`[watch] build ${Math.round(next.from)}s failed: ${String(e?.message ?? e).slice(0, 80)}`);
+            } finally {
+              loop.building = null;
+            }
+          })();
+        }
+      }
+
       // ---- 窗口自增长：只排到"当前位置 + lookahead"，然后随进度往前滚。
       // 早先这里只在起循环时排一次（3 段），如果 agent 用了预设台词而不调工具，
       // 循环就再也没被重启过 —— 6 分钟之后它会在 not-due 里静静躺着，再也不说话。
       {
         const nowEst = estimate(loop.anchor, tNow);
-        const horizon = nowEst.pos + loop.lookahead;
+        const horizon = Math.floor(nowEst.pos / loop.size) * loop.size + loop.lookahead;
         let guard = 0;
         while (guard < 200) {
           const last = loop.segments[loop.segments.length - 1];

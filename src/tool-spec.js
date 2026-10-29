@@ -539,9 +539,16 @@ export function watchToolSpec() {
           + 'The background loop reads the line out when that segment becomes due, so nothing has to be '
           + 'generated at that moment. Only write them for the prefetched window (default 5 minutes).',
       },
+      depth: {
+        type: 'number',
+        description: 'How many batches to keep ready (default 2 = the one being watched + the next one). '
+          + 'The loop promotes the next batch when the current one is used up and immediately starts on the '
+          + 'one after that, so there is always a spare.',
+      },
       prefetch: {
         type: 'boolean',
-        description: 'Build the next segment in the background (default true). Set false to save CPU.',
+        description: 'Build one segment in the background from this call. Off by default because the loop '
+          + 'already does it on its own double-buffer schedule.',
       },
       lookahead: {
         type: 'number',
