@@ -26,7 +26,8 @@ const PROFILE = process.env.DSH_PROFILE || 'desktop';
 const PROFILE_DIR = join(DSH_HOME, 'profiles', PROFILE);
 const TARGET = join(PROFILE_DIR, 'node_modules', 'dsh-video-storyboard');
 const PKG_NAME = 'dsh-video-storyboard';
-const SKIP = new Set(['node_modules', '.git', 'test']);
+// `.tmp` 必须跳过：里面有调试输出、Edge 的一次性 profile（Cookies 文件被占用时 cp 会直接失败）
+const SKIP = new Set(['node_modules', '.git', 'test', '.tmp']);
 
 const mode = process.argv.includes('--remove') ? 'remove'
   : process.argv.includes('--check') ? 'check' : 'install';
