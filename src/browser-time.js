@@ -173,6 +173,7 @@ const SNAPSHOT_EXPR = `(() => {
     dur: Number.isFinite(v.duration) ? v.duration : null,
     paused: v.paused,
     ended: v.ended,
+    readyState: v.readyState,
     url: location.href,
     title: document.title,
   };
@@ -209,11 +210,46 @@ export async function readBrowserPosition({ port = DEFAULT_PORT, timeoutMs = 150
     if (!snap || typeof snap.pos !== 'number') continue;
     const cand = { ...snap, port };
     // 正在播的优先；暂停的也能用，但排在后面
-    if (!snap.paused && !snap.ended) return cand;
+    if (!snap.paused && !snap.ended) { best = cand; break; }
     if (!best) best = cand;
   }
-  return best;
+  if (!best) return null;
+
+  /*
+   * **`paused` 会误报**，这是实测出来的：用户坚称在播，接口一路回 `paused`，
+   * 而且 66 秒挂钟时间里 currentTime 只走了 8.6 秒（慢 3 倍多），之后又突然跳到 01:24。
+   * 单看 `v.paused` 会把"其实在播"判成"暂停"，上层就反复让用户"按一下播放"——观感极差。
+   *
+   * 所以这里三路互证：
+   *   ① `v.paused` 为 false            → 一定在播
+   *   ② currentTime 相对上次读数确实前进了 → 即使 paused 说是暂停，也判在播
+   *   ③ 两次读数完全没动               → 记成 stale，让上层能区分"真暂停"和"读不到"
+   */
+  const now = Date.now();
+  const prev = lastSnapByPort.get(port);
+  let playing = !best.paused && !best.ended;
+  let staleMs = 0;
+  if (prev && prev.url === best.url) {
+    const dt = (now - prev.t) / 1000;
+    const dp = best.pos - prev.pos;
+    if (!playing && dt >= 0.8 && dt <= 15 && dp > 0.15 * dt) playing = true;
+    if (dp === 0) staleMs = now - prev.t;
+  }
+  lastSnapByPort.set(port, { t: now, pos: best.pos, url: best.url });
+
+  return {
+    ...best,
+    // 覆盖掉 DOM 那个会误报的 paused；原始值留档，排查时能对照
+    paused: !playing,
+    rawPaused: best.paused,
+    playing,
+    staleMs,
+    confidence: playing ? 'playing' : (staleMs > 5000 ? 'stale' : 'paused'),
+  };
 }
+
+/** 每个端口最近一次读数：用来判断 currentTime 有没有真的在走 */
+const lastSnapByPort = new Map();
 
 /**
  * 由**插件自己**把浏览器拉起来。
