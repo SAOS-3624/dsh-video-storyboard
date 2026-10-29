@@ -421,6 +421,15 @@ video_storyboard({ input: "materials.mp4", hotwords: "位错 滑移 柏氏矢量
 | [CREDITS.md](CREDITS.md) | 第三方致谢、社区贡献、测试素材作者 |
 | [README.en.md](README.en.md) | English |
 
+## 赞助
+
+这个插件是免费的，也不打算收费。如果它帮你省下了 API 费用或剪辑时间，
+欢迎请我喝杯奶茶 —— 完全自愿，不影响任何功能。
+
+<img src="docs/assets/wechat-reward.png" alt="微信赞赏码" width="220">
+
+> 仓库右上角的 **Sponsor** 按钮也指向这里（`.github/FUNDING.yml`）。
+
 ## 许可
 
 见 [LICENSE](LICENSE)。

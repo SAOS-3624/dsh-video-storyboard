@@ -127,6 +127,10 @@ export async function apply(ctx) {
         to: args.to,
         cells: args.cells ?? 6,
         sheets: 1,
+        // **必须显式传**：runStoryboard 的默认值是 1.2，不传就永远是 1.2 ——
+        // zoom 恰恰是最需要小间隔的场合（把半秒镜头拆成独立格）。真实反馈：
+        // `video_zoom({ minGap: 0.4 })` 要 4 格只出 2 格，而 tool-spec 声明了、validate 也校验了，中间断了。
+        minGap: args.minGap ?? 1.2,
         pick: args.pick ?? 'sharp',
         burn: args.burn ?? 'index',
         transcript: args.transcript ?? 'auto',

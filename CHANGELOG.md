@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`video_zoom` swallowed `minGap`, so every zoom ran at 1.2 s.** The parameter is in the tool spec and in
+  the validator, but `src/index.js` builds the storyboard options field by field and that list never included
+  it — declared, validated, never wired. Short-form editing is exactly where a small gap matters: asking for
+  4 cells across 1.6 s returned 2.
+
+  Reported with a reproduction (`video_zoom({ from: 12, to: 15, cells: 6, minGap: 0.4 })` → 2 cells instead
+  of 4). Now passed through, and the same call returns the cells the geometry allows.
+
+- **When `minGap` does trim the count, the plan line says so.** It printed the requested number at the top
+  (`16 cells`) and the real one at the bottom (`total 8 of 8`), which reads like a bug. It now prints
+  `4/6 cells (minGap-limited)`.
+
 ### Added
 
 - **Hard-coded subtitles now correct the transcript** when `detail: high`. ASR mishears names and particles
@@ -13,6 +27,11 @@
   so the neighbouring line does not leak in. Measured on a music-video sample: 1 of 3 lines fixed, the rest
   left alone. Runs locally, so **no extra tokens** — versus ~34,500 tokens if the model read the subtitles
   frame by frame. Silently skipped when rapidocr is not installed, and it says so rather than pretending.
+
+### Docs
+
+- Sponsor entry: `.github/FUNDING.yml` (custom link to the WeChat reward code) and a README section, so the
+  repo shows a Sponsor button without requiring GitHub Sponsors, which is impractical from mainland China.
 
 ### Changed
 

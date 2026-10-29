@@ -359,3 +359,20 @@ test('清单：没修任何东西时不写 OCR 行（省 token）', () => {
   const text = formatManifest(r, { maxChars: 200_000 });
   assert.doesNotMatch(text, /on-screen subs/);
 });
+
+test('清单：minGap 压掉格数时首行写"实际/请求"，不写成请求值', () => {
+  const r = makeResult({ cells: 16 });
+  r.plan = { ...r.plan, cells: 6, produced: 4,
+    inputs: { duration: 60, scanThreshold: 40, meanLufs: -20, speechRate: 2, motion: 5, cuts: 12, hasSubtitle: false } };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /4\/6 cells \(minGap-limited\)/, '首行必须同时给出实际与请求');
+});
+
+test('清单：格数一致时不加括号噪音', () => {
+  const r = makeResult({ cells: 16 });
+  r.plan = { ...r.plan, cells: 16, produced: 16,
+    inputs: { duration: 60, scanThreshold: 40, meanLufs: -20, speechRate: 2, motion: 5, cuts: 12, hasSubtitle: false } };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /16 cells/);
+  assert.doesNotMatch(text, /minGap-limited/);
+});

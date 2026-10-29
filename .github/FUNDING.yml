@@ -1,0 +1,10 @@
+# 让仓库页出现 Sponsor 按钮（GitHub 官方支持的自定义赞助入口）
+#
+# custom 最多 4 个链接，必须是完整 https 地址。
+# 现在指向仓库里的微信赞赏码；拿到爱发电主页后，把下面第一行换成你的主页，
+# 例如 https://afdian.com/a/你的用户名 —— 两个可以并存，用户自己选。
+#
+# 说明：GitHub Sponsors（官方打款）对国内个人开发者开户很麻烦，所以这里不启用
+# github: [用户名]，只用 custom。
+custom:
+  - https://raw.githubusercontent.com/SAOS-3624/dsh-video-storyboard/main/docs/assets/wechat-reward.png
