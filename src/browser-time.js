@@ -22,7 +22,8 @@
 // （实测这台机器上 WorkBuddy 自己就占着 9222，盲连会读到它的界面）。
 const DEFAULT_PORT = 9333;
 
-import { readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -34,6 +35,17 @@ import { join } from 'node:path';
  *
  *   { "browserPort": 9333 }
  */
+/** `~/.dsh/video.json` 里的 launchBrowser（默认关：不要替用户随便开程序） */
+export function configuredLaunch(env = process.env) {
+  const home = env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
+  try {
+    const cfg = JSON.parse(readFileSync(join(home, 'video.json'), 'utf8'));
+    return cfg?.launchBrowser === true;
+  } catch {
+    return false;
+  }
+}
+
 export function configuredPort(env = process.env) {
   const home = env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
   try {
@@ -181,6 +193,51 @@ export async function readBrowserPosition({ port = DEFAULT_PORT, timeoutMs = 150
     if (!best) best = cand;
   }
   return best;
+}
+
+/**
+ * 由**插件自己**把浏览器拉起来。
+ *
+ * 为什么不能靠外部脚本代劳：我这边的工具进程跑在一个 Job Object 里，
+ * 它派生出去的子进程（哪怕 detached + unref）会随这个 job 一起被回收——
+ * 实测两次：窗口开起来、7 秒后读得到、再 10 秒整个浏览器连同用户自己的 Edge 一起没了。
+ * 而插件是跑在 DSH 里的长期进程，它 spawn 出去的浏览器才活得下来。
+ *
+ * 所以：想在"打开视频时自动就有端口"，只能是插件来起。
+ */
+export function launchBrowser({
+  port = DEFAULT_PORT, url = '', profileDir = null, exe = null,
+} = {}) {
+  const edge = exe
+    ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+  const profile = profileDir ?? join(homedir(), '.dsh', 'edge-watch');
+  try {
+    mkdirSync(profile, { recursive: true });
+    const args = [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${profile}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      ...(url ? [url] : []),
+    ];
+    const child = spawn(edge, args, { detached: true, stdio: 'ignore' });
+    child.unref();
+    return { ok: true, pid: child.pid, port, profile };
+  } catch (e) {
+    return { ok: false, reason: String(e?.message ?? e).slice(0, 120) };
+  }
+}
+
+/** 等端口起来（最多等 timeoutMs），返回是否起来了 */
+export async function waitForPort(port, { timeoutMs = 8000, stepMs = 400 } = {}) {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    // eslint-disable-next-line no-await-in-loop
+    if ((await listTargets({ port, timeoutMs: 600 })) !== null) return true;
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+  return false;
 }
 
 /** 调试端口开没开（用于给用户一句明确的提示，而不是让功能悄悄退化） */

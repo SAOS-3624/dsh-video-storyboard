@@ -17,13 +17,31 @@ import {
 } from './watch.js';
 import { describeLatency, recordLatency } from './latency.js';
 import { makePlan } from './batches.js';
-import { configuredPort, fileUrlToPath, readBrowserPosition } from './browser-time.js';
+import {
+  configuredLaunch, configuredPort, fileUrlToPath, hasDebugPort, launchBrowser, readBrowserPosition,
+  waitForPort,
+} from './browser-time.js';
 import { estimate, makeAnchor } from './position.js';
 import { resolvePlayingSource } from './resolve-playing.js';
 import { saveLines } from './watch.js';
 
 // 模块级：latencyNote() 需要知道"这一轮从什么时候开始"
 let tStartForNote = Date.now();
+// 自动拉浏览器每个进程只试一次（失败也别每次调用都弹窗）
+let launchTried = false;
+
+/**
+ * 端口没开时**自己把浏览器拉起来**（仅当 video.json 里 launchBrowser: true）。
+ * 为什么必须插件来起：外部工具进程派生出的浏览器会随它的 Job Object 被回收。
+ */
+async function ensureWatchBrowser(port) {
+  if (!port || launchTried) return false;
+  if (await hasDebugPort({ port })) return true;
+  launchTried = true;
+  const r = launchBrowser({ port });
+  if (!r.ok) return false;
+  return waitForPort(port, { timeoutMs: 10_000 });
+}
 
 /**
  * 给循环用的建段函数：传一次参数，返回 `build(from) => Promise`。
@@ -96,6 +114,7 @@ export async function runWatchPass(args, deps) {
     probe = probePlayback,
     readBrowser = readBrowserPosition,
     browserPort = configuredPort() ?? undefined,
+    autoLaunch = configuredLaunch(),
   } = deps;
   // 从"开始读进度"到"结果返回"的耗时 —— 这就是本机延迟的实测值，用来做提前量标定
   const tStart = Date.now();
@@ -194,6 +213,7 @@ export async function runWatchPass(args, deps) {
   let confidence = Number.isFinite(cursor) ? 'given' : null;
   if (!Number.isFinite(cursor)) {
     // 浏览器里的 currentTime 是毫秒级真值（需显式开调试端口），比 SMTC 的稀疏刷新可靠
+    if (browserPort && autoLaunch) await ensureWatchBrowser(browserPort);
     const b = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
     if (b && Number.isFinite(b.pos)) {
       cursor = b.pos;
