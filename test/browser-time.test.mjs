@@ -7,13 +7,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { hasDebugPort, listTargets, pickVideoTarget, readBrowserPosition } from '../src/browser-time.js';
+import { hasDebugPort, listTargets, pickVideoTarget, probeBrowser, readBrowserPosition } from '../src/browser-time.js';
 
 test('端口没开就返回 null（不抛错，不打扰）', async () => {
   const port = 6553;                       // 没人监听
   assert.equal(await listTargets({ port, timeoutMs: 400 }), null);
   assert.equal(await hasDebugPort({ port }), false);
   assert.equal(await readBrowserPosition({ port, timeoutMs: 400 }), null);
+});
+
+/**
+ * probeBrowser 存在的唯一理由：**"浏览器没开"和"开着但没视频"必须能被区分出来**。
+ * 以前两者都只是 `null`，上层于是拿"有没有位置"去猜"浏览器在不在"。
+ */
+test('probeBrowser: 没配端口 → unconfigured（不是 closed，也不是 error）', async () => {
+  const r = await probeBrowser({ port: null });
+  assert.equal(r.state, 'unconfigured');
+  assert.equal(r.port, null);
+});
+
+test('probeBrowser: 端口不通 → closed', async () => {
+  const r = await probeBrowser({ port: 6553, timeoutMs: 400 });
+  assert.equal(r.state, 'closed');
+  assert.equal(r.port, 6553);
 });
 
 test('挑目标时 bilibili 页面优先', () => {

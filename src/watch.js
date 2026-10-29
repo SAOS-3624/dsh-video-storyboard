@@ -68,11 +68,29 @@ export async function probePlayback({
         if (err) return resolve({ ok: false, error: String(err.message).slice(0, 160) });
         try {
           const parsed = JSON.parse(String(stdout ?? '').trim() || '{}');
-          const value = parsed?.ok ? parsed : { ok: false, error: parsed?.error ?? 'bad-output' };
+          const base = parsed?.ok ? parsed : { ok: false, error: parsed?.error ?? 'bad-output' };
+          /*
+           * **`ok: true` 只说明"这次探测成功了"，不代表"有东西在播"。**
+           *
+           * winrt 在没有任何媒体会话时照样正常返回 `{ok:true, sessions:[]}`（实测）。
+           * 上层若只看 `ok`，就会把"没人放片"读成"读到了位置"，然后拿一个空数组去
+           * pickSession —— 拿到的永远是 null，但错误信息会退化成"探测失败"，指向错的方向。
+           * 所以这里把两件事拆开：`ok` 只留"探测链路通不通"，`live` 专门说"有活儿会话"，
+           * 并且在没有活会话时把 ok 一起收紧，让调用方不可能漏看。
+           */
+          const sessions = Array.isArray(base.sessions) ? base.sessions : [];
+          const live = sessions.some((s) => s?.status === PLAYBACK.PLAYING
+            || s?.status === PLAYBACK.PAUSED
+            || s?.status === 'playing' || s?.status === 'paused');
+          const value = base.ok && !live
+            ? {
+              ...base, ok: false, live: false, reason: 'no-active-session', error: 'no active media session',
+            }
+            : { ...base, live };
           probeCache = { at: Date.now(), value };
           return resolve(value);
         } catch {
-          return resolve({ ok: false, error: 'unparsable' });
+          return resolve({ ok: false, live: false, error: 'unparsable' });
         }
       });
   });

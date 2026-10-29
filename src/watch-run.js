@@ -19,7 +19,8 @@ import { describeLatency, recordLatency } from './latency.js';
 import { DEFAULT_LOOKAHEAD, makePlan, windowFor } from './batches.js';
 import { makeChatWatcher } from './chat.js';
 import {
-  fileUrlToPath, hasDebugPort, launchBrowser, looksLikeVideoUrl, readBrowserPosition, waitForPort,
+  fileUrlToPath, hasDebugPort, launchBrowser, looksLikeVideoUrl, probeBrowser, readBrowserPosition,
+  waitForPort,
 } from './browser-time.js';
 import { estimate, makeAnchor } from './position.js';
 import { resolvePlayingSource } from './resolve-playing.js';
@@ -31,19 +32,61 @@ import { consumeLine, dueLine, hasLine, saveLines } from './watch.js';
 let tStartForNote = Date.now();
 // 自动拉浏览器每个进程只试一次（失败也别每次调用都弹窗）
 let launchTried = false;
+/** 上一次拉起浏览器为什么失败 —— 只试一次可以，但"为什么不试了"必须能说出来 */
+let launchFailWhy = null;
 
 /**
  * 端口没开时**自己把浏览器拉起来**（仅当 video.json 里 launchBrowser: true）。
  * 为什么必须插件来起：外部工具进程派生出的浏览器会随它的 Job Object 被回收。
+ *
+ * 返回 `{ ok, launched, via?, reason? }`：**`launched` 是关键**。
+ * 以前只返回布尔，调用方分不清"本来就在"和"我刚给你开了一个新窗口"——
+ * 于是模型看到"浏览器有位置"就以为用户在看的那个浏览器是好的，
+ * 其实它刚开了一只空白的、独立 profile 的 Edge。
  */
 async function ensureWatchBrowser(port) {
   // 小于 1024 是特权端口，起不来的；测试里也常用 1 这类假端口
-  if (!port || port < 1024 || launchTried) return false;
-  if (await hasDebugPort({ port })) return true;
+  if (!port || port < 1024) return { ok: false, launched: false, reason: 'no-port' };
+  if (await hasDebugPort({ port })) return { ok: true, launched: false };
+  if (launchTried) {
+    return {
+      ok: false,
+      launched: false,
+      reason: `already tried once in this process${launchFailWhy ? ` (${launchFailWhy})` : ''}`,
+    };
+  }
   launchTried = true;
   const r = launchBrowser({ port });
-  if (!r.ok) return false;
-  return waitForPort(port, { timeoutMs: 10_000 });
+  if (!r.ok) {
+    launchFailWhy = r.reason ?? 'launch-failed';
+    return { ok: false, launched: false, reason: launchFailWhy };
+  }
+  const up = await waitForPort(port, { timeoutMs: 10_000 });
+  if (!up) launchFailWhy = 'port-never-opened';
+  return { ok: up, launched: true, via: r.via, reason: up ? null : 'port-never-opened' };
+}
+
+/**
+ * 一行说清"浏览器到底在不在"。
+ *
+ * 每个 video_watch 返回都带这行 —— 因为模型的判据里只有"能不能读到位置"，
+ * 而位置可以来自系统媒体会话（任何播放器），于是"有位置"被当成了"浏览器开着"。
+ * 把状态写在返回文本里，模型才不用靠猜。
+ */
+function describeBrowser(s, launchNote = '') {
+  const st = s?.state ?? 'error';
+  const port = s?.port ? `:${s.port}` : '';
+  const line = {
+    unconfigured: 'browser: NOT configured (no debug port) — position comes from the OS media session, '
+      + 'which counts ANY player, not just your browser',
+    closed: `browser: CLOSED ${port} — no debug port is listening, so nothing here is read from a browser; `
+      + 'any position I report comes from the OS media session',
+    'no-video': `browser: open ${port} but NO tab is holding a <video> (${s?.pages ?? 0} tab(s))`,
+    watching: `browser: open ${port} · ${String(s?.title || s?.url || '').slice(0, 64)} · `
+      + `${s?.playing ? 'playing' : 'paused'} ${mmss(s?.pos ?? 0)}`,
+    error: `browser: probe FAILED ${port} — I cannot even tell whether it is open`,
+  }[st] ?? `browser: ${st}`;
+  return line + (launchNote || '');
 }
 
 /**
@@ -110,6 +153,8 @@ export async function runWatchPass(args, deps) {
     saveImage, runStoryboard, formatManifest, cache = new Map(),
     probe = probePlayback,
     readBrowser = readBrowserPosition,
+    /** "浏览器到底在不在"—— 只用于**如实汇报**，位置仍走 readBrowser（可注入） */
+    probeBrowserState = probeBrowser,
     browserPort = undefined,
     autoLaunch = false,
   } = deps;
@@ -203,12 +248,20 @@ export async function runWatchPass(args, deps) {
         waitedVideoSec = Math.round((Date.now() - tWait) / 1000);
       }
       if (!input && !activeSession?.title) {
+        const whyBrowser = browserPort
+          // eslint-disable-next-line no-await-in-loop
+          ? (await hasDebugPort({ port: browserPort })
+            ? `browser: open :${browserPort} but no tab is holding a <video>`
+            : `browser: CLOSED :${browserPort} — no debug port is listening`)
+          : 'browser: NOT configured (no debug port), so only the OS media session could be read';
         return {
           ok: false,
           waitedSec: waitedVideoSec,
           reason: 'no-video-timeout',
+          browser: browserPort ? 'checked' : 'unconfigured',
           text: `I waited ${waitedVideoSec}s and no video appeared `
             + '(no browser tab holding a <video>, no OS media session).\n'
+            + `${whyBrowser}\n`
             + 'Tell the user you are still waiting and that you will pick it up when it starts; '
             + 'call again with waitForVideo: true when they say it is playing.',
           images: [],
@@ -217,10 +270,17 @@ export async function runWatchPass(args, deps) {
     }
 
     if (!activeSession?.title && !input) {
+      const whyBrowser = browserPort
+        ? (await hasDebugPort({ port: browserPort })
+          ? `browser: open :${browserPort} but no tab is holding a <video>`
+          : `browser: CLOSED :${browserPort} — no debug port is listening`)
+        : 'browser: NOT configured (no debug port), so only the OS media session could be read';
       return {
         ok: false,
         reason: 'no-video',
+        browser: browserPort ? 'checked' : 'unconfigured',
         text: `no video is playing right now (${p0.error ?? 'no active media session'}).\n`
+          + `${whyBrowser}\n`
           + 'Play something, or pass input yourself (path or link). '
           + 'If you would rather wait for them to start it, call again with waitForVideo: true — '
           + 'but say you are waiting first: this call stays silent while it blocks.',
@@ -405,20 +465,37 @@ export async function runWatchPass(args, deps) {
   let cursor = parseCursor(args.cursor);
   let note = '';
   let confidence = Number.isFinite(cursor) ? 'given' : null;
+
+  // ---- 1.0 浏览器在不在：**每次调用都查**，哪怕这一次不需要它给位置。
+  // 以前读不到就 `.catch(() => null)` 静默掉，于是"关着"和"开着但没视频"在模型眼里
+  // 都是"没有位置"，它只能拿位置去倒推浏览器 —— 猜错就对着空气写台词。
+  let launchNote = '';
+  if (!Number.isFinite(cursor) && browserPort && autoLaunch && args.attachOnly !== true) {
+    // eslint-disable-next-line no-await-in-loop
+    const br = await ensureWatchBrowser(browserPort);
+    if (br.launched) {
+      launchNote = br.ok
+        ? ` · I JUST STARTED a watch browser on :${browserPort} (its own profile, ~/.dsh/edge-watch) — `
+          + 'it is NOT the window you are watching in, and it has no video open'
+        : ` · I tried to start a watch browser on :${browserPort} and it never came up (${br.reason})`;
+    }
+  }
+  const browserState = browserPort
+    ? await probeBrowserState({ port: browserPort }).catch(() => ({ state: 'error', port: browserPort }))
+    : { state: 'unconfigured', port: null };
   if (!Number.isFinite(cursor)) {
-    // 浏览器里的 currentTime 是毫秒级真值（需显式开调试端口），比 SMTC 的稀疏刷新可靠
-    // **attachOnly：只读，绝不自拉实例。**
-    // 用户明确反感插件去动他的浏览器（自拉 Edge、导航、关标签）。
-    // 开了这个开关，读不到位置就直接报错返回，让他自己处理。
-    if (browserPort && autoLaunch && args.attachOnly !== true) await ensureWatchBrowser(browserPort);
+    // 位置仍然走**可注入**的 readBrowser（测试/仿真靠它喂位置，别改成直接调 CDP）
     const b = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
     if (b && Number.isFinite(b.pos)) {
       cursor = b.pos;
       confidence = 'browser';
       note = ` (browser, ${b.paused ? 'paused' : 'playing'})`;
-      if (b.url) activeSession = { ...(activeSession ?? {}), title: b.title, dur: b.dur };
+      if (b.url) {
+        activeSession = { ...(activeSession ?? {}), title: b.title, dur: b.dur };
+      }
     }
   }
+  const browserLine = describeBrowser(browserState, launchNote);
   if (!Number.isFinite(cursor)) {
     const probeRes = await probe();
     const pick = probeRes.ok
@@ -427,7 +504,9 @@ export async function runWatchPass(args, deps) {
     if (!pick) {
       return {
         ok: false,
-        text: `cannot read your playback position (${probeRes.error ?? 'no active media session'}).\n`
+        browser: browserState.state,
+        text: `${browserLine}\n`
+          + `cannot read your playback position (${probeRes.error ?? 'no active media session'}).\n`
           + 'Tell me how far you are (e.g. "我看到 12:30 了") and call again with cursor: 750. '
           + 'I will not guess — a wrong cursor makes every later segment wrong too.',
         images: [],
@@ -442,7 +521,9 @@ export async function runWatchPass(args, deps) {
       return {
         ok: false,
         confidence,
-        text: `your playback position is unreadable right now: SMTC last updated `
+        browser: browserState.state,
+        text: `${browserLine}\n`
+          + `your playback position is unreadable right now: SMTC last updated `
           + `${Math.round(est.staleMs / 1000)}s ago (${est.why}), so I cannot tell whether you are at `
           + `${mmss(pick.pos)} or further.\n`
           + 'Tell me where you are and pass cursor (e.g. cursor: 750 or "12:30"). '
@@ -552,7 +633,8 @@ export async function runWatchPass(args, deps) {
   const head = `watch ${mmss(cursor)} @ ${measuredAt}${note}${found} `
     + `· segment ${mmss(segStart)}–${mmss(segStart + size)}`
     + ` · ${Math.max(0, d.remaining)}s left`
-    + (builtMs ? ` · built in ${(builtMs / 1000).toFixed(1)}s` : ' · ready');
+    + (builtMs ? ` · built in ${(builtMs / 1000).toFixed(1)}s` : ' · ready')
+    + `\n${browserLine}`;
 
   // ---- 2.4 高频模式（speakNow）：循环按固定节奏叫醒时，不必等到段末才交付
   if (args.speakNow === true) d.due = true;

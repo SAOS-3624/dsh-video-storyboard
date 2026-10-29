@@ -630,7 +630,11 @@ export async function runStoryboard(opts) {
     });
   }
 
-  return {
+  // **这里是赋值，不是 return。**
+  // 原来是 `return {`：函数当场结束，后面记 cell 表的 `saveCells()` 和 `return result`
+  // 全成了死代码 —— 所以 0.4.4 的 cell 表**从来没写进去过**，
+  // `video_zoom({ cellId })` 一直找不到格子，只能退回 from/to。
+  const result = {
     timing,
     ...(ocrReport ? { ocr: ocrReport } : {}),
     info,
@@ -691,7 +695,9 @@ export async function runStoryboard(opts) {
         cellTimes.push({ i: c.i, from: c.t_start + winStart, to: c.t_end + winStart });
       }
     }
-    void saveCells(input, cellTimes);
+    // 必须 await：紧接着的 video_zoom({cellId}) 可能立刻来查；saveCells 自己吞写失败，
+    // 不会影响出图。URL 输入还要拿原始 URL 当别名（此时 input 已是下载到本地的路径）。
+    await saveCells([inputRaw, input].filter(Boolean), cellTimes);
   }
 
   return result;

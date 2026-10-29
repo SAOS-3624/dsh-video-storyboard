@@ -118,7 +118,9 @@ export function spikeCuts(stats, { k = 3, minAbs = 6, halfWindow = 15 } = {}) {
   for (let i = 0; i < stats.length; i++) {
     const lo = Math.max(0, i - halfWindow);
     const hi = Math.min(stats.length, i + halfWindow + 1);
-    const around = scores.slice(lo, hi).slice(0, i - lo).concat(scores.slice(i - lo + 1, hi - lo));
+    // 旧写法 `slice(lo,hi).slice(0,i-lo).concat(slice(i-lo+1, hi-lo))` 在 lo > 0 时
+    // 会取到**全数组**的 16..30 号元素（而不是 63..hi 的邻居），于是 i 这一刀被漏掉。
+    const around = scores.slice(lo, i).concat(scores.slice(i + 1, hi));
     const local = around.length ? around.sort((a, b) => a - b)[Math.floor(around.length / 2)] : global;
     const base = Math.max(0.2, Math.min(local, global));
     const need = Math.max(minAbs, base * k);

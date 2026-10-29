@@ -22,21 +22,27 @@ export function cellsPath(env = process.env) {
 
 /**
  * 记下这次分镜的格子表。
- * @param {string} path 源文件路径
+ * @param {string|string[]} path 源文件路径；可以同时给 URL 和下载到本地的路径，让两边都能寻址
  * @param {Array<{i:number, from:number, to:number}>} cells 绝对时间（秒）
+ *
+ * **为什么要支持数组**：远程视频的 `input` 是 URL，但下载后 `input` 会变成临时文件路径。
+ * `video_zoom({cellId})` 那边可能拿 URL 来查，也可能拿本地路径 —— 只存一个 key 就必然有一边查不到。
+ * 这个坑踩过：cell 表写进去了，用 URL 查三次全是 NOT FOUND。
  */
 export async function saveCells(path, cells, { env = process.env, at = Date.now() } = {}) {
-  if (!path || !Array.isArray(cells) || cells.length === 0) return;
+  const aliases = [...new Set((Array.isArray(path) ? path : [path]).map(norm).filter(Boolean))];
+  if (aliases.length === 0 || !Array.isArray(cells) || cells.length === 0) return;
   const file = cellsPath(env);
   let all = {};
   try {
     all = JSON.parse(await readFile(file, 'utf8')) ?? {};
   } catch { /* 没有或坏了：重建 */ }
 
-  all[norm(path)] = {
+  const record = {
     at,
     cells: cells.map((c) => ({ i: c.i, from: +c.from.toFixed(3), to: +c.to.toFixed(3) })),
   };
+  for (const key of aliases) all[key] = record;
   // 按时间保留最近 MAX_FILES 个文件
   const keys = Object.keys(all).sort((a, b) => (all[b]?.at ?? 0) - (all[a]?.at ?? 0));
   for (const k of keys.slice(MAX_FILES)) delete all[k];

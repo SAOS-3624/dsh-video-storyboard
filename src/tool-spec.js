@@ -539,6 +539,19 @@ export function watchToolSpec() {
       'Position comes from the browser (CDP) and the OS media session (SMTC), so it works for browser playback',
       'and for local files in VLC / PotPlayer / Movies & TV. If it cannot be read, pass cursor yourself -',
       'do not guess.',
+      '',
+      'EVERY result now carries a `browser:` line, and it is the honest answer to "is the browser open?":',
+      '  browser: open :9333 <title> playing 03:20   -> a real tab with a <video>, read from the DOM',
+      '  browser: CLOSED :9333                       -> nothing is listening; the position (if any) is NOT from a browser',
+      '  browser: open :9333 but NO tab is holding a <video>',
+      '  browser: NOT configured                     -> only the OS media session can be read',
+      'A playback position alone does NOT prove the browser is open: SMTC is system-wide, so VLC, Movies & TV or',
+      'a SECOND browser window (started without a debug port) will happily provide one. When the user asks whether',
+      'their browser is open, answer from the `browser:` line - never infer it from the position.',
+      'If the plugin had to start a browser itself, the line says so: that instance is a fresh window with its own',
+      'profile and no video open, and it is NOT the one the user is watching in.',
+      'To check the browser without building anything, call video_watch({ statusOnly: true }) - it now returns a',
+      '`browser` object as well.',
     ].join('\n'),
     // 宿主的 parameters 是**扁平 DSL**：每个字段一项，required 写在字段上，不是 JSON Schema 外壳
     parameters: {
@@ -703,7 +716,9 @@ export function watchToolSpec() {
       statusOnly: {
         type: 'boolean',
         description: 'Return the loop state only (position, confidence, why it did or did not speak) without '
-          + 'reading the video. Use it when you need to know why it went quiet.',
+          + 'reading the video, plus a `browser` object (state: unconfigured | closed | no-video | watching | error). '
+          + 'Use this to answer "is their browser actually open / are they still watching?" without spending a '
+          + 'segment build - and use it instead of inferring the browser from a playback position.',
       },
       lines: {
         type: 'array',
