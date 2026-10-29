@@ -212,7 +212,12 @@ async function registerAll(ctx) {
       if (args.loop !== false && lastSessionId && Number.isFinite(r.cursor)) {
         const size = r.size ?? 120;
         const startSeg = r.segment ?? 0;
-        const segments = Array.from({ length: 60 }, (_, i) => {
+        // **只往后看 lookahead 秒**（默认 5 分钟），不是整片。
+        // 用户随时可能不看了——排到两小时之后就是在白算。滚动的：用户每看一段，
+        // 下一次调用把窗口再往前推一段。
+        const lookahead = Number.isFinite(Number(args.lookahead)) ? Number(args.lookahead) : 300;
+        const count = Math.max(1, Math.ceil(lookahead / size));
+        const segments = Array.from({ length: count }, (_, i) => {
           const from = startSeg + (i + 1) * size;
           return { from, to: from + size, sayAt: from + size - 15 };
         });

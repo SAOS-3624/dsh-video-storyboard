@@ -523,6 +523,12 @@ export function watchToolSpec() {
         type: 'number',
         description: 'Cells per segment sheet (default 5). Each segment is one image.',
       },
+      lookahead: {
+        type: 'number',
+        description: 'How many seconds ahead to schedule, in seconds (default 300 = 5 minutes). '
+          + 'The window rolls forward as the user keeps watching, so a film that is abandoned halfway '
+          + 'does not pay for the rest of itself.',
+      },
       title: {
         type: 'string',
         description: 'Video title, used to pick the right media session when several are playing.',
