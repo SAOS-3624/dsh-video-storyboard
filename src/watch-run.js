@@ -407,7 +407,10 @@ export async function runWatchPass(args, deps) {
   let confidence = Number.isFinite(cursor) ? 'given' : null;
   if (!Number.isFinite(cursor)) {
     // 浏览器里的 currentTime 是毫秒级真值（需显式开调试端口），比 SMTC 的稀疏刷新可靠
-    if (browserPort && autoLaunch) await ensureWatchBrowser(browserPort);
+    // **attachOnly：只读，绝不自拉实例。**
+    // 用户明确反感插件去动他的浏览器（自拉 Edge、导航、关标签）。
+    // 开了这个开关，读不到位置就直接报错返回，让他自己处理。
+    if (browserPort && autoLaunch && args.attachOnly !== true) await ensureWatchBrowser(browserPort);
     const b = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
     if (b && Number.isFinite(b.pos)) {
       cursor = b.pos;

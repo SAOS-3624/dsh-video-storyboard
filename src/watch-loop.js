@@ -116,6 +116,9 @@ export function startWatchLoop({
   lookahead = DEFAULT_LOOKAHEAD,
   // 台词库存低于这么多段时，叫醒模型去补写。0 = 不管（默认关）
   refillBelow = 0,
+  // 台词念完就唤醒模型续写（默认关）。TTS 模式本来“念了就不叫醒”，
+  // 代价是词一空就失联 —— 开了这个，至少在“这段没词了”时醒一次。
+  wakeOnLinesEmpty = false,
   // 依赖可注入：进程内默认真实实现；测试/仿真用假的，于是"到点会不会说话"可以离线验证
   deps = {},
 }) {
@@ -188,6 +191,8 @@ export function startWatchLoop({
     loop.tts = tts?.enabled
       ? { enabled: true, voice: tts.voice ?? PREFERRED_VOICES[0], rate: Number(tts.rate) || 0 }
       : null;
+    // 同 tts：这类"行为开关"在 resume 时也必须跟着最新参数走，否则会一直用旧值
+    loop.wakeOnLinesEmpty = Boolean(wakeOnLinesEmpty);
     note('resumed (same input + same batch plan)');
     return { ok: true, resumed: true, ...loopStatus() };
   }
@@ -216,6 +221,7 @@ export function startWatchLoop({
     speakEvery: Math.max(0, Number(speakEvery) || 0),
     tts: tts?.enabled ? { enabled: true, voice: tts.voice ?? PREFERRED_VOICES[0], rate: Number(tts.rate) || 0 } : null,
     spokenAloud: 0,
+    wakeOnLinesEmpty: Boolean(wakeOnLinesEmpty),
     refillBelow: Math.max(0, Number(refillBelow) || 0),
     refillAskedAt: 0,
     lastSpeakAt: 0,
@@ -484,6 +490,26 @@ export function startWatchLoop({
       // TTS 模式：段边界**不叫醒模型**。到点没说，就是没有到点的词 ——
       // 该不该补词由模型自己那侧（或显式开着的 refillBelow）决定，不是这里替它决定。
       if (loop.tts?.enabled) {
+        // **wakeOnLinesEmpty**：TTS 模式下念完就不叫醒模型（省 token），代价是
+        // 台词一空就彻底失联，必须等用户开口。开了这个开关，就在"这一段没词了"时醒一次。
+        if (loop.wakeOnLinesEmpty) {
+          const left = await hasLine(loop.input, seg.from).catch(() => true);
+          if (!left) {
+            const w = await wake(loop.ctx, {
+              sessionId: loop.sessionId,
+              text: `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 这一段的词已经念完了，`
+                + '没有新词可念。看一眼画面写下一段的台词，'
+                + '写好后调 video_watch({ lines: [...], tts: true }) 继续念。',
+            });
+            loop.lastWake = {
+              at: new Date().toTimeString().slice(0, 8), ok: Boolean(w?.ok),
+              reason: w?.reason ?? null, segment: seg.from, cause: 'lines-empty',
+            };
+            loop.log(`[watch] wake-on-lines-empty (${mmss(seg.from)}) → ${w.ok ? 'ok' : w.reason}`);
+            loop.lastReason = 'woke-lines-empty';
+            return;
+          }
+        }
         note(`tts: ${mmss(seg.from)} 到了边界但没有到点的词，保持安静`);
         loop.lastReason = 'tts-no-due-line';
         return;
