@@ -71,6 +71,12 @@ export function loopStatus() {
     depth: loop.depth ?? 'auto',
     bufferSec: loop.bufferSec ?? null,
     spoken: loop.spoken.length,
+    // 念出来的句数（spoken 是"写过的"，这两个不是一回事）
+    spokenAloud: loop.spokenAloud ?? 0,
+    // tts 状态：不加这一行，"它为什么不说话"只能靠猜
+    tts: loop.tts?.enabled
+      ? { enabled: true, voice: loop.tts.voice, rate: loop.tts.rate }
+      : { enabled: false },
     pos: est ? +est.pos.toFixed(1) : null,
     confidence: est?.confidence ?? 'none',
     staleMs: est ? est.staleMs : null,
@@ -174,6 +180,14 @@ export function startWatchLoop({
     if (Number.isFinite(cursor)) {
       loop.anchor = makeAnchor({ pos: cursor, dur: loop.dur, status, updated: Date.now() }, Date.now());
     }
+    // **中途加 `tts: true` 必须立刻生效。**
+    // `samePlan` 比的是 input / sessionId / 段长 / ramp，唯独没比 tts；而 `loop.tts`
+    // 只在"新建循环"时赋值。于是最常见的操作序列 —— 先 speakNow 起循环（不带 tts），
+    // 再带 `tts: true` 补词 —— 会一路 resumed 下去，`loop.tts` 永远是 null：
+    // 用户按下播放，一句都没念，而回复里还写着"到点就念"。实测 04:44 连撞两次。
+    loop.tts = tts?.enabled
+      ? { enabled: true, voice: tts.voice ?? PREFERRED_VOICES[0], rate: Number(tts.rate) || 0 }
+      : null;
     note('resumed (same input + same batch plan)');
     return { ok: true, resumed: true, ...loopStatus() };
   }
