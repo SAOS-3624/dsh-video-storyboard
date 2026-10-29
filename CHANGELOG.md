@@ -17,6 +17,14 @@
 
 ### Fixed
 
+- **The look-ahead is a duration now, not a segment count.** "Keep two batches ready" means two minutes
+  at the start of the ramp, where batches are 1/2/3 minutes — shorter than one slow build, so the buffer
+  was effectively nothing right when it mattered. `lookahead` (default 300 s) states how much *ready video*
+  must sit ahead of the playhead; short batches are compensated automatically (60+120+180 at the start,
+  300+300 once steady). `depth` still works when passed explicitly, for tests and for callers who really
+  want a segment count. `lookahead` had been declared in the tool spec for a while but never wired into the
+  loop — declared, documented, ignored; it is connected now.
+
 - **A grid never leaves a blank slot when the layout is what created it.** Asking for 5 cells picks a
   2×3 layout, which left the bottom-right slot painted as padding — the same canvas, the same token,
   one frame thrown away. Cell counts are now rounded *up* to the layout capacity (5 → 6, 7 → 9,

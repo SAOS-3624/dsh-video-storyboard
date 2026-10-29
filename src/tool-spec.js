@@ -652,20 +652,22 @@ export function watchToolSpec() {
       },
       depth: {
         type: 'number',
-        description: 'How many batches to keep ready (default 2 = the one being watched + the next one). '
-          + 'The loop promotes the next batch when the current one is used up and immediately starts on the '
-          + 'one after that, so there is always a spare.',
+        description: 'How many batches to keep ready, counted in segments. Legacy: use lookahead instead. '
+          + 'The batch table starts at 1/2/3/4 minutes, so "2 segments" means only 2 minutes of headroom at the '
+          + 'beginning — which is why the default is now a duration, not a count.',
+      },
+      lookahead: {
+        type: 'number',
+        description: 'How much *time* to keep ready ahead of the playhead, in seconds (default 300 = 5 minutes). '
+          + 'Short batches at the start are compensated for automatically (a 1/2/3-minute ramp needs three or '
+          + 'four segments to cover five minutes), so the buffer never silently shrinks to two minutes. '
+          + 'The window rolls forward as the user keeps watching, so a film abandoned halfway does not pay '
+          + 'for the rest of itself.',
       },
       prefetch: {
         type: 'boolean',
         description: 'Build one segment in the background from this call. Off by default because the loop '
-          + 'already does it on its own double-buffer schedule.',
-      },
-      lookahead: {
-        type: 'number',
-        description: 'How many seconds ahead to schedule, in seconds (default 300 = 5 minutes). '
-          + 'The window rolls forward as the user keeps watching, so a film that is abandoned halfway '
-          + 'does not pay for the rest of itself.',
+          + 'already does it on its own schedule.',
       },
       title: {
         type: 'string',

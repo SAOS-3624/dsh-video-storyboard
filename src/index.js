@@ -21,7 +21,9 @@ import { configuredLaunch, configuredPort } from './browser-time.js';
 import { checkBiliLogin, fetchRemoteSubtitles } from './subtitles.js';
 import { listVoices, speak as speakAloud } from './tts.js';
 import { makeBuilder, runWatchPass } from './watch-run.js';
-import { loopStatus, startWatchLoop, stopWatchLoop } from './watch-loop.js';
+import {
+  DEFAULT_LOOKAHEAD, loopStatus, startWatchLoop, stopWatchLoop,
+} from './watch-loop.js';
 import { wakeSession } from './timer.js';
 import { isHttpUrl, probeUrl, resolveDirectUrl, resolveInput } from './fetch.js';
 import {
@@ -269,9 +271,13 @@ async function registerAll(ctx) {
       if (args.loop !== false && lastSessionId && Number.isFinite(r.cursor)) {
         const size = r.size ?? 120;
         const startSeg = r.segment ?? 0;
-        // **双缓冲**：始终保留 depth 个批次（默认 2 个 = 当前 + 下一个）。
-        // 段边界不再在这里算 —— 交给批次表（开头短、逐段加长）。
-        const depth = Math.max(1, Number(args.depth) || 2);
+        // 余量按**时间**算（默认 5 分钟）：开头段短就多备几段。
+        // 以前固定"两段"，在 1/2/3 分钟的阶梯上最前面只等于 2 分钟 —— 不够保险。
+        // depth 只在调用方显式给了的时候才按段数算（旧口径，一般不要用）。
+        const lookahead = args.lookahead === undefined
+          ? DEFAULT_LOOKAHEAD
+          : Math.max(0, Number(args.lookahead) || 0);
+        const depth = Number(args.depth) >= 1 ? Math.floor(Number(args.depth)) : null;
         const speakEvery = Math.max(0, Number(args.speakEvery) || 0);
         // tts: true → 到点由脚本念台词，不叫醒模型（省 token、也没有等待）
         const tts = args.tts === true
@@ -284,8 +290,8 @@ async function registerAll(ctx) {
         startWatchLoop({
           ctx, sessionId: lastSessionId, input: r.input,
           cursor: r.cursor, status: r.status,
-          // 段长 / 阶梯 / 缓冲深度交给循环：之后它自己往前滚、自己补建
-          segment, ramp, depth, speakEvery, tts, refillBelow,
+          // 段长 / 阶梯 / 余量交给循环：之后它自己往前滚、自己补建
+          segment, ramp, lookahead, depth, speakEvery, tts, refillBelow,
           // 循环负责"什么时候建"，这里给它"怎么建"
           deps: {
             browserPort,

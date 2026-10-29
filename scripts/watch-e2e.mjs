@@ -101,7 +101,10 @@ const build = makeBuilder({
 });
 startWatchLoop({
   ctx: { sessionController: { prompt: async () => {} }, _fake: true },
-  sessionId: 'e2e', input, segments, size: segment, depth: Number(args.depth ?? 2),
+  sessionId: 'e2e', input, segments, size: segment,
+  // 余量按时间（默认 5 分钟）——和线上一致；要固定段数就显式传 --depth
+  lookahead: Number(args.lookahead ?? 300),
+  depth: args.depth === undefined ? null : Number(args.depth),
   deps: { ...deps, build }, log: (m) => console.log(`[loop] ${m}`),
 });
 

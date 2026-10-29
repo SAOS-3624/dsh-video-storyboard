@@ -85,3 +85,29 @@ export function describePlan(plan) {
   const tail = `${Math.round(plan.segment / 60)}m`;
   return head ? `${head} → ${tail}（之后固定）` : tail;
 }
+
+/**
+ * 余量按**时间**算，不按段数算。
+ *
+ * 为什么："留两段"在开头只等于 2 分钟（批次表是 1/2/3/4/5 分钟），
+ * 比一次构建失败还短 —— 那时候的"余量"其实等于没有余量。
+ *
+ * 这里返回"当前段之后还要备好几段"，使**当前位置之后已就绪的时长 ≥ lookahead 秒**：
+ * 从下一段开始累加，凑够 lookahead 为止。稳定档 5 分钟时结果是 2（当前 + 下一段），
+ * 和旧的固定两段一致；开头段短，就会自动变成 3 段、4 段。
+ *
+ * 之所以从**下一段**开始算：当前段的剩余时长随播放位置变化，不能拿它当余量。
+ * 这样任何位置上的最小余量都恰好 ≥ lookahead，而不是"平均看起来够"。
+ */
+export function depthForBuffer(plan, index, lookahead = 300) {
+  const target = Number(lookahead);
+  if (!(target > 0)) return 1;
+  let acc = 0;
+  let ahead = 0;
+  // 256 是保险丝：万一 sizeAt 返回 0（不该发生），别在这里转死
+  while (acc < target && ahead < 256) {
+    ahead += 1;
+    acc += Number(plan.sizeAt(index + ahead)) || 0;
+  }
+  return 1 + ahead;
+}

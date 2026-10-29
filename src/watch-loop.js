@@ -16,7 +16,7 @@ import {
   MAX_EXTRAPOLATE_MS, estimate, makeAnchor, shouldSpeak, updateAnchor,
 } from './position.js';
 import { startTicker, wakeSession } from './timer.js';
-import { describePlan, makePlan } from './batches.js';
+import { describePlan, depthForBuffer, makePlan } from './batches.js';
 import { readBrowserPosition } from './browser-time.js';
 import { speak as speakAloud, PREFERRED_VOICES } from './tts.js';
 import { consumeLine, hasLine, loadLine, pickSession, probePlayback } from './watch.js';
@@ -33,6 +33,11 @@ const ASK_COOLDOWN_MS = 300_000;
 const UNKNOWN_GIVE_UP_MS = 600_000;
 /** 浏览器和 SMTC 都没有可用源超过这么久，就停（视频关了 / 浏览器退出了） */
 const NO_SOURCE_GIVE_UP_MS = 300_000;
+/**
+ * 默认余量（秒）。
+ * 用户定的：**少于 5 分钟不保险**。按段数算的话，开头 1/2/3 分钟一段，两段只有 2 分钟。
+ */
+export const DEFAULT_LOOKAHEAD = 300;
 
 const loop = {
   active: false,
@@ -64,6 +69,9 @@ export function loopStatus() {
     input: loop.input,
     segments: loop.segments.length,
     batchPlan: loop.plan ? describePlan(loop.plan) : null,
+    // 余量：depth 是"给了就按段数"，null 表示按 bufferSec 动态算
+    depth: loop.depth ?? 'auto',
+    bufferSec: loop.bufferSec ?? null,
     spoken: loop.spoken.length,
     pos: est ? +est.pos.toFixed(1) : null,
     confidence: est?.confidence ?? 'none',
@@ -98,7 +106,10 @@ export function stopWatchLoop(reason = 'stopped') {
  */
 export function startWatchLoop({
   ctx, sessionId, input, segments, cursor = null, status = 'playing', log = () => {},
-  size = 120, depth = 2, segment, ramp, speakEvery = 0, tts = null,
+  size = 120, depth = null, segment, ramp, speakEvery = 0, tts = null,
+  // 余量按**时间**算（秒）：当前位置之后已备好的时长不少于它。
+  // 不再用"留两段"—— 批次表开头是 1/2/3 分钟，两段在最前面只有 2 分钟，等于没有余量。
+  lookahead = DEFAULT_LOOKAHEAD,
   // 台词库存低于这么多段时，叫醒模型去补写。0 = 不管（默认关）
   refillBelow = 0,
   // 依赖可注入：进程内默认真实实现；测试/仿真用假的，于是"到点会不会说话"可以离线验证
@@ -136,6 +147,13 @@ export function startWatchLoop({
     : (segments?.[0] ? Number(segments[0].to) - Number(segments[0].from) : Number(size) || 120);
   const plan = makePlan({ segment: seedSize, ramp: ramp ?? null });
 
+  // 余量怎么算：
+  //   给了 depth → 按段数（旧行为，测试和"我就想固定几段"的场合用）
+  //   没给      → 按时间（默认 5 分钟），段短就自动多备几段
+  const fixedDepth = Number(depth) >= 1 ? Math.min(64, Math.floor(Number(depth))) : null;
+  const bufferSec = Math.max(0, Number(lookahead) || 0);
+  const depthAt = (index) => fixedDepth ?? depthForBuffer(plan, index, bufferSec);
+
   // **同一个源 + 同一张批次表 → 接着跑，不要重开。**
   // 之前每次工具调用都 stopWatchLoop('restart')，于是：① 已说过的段（spoken）被清空；
   // ② 正在等的那一段被新表重切、原时间点消失。用户看到的就是"说要 04:45 开口，结果 05:45 才说"。
@@ -147,7 +165,8 @@ export function startWatchLoop({
     && JSON.stringify(loop.plan.ramp) === JSON.stringify(plan.ramp);
   if (samePlan) {
     loop.ctx = ctx;
-    loop.depth = Math.max(1, Number(depth) || loop.depth);
+    loop.depth = fixedDepth;
+    loop.bufferSec = bufferSec;
     if (Number.isFinite(cursor)) {
       loop.anchor = makeAnchor({ pos: cursor, dur: loop.dur, status, updated: Date.now() }, Date.now());
     }
@@ -170,11 +189,12 @@ export function startWatchLoop({
         to: Number(s.to),
         sayAt: Number.isFinite(s.sayAt) ? s.sayAt : Number(s.to) - 15,
       }))
-      : plan.from(0, Math.max(1, Number(depth) || 2) * 2),
+      : plan.from(0, Math.min(64, depthAt(0) + 1)),
     spoken: [],
-    // **双缓冲**：始终保留 depth 个批次（当前 + 下一个）。
-    // 前面的用完了，后面的立刻顶上，同时开始算再下一个 —— 永远有余量。
-    depth: Math.max(1, Number(depth) || 2),
+    // 余量：fixedDepth 为 null 时按 bufferSec 动态算（段短就多备几段）。
+    // 起点那几段只有 1/2/3 分钟，固定"两段"在最前面等于只有 2 分钟余量 —— 不够。
+    depth: fixedDepth,
+    bufferSec,
     speakEvery: Math.max(0, Number(speakEvery) || 0),
     tts: tts?.enabled ? { enabled: true, voice: tts.voice ?? PREFERRED_VOICES[0], rate: Number(tts.rate) || 0 } : null,
     spokenAloud: 0,
@@ -266,14 +286,14 @@ export function startWatchLoop({
         return;
       }
 
-      // ---- 预取（双缓冲）：始终保证"当前 + depth 个批次"里，还没建好的那一个有人在建。
+      // ---- 预取：保证"当前段 + 后面的余量"里，还没建好的那一个有人在建。
+      // 余量按时间算（默认 5 分钟），所以开头段短时会连着建 3、4 段，不是固定两段。
       // 一个时刻只建一个批次 —— 这台机器解码是 CPU 密集的，并行只会互相拖慢。
       if (build && !loop.building) {
         const nowEst = estimate(loop.anchor, tNow);
-        // **双缓冲**：只管"当前段 + 后面 depth-1 段"。段长由批次表决定，不按固定 size 取整。
         const idxNow = plan.indexAt(nowEst.pos);
         const next = loop.segments
-          .slice(idxNow, idxNow + loop.depth)
+          .slice(idxNow, idxNow + depthAt(idxNow))
           .find((sg) => !loop.built.has(sg.from));
         if (next) {
           loop.building = (async () => {
@@ -291,12 +311,14 @@ export function startWatchLoop({
         }
       }
 
-      // ---- 窗口自增长：只排到"当前位置 + lookahead"，然后随进度往前滚。
+      // ---- 窗口自增长：只排到"当前位置 + 余量"，然后随进度往前滚。
       // 早先这里只在起循环时排一次（3 段），如果 agent 用了预设台词而不调工具，
       // 循环就再也没被重启过 —— 6 分钟之后它会在 not-due 里静静躺着，再也不说话。
       {
         const nowEst = estimate(loop.anchor, tNow);
-        const want = plan.indexAt(nowEst.pos) + 1 + loop.depth;
+        const idxNow = plan.indexAt(nowEst.pos);
+        // 段列表要比"预取范围"再长一段，否则 slice 拿不到够多的段可建
+        const want = idxNow + depthAt(idxNow) + 1;
         let guard = 0;
         while (loop.segments.length < want && guard < 200) {
           const i = loop.segments.length;
