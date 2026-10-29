@@ -17,6 +17,8 @@ import { fileURLToPath } from 'node:url';
 
 import { cacheDir } from './cache.js';
 import { findPython } from './python.js';
+import { recallSegments } from './locate.js';
+import { makeLagFn } from './speech.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -209,7 +211,20 @@ export async function saveLines(input, lines, { env = process.env } = {}) {
     const text = String(l?.text ?? '').trim();
     if (!Number.isFinite(from) || !text) continue;
     if (!grouped.has(from)) grouped.set(from, []);
-    const at = Number(l?.at);
+    // `at` 除了秒数，还可以直接传**字幕原文片段**，这里去转写里查它的 from。
+    // 为什么必须有这条路：模型凭印象写秒数会整段错 —— 实测把"1/4 螺口"挂在 189 秒，
+    // 而字幕里它在 247 秒，提前了 58 秒，用户当场发现"台词对不上视频"。
+    let at = Number(l?.at);
+    if (typeof l?.at === 'string' && l.at.trim()) {
+      const segs = recallSegments(input) ?? [];
+      const q = l.at.trim();
+      const hit = segs.find((x) => String(x.text ?? '').includes(q));
+      at = hit ? Number(hit.from) : NaN;
+      if (!hit) {
+        // 查不到就明确说出来，别悄悄当成"没写 at"（那会让它落在段首，更错）
+        console.warn(`[watch] line anchor not found in transcript: ${q}`);
+      }
+    }
     grouped.get(from).push({
       text: text.slice(0, 300),
       ...(Number.isFinite(at) ? { at } : {}),
@@ -277,19 +292,25 @@ export async function consumeLine(input, from, { env = process.env } = {}) {
  *
  * 这里按 `at` 触发：位置到哪，就说到哪。暂停时位置不动，也就不会继续说。
  * 不带 `at` 的老台词按"进入这一段"处理，并在段内均匀铺开（每条占 1/k 段）。
- * 迟到超过 `lateSec`（默认 6 秒）的词直接作废：位置跳过去了，那句描述的画面已经不在。
+ * 迟到超过 `lateSec`（默认 3 秒）的词直接作废：位置跳过去了，那句描述的画面已经不在。
  * 只认"两个时间大致相等"——早一点不发，晚太多也不要。
  *
  * @param {number} pos  当前播放位置（秒）
  * @param {{ size?: number, lateSec?: number }} [o] 当前段长（给没写 at 的台词分位）、迟到宽限
  */
-export async function dueLine(input, pos, { size = 0, lateSec = 6, env = process.env } = {}) {
+export async function dueLine(input, pos, { size = 0, lateSec = 3, env = process.env } = {}) {
   const now = Number(pos);
   if (!Number.isFinite(now)) return null;
   const st = await loadWatch(env);
   const sk = sessionKey(input);
   const lines = st[sk]?.lines;
   if (!lines) return null;
+
+  // 台词要往后挪多久：`at` 对齐的是"这句话开始说的时刻"，直接开口会跟原声抢话。
+  // 字幕在 locate 的记忆层里（跑分镜时顺手记下的），拿不到就退化成不延迟。
+  const lagOf = makeLagFn(recallSegments(input) ?? []);
+  // 真正可以开口的时刻。没写 at 的老台词不参与（它们按"进入这一段"处理）。
+  const dueAt = (at) => (at === null || !Number.isFinite(Number(at)) ? -Infinity : Number(at) + lagOf(at));
 
   let best = null;
   let dirty = false;
@@ -308,14 +329,15 @@ export async function dueLine(input, pos, { size = 0, lateSec = 6, env = process
     }
     // **迟到就作废**：位置跳过去了（拖进度条 / 快进），那句描述的画面已经不在银幕上，
     // 补念出来只会和画面对不上。停顿几秒内的正常延迟仍然会念。
-    const kept = items.filter((x) => !(x.at !== null && x.at < now - lateSec));
+    // 判断用"该开口的时刻"（at + 后延），否则加了延以后正常的一句也会被当成迟到删掉。
+    const kept = items.filter((x) => !(dueAt(x.at) < now - lateSec));
     if (kept.length !== items.length) {
       items = kept;
       dirty = true;
     }
     if (dirty) writeSlot(lines, from, items);
     items.forEach((item, i) => {
-      if (item.at > now) return;
+      if (dueAt(item.at) > now) return;
       if (!best || item.at < best.at) best = { from, index: i, at: item.at, text: item.text };
     });
   }

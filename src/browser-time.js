@@ -242,14 +242,39 @@ export function launchBrowser({
   ];
 
   // **Windows 上走计划任务**：普通 spawn 出去的进程会留在调用者的 Job Object 里，
-  // 调用方一退出就被回收（实测：窗口开起来、几秒后整个浏览器消失）。
+  // 调用方一退出就被回收（实测：窗口开起来、3 秒后整个浏览器消失）。
   // 计划任务由 Task Scheduler 服务启动，不在那个 job 里，才能真正活下来。
   if (process.platform === 'win32' && taskScheduler !== false) {
     const task = `DSH-Edge-Watch-${port}`;
     const quoted = args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ');
+    const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
-    // 先试 schtasks.exe：最通用。某些安全策略会把它列为黑名单程序，
-    // 那种情况下退回"直接 spawn"（活不长，但至少能看）。
+    // **顺序：PowerShell cmdlet 在前，schtasks.exe 在后。别调回去。**
+    // 为什么：schtasks.exe 在不少机器的"程序黑名单"里（安全策略直接拦，报 PROGRAM BLOCKED
+    // ... schtasks.exe），失败后只能退回 spawn —— 而 spawn 在 Job 对象里活不过几秒。
+    // 旧顺序（先 schtasks）的实测后果：**每次启动，用户的浏览器都会被关一次**。
+    //
+    // 还有一条：任务**已存在就只 Start，不要 Register**。
+    // Register-ScheduledTask -Force 会重写任务定义，正在跑的那个实例会被一起终止 ——
+    // 表现就是"用户看着看着，浏览器被关了"。只有任务不存在时才创建。
+    try {
+      execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+        `$ErrorActionPreference='Stop'; Start-ScheduledTask -TaskName ${q(task)}`],
+      { stdio: 'ignore', windowsHide: true, timeout: 20_000 });
+      return { ok: true, via: 'scheduled-task', task, port, profile };
+    } catch { /* 任务不存在 → 下面创建 */ }
+
+    try {
+      execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', [
+        `$a = New-ScheduledTaskAction -Execute ${q(edge)} -Argument ${q(quoted)}`,
+        '$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)',
+        `Register-ScheduledTask -TaskName ${q(task)} -Action $a -Settings $s -Force | Out-Null`,
+        `Start-ScheduledTask -TaskName ${q(task)}`,
+      ].join('; ')], { stdio: 'ignore', windowsHide: true, timeout: 20_000 });
+      return { ok: true, via: 'scheduled-task-new', task, port, profile };
+    } catch { /* 没有 PowerShell / 没有注册任务的权限，往下走 */ }
+
+    // 没有 PowerShell 的机器才用 schtasks.exe（本机它在黑名单里，永远失败）
     try {
       execFileSync('schtasks', ['/create', '/tn', task, '/tr', `"${edge}" ${quoted}`,
         '/sc', 'once', '/st', '23:59', '/f'], { stdio: 'ignore', windowsHide: true, timeout: 15_000 });
@@ -258,6 +283,8 @@ export function launchBrowser({
     } catch { /* 没权限就往下走 */ }
   }
 
+  // 最后兜底：spawn。**它多半活不过调用方退出**（Job Object 会回收整棵子进程树），
+  // 只适合"起完立刻读一次"的场景。看到 via:'spawn' 就知道浏览器随时会消失。
   try {
     const child = spawn(edge, args, { detached: true, stdio: 'ignore' });
     child.unref();

@@ -95,8 +95,8 @@ test('dueLine: 迟到几秒照念，迟到太多直接作废（拖进度条之�
       { from: 120, at: 150, text: '旧' },
       { from: 120, at: 200, text: '稍晚' },
     ]);
-    // 停在 155：迟到 5 秒，还在宽限里，照念
-    assert.equal(await dueLine('g.mp4', 155, { size: 60 }), '旧');
+    // 停在 152：迟到 2 秒，还在宽限（lateSec 3）里，照念
+    assert.equal(await dueLine('g.mp4', 152, { size: 60 }), '旧');
     // 跳到 260：200 那句迟到 60 秒，作废；库存清空
     assert.equal(await dueLine('g.mp4', 260, { size: 60 }), null);
     assert.equal((await linesOverview('g.mp4')).length, 0, '迟到的词应被丢弃，而不是攒着连珠炮');

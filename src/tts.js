@@ -15,6 +15,9 @@
  */
 
 import { execFile } from 'node:child_process';
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /** 本机常见的中文声音，按偏好排序 */
 export const PREFERRED_VOICES = [
@@ -61,6 +64,162 @@ export function speak(text, {
         else resolve({ ok: true });
       });
   });
+}
+
+
+/* ------------------------------------------------- DSH TTS 插件（edge-tts） */
+
+/**
+ * DSH 里装的那个 `@memef1f1y/dsh-plugin-tts` 走的是 **edge-tts**，音色比本机 SAPI 好太多
+ * （`zh-CN-XiaoxuanNeural` 这类神经音色，不是 Huihui 那种机械声）。
+ *
+ * 它把接口挂在 DSH 的 webServer 上：
+ *   POST {endpoint}/dsh-tts-api/speak  { text, voice, provider }
+ *   → 短文本：**直接回音频字节流**（mp3，实测 content-type 为空）
+ *   → 长文本：回 { url }，分块在后台合成
+ * 两种都要处理，只看 content-type 会判断错（实测就是空的）。
+ *
+ * 所以这里能做的是：要到 url，然后用 ffplay 播。拿不到就安静地退回 SAPI —— 念台词这件事
+ * 不能因为"音色插件没开"就整个哑掉。
+ *
+ * 配置（任选其一，DSH_HOME 默认 ~/.dsh）：
+ *   ~/.dsh/tts.json     { "endpoint": "http://127.0.0.1:PORT", "voice": "zh-CN-XiaoxuanNeural" }
+ *   ~/.dsh/video.json   { "tts": { "endpoint": "...", "voice": "..." } }
+ */
+export function configuredDshTts(env = process.env) {
+  const home = env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
+  try {
+    const j = JSON.parse(readFileSync(join(home, 'tts.json'), 'utf8'));
+    if (j?.endpoint) return j;
+  } catch { /* 没有就试下一个 */ }
+  try {
+    const j = JSON.parse(readFileSync(join(home, 'video.json'), 'utf8'));
+    if (j?.tts?.endpoint) return j.tts;
+  } catch { /* 没有就算了 */ }
+  return null;
+}
+
+/** 这个端点上有没有 DSH 的 tts 接口（空 body 会返回 400，但路由存在就说明找对了） */
+export async function dshTtsAlive(endpoint, timeoutMs = 1500) {
+  if (!endpoint) return false;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const r = await fetch(`${endpoint.replace(/\/+$/, '')}/dsh-tts-api/speak`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+      signal: ac.signal,
+    });
+    // 400 = 路由在、只是文本为空；其他 2xx 也算活着
+    return r.ok || r.status === 400;
+  } catch { return false; } finally { clearTimeout(timer); }
+}
+
+/** 用 DSH 的 tts 插件念一句（返回 {ok, url} 或 {ok:false, reason}） */
+export async function speakViaDsh(text, {
+  endpoint, voice = 'zh-CN-XiaoxuanNeural', provider = 'edge-tts', timeoutMs = 45_000, dryRun = false,
+} = {}) {
+  if (!endpoint) return { ok: false, reason: 'no-endpoint' };
+  const base = endpoint.replace(/\/+$/, '');
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  let url = null;
+  let tmpFile = null;
+  try {
+    const r = await fetch(`${base}/dsh-tts-api/speak`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, voice, provider }),
+      signal: ac.signal,
+    });
+    if (!r.ok) return { ok: false, reason: `http-${r.status}` };
+    const buf = Buffer.from(await r.arrayBuffer());
+    // 短文本直接回音频字节（content-type 可能是空的），长文本才回 { url }
+    const looksJson = buf.length > 1 && buf.length < 8192 && buf[0] === 0x7b;   // '{'
+    if (looksJson) {
+      const j = JSON.parse(buf.toString('utf8'));
+      url = j?.url ? (String(j.url).startsWith('http') ? j.url : base + j.url) : null;
+    } else if (buf.length > 512) {
+      const tmp = join(tmpdir(), `dsh-tts-${Date.now()}.mp3`);
+      writeFileSync(tmp, buf);
+      url = tmp;
+      tmpFile = tmp;
+    }
+  } catch (e) {
+    return { ok: false, reason: String(e?.message ?? e).slice(0, 120) };
+  } finally { clearTimeout(timer); }
+
+  if (!url) return { ok: false, reason: 'no-url' };
+  if (dryRun) return { ok: true, url, dryRun: true };
+
+  // 播：ffplay 不占窗口、放完自己退。没有 ffplay 就交给系统默认播放器
+  const played = await new Promise((resolve) => {
+    execFile('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet', url],
+      { timeout: timeoutMs + 30_000, windowsHide: true }, (err) => resolve(!err));
+  });
+  if (played) return { ok: true, url, engine: 'dsh-tts', tmp: tmpFile };
+
+  try {
+    execFile('cmd', ['/c', 'start', '', url], { windowsHide: true }, () => {});
+    return { ok: true, url, engine: 'dsh-tts-shell', note: 'ffplay 不可用，交给系统播放器' };
+  } catch (e) {
+    return { ok: false, reason: `play-failed: ${String(e?.message ?? e).slice(0, 80)}`, url };
+  }
+}
+
+
+/* ------------------------------------------------------- edge-tts（推荐） */
+
+/**
+ * 直接调微软的 edge-tts（`zh-CN-XiaoxiaoNeural` 这类神经音色）。
+ *
+ * 为什么不用 SAPI：SAPI 那三个中文声音（Huihui / Yaoyao / Kangkang）是十年前的拼接合成，
+ * 一听就是导航软件；edge-tts 是神经端到端，语气和断句都自然得多。
+ *
+ * 为什么不用 DSH 那个 tts 插件的 HTTP 接口：实测它在 `127.0.0.1:4310` 上回 184 字节、
+ * 31 毫秒——既不是音频（1 秒的 mp3 至少几 KB），也不是 `{url}`。那个端点不是给外部调的。
+ *
+ * 依赖：`pip install edge-tts`（在独立 venv 里），播放用 ffplay。
+ * 拿不到就安静退回 SAPI —— 念台词不能因为音色插件没装就哑掉。
+ */
+export function defaultEdgeTtsBin(env = process.env) {
+  const cfg = configuredDshTts(env);
+  if (cfg?.edgeTts && existsSync(cfg.edgeTts)) return cfg.edgeTts;
+  const guess = join(env.USERPROFILE || homedir(),
+    '.workbuddy', 'binaries', 'python', 'envs', 'tts', 'Scripts', 'edge-tts.exe');
+  return existsSync(guess) ? guess : null;
+}
+
+/** 用 edge-tts 念一句：合成到临时 mp3，用 ffplay 播，播完删掉 */
+export async function speakViaEdgeTts(text, {
+  voice = 'zh-CN-XiaoxiaoNeural', bin = null, rate = 0, timeoutMs = 60_000, dryRun = false,
+} = {}) {
+  const exe = bin || defaultEdgeTtsBin();
+  if (!exe) return { ok: false, reason: 'edge-tts-not-installed' };
+  const out = join(tmpdir(), `edge-tts-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.mp3`);
+  // 语速：edge-tts 用百分比（-10% ~ +50%），我们的 rate 是 SAPI 的 -10..10
+  const pct = Math.round(Math.max(-10, Math.min(10, Number(rate) || 0)) * 3);
+  const args = ['--voice', voice, '--text', text, '--write-media', out];
+  if (pct) args.push(`--rate=${pct > 0 ? '+' : ''}${pct}%`);
+
+  if (dryRun) return { ok: true, dryRun: true, args, exe };
+
+  const made = await new Promise((resolve) => {
+    execFile(exe, args, { timeout: timeoutMs, windowsHide: true }, (err) => resolve(!err));
+  });
+  if (!made) return { ok: false, reason: 'synth-failed' };
+  try {
+    if (!existsSync(out) || statSync(out).size < 800) return { ok: false, reason: 'empty-audio' };
+  } catch { return { ok: false, reason: 'stat-failed' }; }
+
+  const played = await new Promise((resolve) => {
+    execFile('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet', out],
+      { timeout: timeoutMs + 30_000, windowsHide: true }, (err) => resolve(!err));
+  });
+  try { unlinkSync(out); } catch { /* 删不掉就留着 */ }
+  if (!played) return { ok: false, reason: 'play-failed' };
+  return { ok: true, engine: 'edge-tts', voice };
 }
 
 /** 列出本机可用声音（从注册表读，不实例化 COM） */

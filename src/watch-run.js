@@ -17,6 +17,7 @@ import {
 } from './watch.js';
 import { describeLatency, recordLatency } from './latency.js';
 import { DEFAULT_LOOKAHEAD, makePlan, windowFor } from './batches.js';
+import { makeChatWatcher } from './chat.js';
 import {
   fileUrlToPath, hasDebugPort, launchBrowser, looksLikeVideoUrl, readBrowserPosition, waitForPort,
 } from './browser-time.js';
@@ -562,7 +563,12 @@ export async function runWatchPass(args, deps) {
     const deadline = Date.now() + capSec * 1000;
     let lastSeenPos = cursor;
     let lastMoveAt = Date.now();
+    // 外部聊天框：宿主输入框在阻塞期间不会把话送到这里（实测事后补写），
+    // 但 chat.jsonl 是我们自己 append 的，写盘即时 —— 这是唯一"边等边能听见"的通道。
+    const chatPoll = makeChatWatcher();
     while (Date.now() < deadline) {
+      const chatHit = chatPoll();
+      if (chatHit) { d.chatNow = chatHit; break; }
       // 位置来源：浏览器（准）> 上次测得的 SMTC 快照（凑合能用来判断"到没到"）
       const np = browserPort
         ? await readBrowser({ port: browserPort }).catch(() => null)
@@ -623,6 +629,25 @@ export async function runWatchPass(args, deps) {
       text: `${head}${waitNote}\nplayback has not moved for ${Math.round(idleMs / 60_000)} minutes `
         + `(${mmss(cursor ?? 0)}). Nothing to watch right now - stopping the wait. `
         + 'Call again when they are watching again.',
+      images: [],
+    };
+  }
+
+  // 用户在外部聊天框里说话了：先把这句给他，别等段末
+  if (!d.due && d.chatNow) {
+    return {
+      ok: true,
+      speaking: false,
+      confidence,
+      input,
+      size,
+      cursor,
+      measuredAt,
+      segment: segStart,
+      chat: d.chatNow,
+      text: `${head}${waitNote}\n**用户插话**：「${d.chatNow.text}」\n`
+        + '先回这一句（video_watch({ speakAloud: true, text: "…" }) 可以直接念出来），'
+        + '回完立刻再调一次 wait:true 继续陪看。',
       images: [],
     };
   }
