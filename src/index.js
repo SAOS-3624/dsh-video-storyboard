@@ -16,7 +16,6 @@ import { DETAIL_CHARS, runStoryboard, formatManifest, formatProbe, formatRemoteP
 import { probeVideo } from './probe.js';
 import { formatMatches, matchSegments, recallSegments } from './locate.js';
 import { lookupCell } from './cells.js';
-import { probeHost } from './probe-host.js';
 import { runWatchPass } from './watch-run.js';
 import { isHttpUrl, probeUrl, resolveDirectUrl, resolveInput } from './fetch.js';
 import {
@@ -71,8 +70,21 @@ async function runAndAttach(ctx, options, problems, cellRange) {
 }
 
 export async function apply(ctx) {
-  // 一次性探测宿主能力（拿不拿得到 sessionController / 当前会话 id），写 ~/.dsh/watch-probe.json
-  void probeHost(ctx, { tag: 'apply' });
+  try {
+    return await registerAll(ctx);
+  } catch (e) {
+    // **最坏的情况是插件不能用，不是应用起不来**。
+    // 真实事故：我在 apply 里加了一次 ctx 探测，`Object.keys(ctx)` 在 cordis 上下文上抛错，
+    // 整个 DSH 直接崩在启动阶段（"The application could not start"）。
+    // 从那以后，apply 的异常一律吞掉并记录，交回一个空 disposer。
+    try {
+      ctx?.logger?.error?.(`[dsh-video-storyboard] failed to load: ${e?.stack ?? e}`);
+    } catch { /* 连日志都写不了就算了 */ }
+    return () => {};
+  }
+}
+
+async function registerAll(ctx) {
   const defineTool = await loadDefineTool();
 
   const storyboard = defineTool({
