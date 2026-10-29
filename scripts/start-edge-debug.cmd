@@ -8,13 +8,14 @@ REM
 REM Why 9333 and not 9222: 9222 is the DevTools convention and other Electron
 REM apps (WorkBuddy among them) grab it. Connecting there reads THEIR window.
 REM
-REM Close every Edge window first, otherwise the new flag is ignored and the
-REM already-running instance just opens a tab.
+REM This starts a SEPARATE window with its own profile. Your normal Edge is
+REM untouched and can stay open.
 
 setlocal
 set PORT=%~1
 if "%PORT%"=="" set PORT=9333
 
+set "PROFILE=%USERPROFILE%\.dsh\edge-watch"
 set "EDGE=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
 if not exist "%EDGE%" set "EDGE=%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"
 if not exist "%EDGE%" (
@@ -23,8 +24,13 @@ if not exist "%EDGE%" (
   exit /b 1
 )
 
-echo Starting Edge with --remote-debugging-port=%PORT%
-start "" "%EDGE%" --remote-debugging-port=%PORT%
+REM --user-data-dir is MANDATORY: Chromium refuses to open the DevTools port on
+REM the default profile (a security fix). So this window uses its own profile -
+REM log in to Bilibili once inside it, and it will remember.
+echo Starting a dedicated Edge window on port %PORT%
+echo Profile: %PROFILE%
+if not exist "%PROFILE%" mkdir "%PROFILE%"
+start "" "%EDGE%" --remote-debugging-port=%PORT% --user-data-dir="%PROFILE%" --no-first-run --no-default-browser-check
 
 echo.
 echo Now tell the plugin about the port. Put this in %USERPROFILE%\.dsh\video.json:

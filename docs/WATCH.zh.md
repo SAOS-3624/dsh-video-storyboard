@@ -32,16 +32,23 @@ location.href                                  // 页面地址 = 视频地址
 
 ### 怎么开
 
-**① 关掉所有 Edge 窗口**（重要：不关的话新参数会被已有实例吞掉，只是多开一个标签）
+**必须带 `--user-data-dir`（独立数据目录）** —— 这不是我们的偏好，是 Chromium 的硬限制：
 
-**② 用带端口的参数启动**
+> 用**默认 profile** 启动时，`--remote-debugging-port` **会被静默忽略**，端口不开。
+> 实测：Edge 152 带参数启动、命令行里明明有 `--remote-debugging-port=9333`，
+> 但 9333 一直没人监听；换成独立 `--user-data-dir` 立刻就有 7 个目标。
 
 ```bash
-# Windows
-"C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" --remote-debugging-port=9333
+"C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" ^
+  --remote-debugging-port=9333 ^
+  --user-data-dir="%USERPROFILE%/.dsh/edge-watch"
 ```
 
 或者双击仓库里的 [`scripts/start-edge-debug.cmd`](../scripts/start-edge-debug.cmd)。
+
+**这意味着：带端口的是一个独立窗口，和你平时那个 Edge 不是同一个。**
+它有自己的 profile，所以**B 站要在这个窗口里登录一次**（之后会记住，cookie 存在
+`~/.dsh/edge-watch`）。你平时那个 Edge 可以照常开着，两者互不影响。
 
 **③ 告诉插件端口** —— 写文件（推荐）：
 
@@ -75,14 +82,18 @@ setx DSH_BROWSER_DEBUG_PORT 9333    # ❌ 对 DSH 桌面版无效
 
 环境变量仍然认，只是排在文件后面。
 
-### 3. 为什么"又开了一个 Edge"？
+### 3. 为什么"又开了一个 Edge"，而且没有登录态？
 
-**调试端口只能在启动时打开，运行中无法开启**（这是 Chromium 的安全设计，
-否则任何本机程序都能读你的页面）。而 Edge 不允许同一个 profile 同时开两个实例，
-所以"不想重启现有窗口"就只能用另一个 `--user-data-dir` 开第二个实例——
-看起来像另一个浏览器，而且**没有你的登录态**（公开视频仍可匿名看）。
+两层原因叠在一起：
 
-想要一个窗口搞定，就选"关掉重启"那条路。
+1. **调试端口只能在启动时打开**，运行中无法开启（否则任何本机程序都能读你的页面）。
+2. **默认 profile 不允许开端口**（见上一节），所以必须换一个 `--user-data-dir`。
+
+结论：**开了端口的那个窗口，永远是另一个 profile。** 它没有你平时的登录态，
+需要在这个窗口里单独登录一次（之后会记住）。公开视频不登录也能看。
+
+> 之前文档里写"关掉现有 Edge 再带参数重启就行"，是错的——那样端口不会开。
+> 实测过一次才改过来。
 
 ---
 
