@@ -503,8 +503,9 @@ export function watchToolSpec() {
     parameters: {
       input: {
         type: 'string',
-        required: true,
-        description: 'Local path or Bilibili URL being watched. Same value every call — it keys the session.',
+        description: 'Local path or Bilibili URL being watched. Omit to auto-detect: the plugin reads the title '
+          + 'and duration from the OS media session, looks for a local file with that name, then falls back to '
+          + 'a Bilibili search verified by duration. Only ask the user when both fail.',
       },
       cursor: {
         type: 'number',
@@ -560,7 +561,10 @@ export function watchToolSpec() {
 
 export function validateWatchArgs(args) {
   const problems = [];
-  if (!args?.input || typeof args.input !== 'string') problems.push('input is required');
+  // input 可省略 —— 省略时从系统媒体控件读"在播什么"，再反查源
+  if (args?.input !== undefined && (typeof args.input !== 'string' || args.input.trim() === '')) {
+    problems.push('input must be a non-empty path or URL when given (omit it to auto-detect)');
+  }
   if (args?.cursor !== undefined && !(args.cursor >= 0)) problems.push('cursor must be >= 0');
   if (args?.segment !== undefined && !(args.segment >= 20)) problems.push('segment must be >= 20 seconds');
   if (args?.lead !== undefined && !(args.lead >= 0)) problems.push('lead must be >= 0');
