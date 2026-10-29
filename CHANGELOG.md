@@ -22,6 +22,8 @@
   walked away left them polling forever, holding the session. The idle limit is twice the longest batch
   (a 5-minute batch means 10 minutes), overridable with `idleTimeoutSec`; the wait returns
   `reason: "idle"` with where it stopped, the loop stops with `idle`, and the script exits.
+  The loop only counts it when the position is being read *freshly* and simply not moving — a timeline
+  that cannot be read at all is a different case (ask once, then stop), and must not be masked by this.
 
 - **Finding the video is polled fast, and probing SMTC is not on the same clock.** The wait loop used to
   sleep two seconds and *then* spawn the SMTC python probe, so one check could cost 2 s + the probe's own

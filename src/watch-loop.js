@@ -295,7 +295,10 @@ export function startWatchLoop({
       {
         const estIdle = estimate(loop.anchor, tNow);
         const idleMs = Math.max(60_000, 2 * Number(plan.segment) * 1000);
-        if (Number.isFinite(estIdle.pos)) {
+        // 只在"读得到、而且是刚刷新过的读数"时判空闲：
+        // 读不到（stale/unknown）是另一条路（先问一次，再停表），别在这里抢它的活儿。
+        if (Number.isFinite(estIdle.pos) && estIdle.confidence === 'fresh'
+          && estIdle.why === 'recent-refresh') {
           if (Math.abs(estIdle.pos - (loop.lastIdlePos ?? -1)) >= 0.5) {
             loop.lastIdlePos = estIdle.pos;
             loop.lastMoveAt = tNow;
