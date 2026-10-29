@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DEFAULT_RAMP, describePlan, makePlan } from '../src/batches.js';
+import { DEFAULT_RAMP, describePlan, makePlan, windowFor } from '../src/batches.js';
 
 test('默认阶梯：1 → 2 → 3 → 4 分钟，之后稳定 5 分钟', () => {
   const p = makePlan({});
@@ -57,4 +57,28 @@ test('起步阶段标记：前 4 段算"加长中"', () => {
   assert.equal(p.isRamping(0), true);
   assert.equal(p.isRamping(3), true);
   assert.equal(p.isRamping(4), false);
+});
+
+/* ---------------------------------------------------------------- 余量窗口：按位置算 */
+
+test('windowFor: 从当前位置起，覆盖时长一定 ≥ lookahead', () => {
+  const plan = makePlan({ segment: 300, ramp: [60, 120, 180, 240] });
+  for (const pos of [0, 12, 59, 60, 181, 300, 359, 601, 899]) {
+    const win = windowFor(plan, pos, 300);
+    assert.ok(win.length >= 1);
+    assert.ok(win[0].from <= pos && pos < win[0].to, `pos=${pos} 应从它所在的段开始`);
+    assert.ok(win.at(-1).to - pos >= 300 || pos > 1200, `pos=${pos} 余量只有 ${win.at(-1).to - pos}s`);
+  }
+});
+
+test('windowFor: 段短就多备几段（开头 60s 段要备 3 段才够 5 分钟）', () => {
+  const plan = makePlan({ segment: 300, ramp: [60, 120, 180, 240] });
+  const win = windowFor(plan, 12, 300);
+  assert.equal(win.length, 3, `实得 ${win.map((w) => w.from).join(',')}`);
+  assert.equal(win.at(-1).to, 360, '要覆盖到 06:00');
+});
+
+test('windowFor: lookahead 为 0 就只要当前段', () => {
+  const plan = makePlan({ segment: 300, ramp: [] });
+  assert.equal(windowFor(plan, 100, 0).length, 1);
 });

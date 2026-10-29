@@ -117,3 +117,30 @@ export function depthForBuffer(plan, index, lookahead = 300) {
   }
   return 1 + ahead;
 }
+
+/**
+ * 从**当前位置**往后，要备到哪一段为止，才能保证"已就绪时长 ≥ lookahead"。
+ *
+ * 为什么按位置而不是按段数：段长是变的（1/2/3/4/5 分钟）。按段数算只能在"段首"保证
+ * 5 分钟，用户在段中间时就不够了；按位置算，答案永远是"到 pos + lookahead 为止"。
+ *
+ * 返回的是**连续段列表（含当前段）**：第一个的 from ≤ pos，最后一个的 to ≥ pos + lookahead
+ * （片尾取到最后一段为止）。
+ *
+ * @param {object} plan      makePlan() 的结果
+ * @param {number} pos       当前播放位置（秒）
+ * @param {number} lookahead 余量（秒），0 表示只要当前段
+ */
+export function windowFor(plan, pos, lookahead = 300) {
+  const target = Math.max(0, Number(lookahead) || 0);
+  const out = [];
+  const start = plan.indexAt(pos);
+  for (let i = 0; i < 512; i += 1) {
+    const seg = plan.from(start + i, 1)[0];
+    if (!seg) break;
+    out.push(seg);
+    if (target <= 0) break;
+    if (seg.to - pos >= target) break;
+  }
+  return out;
+}

@@ -15,6 +15,16 @@ import { runWatchPass } from '../src/watch-run.js';
 
 const settle = () => new Promise((r) => setTimeout(r, 30));
 
+/** 等到后台预取真的停下来（builds 连续两次采样不变），避免全量跑时抢 CPU 导致抖动 */
+const settleBuilds = async (get) => {
+  let last = -1;
+  for (let i = 0; i < 40; i += 1) {
+    if (get() === last) return;
+    last = get();
+    await new Promise((r) => setTimeout(r, 25));
+  }
+};
+
 test('显式 prefetch: true 时，抛完当前段会顺手建下一段', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'prefetch-'));
   process.env.DSH_VIDEO_CACHE_DIR = dir;
@@ -119,11 +129,16 @@ test('第二段到点时是缓存命中（这一条守住"到点秒回"）', asy
   process.env.DSH_VIDEO_CACHE_DIR = dir;
   try {
     let builds = 0;
+    const froms = [];
     const cache = new Map();
     const deps = {
       cache,
       saveImage: async () => Buffer.from('x'),
-      runStoryboard: async () => { builds += 1; return { sheets: [{ png: Buffer.from('x'), cells: [] }] }; },
+      runStoryboard: async ({ from }) => {
+        builds += 1;
+        froms.push(Number(from));
+        return { sheets: [{ png: Buffer.from('x'), cells: [] }] };
+      },
       formatManifest: () => 'm',
       probe: async () => ({ ok: true, sessions: [] }),
     };
@@ -135,10 +150,12 @@ test('第二段到点时是缓存命中（这一条守住"到点秒回"）', asy
     });
 
     await runWatchPass({ input: 'c.mp4', cursor: 10, segment: 120, prefetch: true }, p(10));
-    await settle();                      // 预取完成
+    await settleBuilds(() => builds);     // 等后台预取真的停下来
     const before = builds;
     const r2 = await runWatchPass({ input: 'c.mp4', cursor: 125, segment: 120 }, p(125));
-    assert.equal(builds, before, '第二段不该再建一次');
+    // 只看 120 这一段的次数：后台预取可能在返回途中又建了别的段（那是好事，不算重复）
+    assert.equal(froms.filter((f) => f === 120).length, 1, '第二段不该再建一次');
+    assert.ok(builds >= before);
     assert.match(r2.text, /ready/, '应该标成 ready（命中缓存）');
   } finally {
     await rm(dir, { recursive: true, force: true });

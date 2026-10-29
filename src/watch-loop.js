@@ -16,7 +16,7 @@ import {
   MAX_EXTRAPOLATE_MS, estimate, makeAnchor, shouldSpeak, updateAnchor,
 } from './position.js';
 import { startTicker, wakeSession } from './timer.js';
-import { DEFAULT_LOOKAHEAD, describePlan, depthForBuffer, makePlan } from './batches.js';
+import { DEFAULT_LOOKAHEAD, describePlan, makePlan, windowFor } from './batches.js';
 import { readBrowserPosition } from './browser-time.js';
 import { speak as speakAloud, PREFERRED_VOICES } from './tts.js';
 import { consumeLine, dueLine, hasLine, loadLine, pickSession, probePlayback } from './watch.js';
@@ -150,7 +150,10 @@ export function startWatchLoop({
   //   没给      → 按时间（默认 5 分钟），段短就自动多备几段
   const fixedDepth = Number(depth) >= 1 ? Math.min(64, Math.floor(Number(depth))) : null;
   const bufferSec = Math.max(0, Number(lookahead) || 0);
-  const depthAt = (index) => fixedDepth ?? depthForBuffer(plan, index, bufferSec);
+  // 余量窗口：**按位置算**（到 pos + bufferSec 为止），不是按段数
+  const windowAt = (pos) => (fixedDepth
+    ? plan.from(plan.indexAt(pos), fixedDepth)
+    : windowFor(plan, pos, bufferSec));
 
   // **同一个源 + 同一张批次表 → 接着跑，不要重开。**
   // 之前每次工具调用都 stopWatchLoop('restart')，于是：① 已说过的段（spoken）被清空；
@@ -187,7 +190,7 @@ export function startWatchLoop({
         to: Number(s.to),
         sayAt: Number.isFinite(s.sayAt) ? s.sayAt : Number(s.to) - 15,
       }))
-      : plan.from(0, Math.min(64, depthAt(0) + 1)),
+      : plan.from(0, Math.min(64, (fixedDepth ?? windowFor(plan, 0, bufferSec).length) + 1)),
     spoken: [],
     // 余量：fixedDepth 为 null 时按 bufferSec 动态算（段短就多备几段）。
     // 起点那几段只有 1/2/3 分钟，固定"两段"在最前面等于只有 2 分钟余量 —— 不够。
@@ -290,8 +293,9 @@ export function startWatchLoop({
       if (build && !loop.building) {
         const nowEst = estimate(loop.anchor, tNow);
         const idxNow = plan.indexAt(nowEst.pos);
+        const winNow = windowAt(nowEst.pos);
         const next = loop.segments
-          .slice(idxNow, idxNow + depthAt(idxNow))
+          .slice(idxNow, idxNow + winNow.length)
           .find((sg) => !loop.built.has(sg.from));
         if (next) {
           loop.building = (async () => {
@@ -316,7 +320,7 @@ export function startWatchLoop({
         const nowEst = estimate(loop.anchor, tNow);
         const idxNow = plan.indexAt(nowEst.pos);
         // 段列表要比"预取范围"再长一段，否则 slice 拿不到够多的段可建
-        const want = idxNow + depthAt(idxNow) + 1;
+        const want = idxNow + windowAt(nowEst.pos).length + 1;
         let guard = 0;
         while (loop.segments.length < want && guard < 200) {
           const i = loop.segments.length;

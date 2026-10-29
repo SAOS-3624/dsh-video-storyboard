@@ -17,6 +17,17 @@
 
 ### Changed
 
+- **The look-ahead is measured from the playhead, not from the segment start** (`windowFor()`). Counting
+  segments only guarantees five minutes when the user is at a boundary; a 60 s batch plus a 120 s batch
+  is three minutes of coverage no matter how it is counted. The window now extends until
+  `pos + lookahead`, and both the loop and the one-shot path use the same function.
+
+- **The loop contract is in the tool description, not in someone's head.** Five rules — one batch per
+  call, write the lines for the named window immediately, anchor `at` on `frame@`, then block like an npm
+  publish (no timers, no background jobs, do not end the turn), repeat. Plus the speaking side: a line is
+  read only while playback and `at` agree within six seconds, late lines are dropped rather than read out,
+  consumed lines are deleted so a rewind cannot replay them, and two utterances are at least six seconds apart.
+
 - **`wait: true` now builds the look-ahead window before it blocks.** The buffer used to be one
   background segment, kicked off after the current one and (by default) not at all — so the picture
   the user needed at the end of the next batch was still being built when they got there, and there was

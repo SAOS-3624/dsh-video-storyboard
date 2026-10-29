@@ -16,7 +16,7 @@ import {
   sessionKey, WATCH_LEAD, WATCH_SEGMENT,
 } from './watch.js';
 import { describeLatency, recordLatency } from './latency.js';
-import { DEFAULT_LOOKAHEAD, depthForBuffer, makePlan } from './batches.js';
+import { DEFAULT_LOOKAHEAD, makePlan, windowFor } from './batches.js';
 import {
   fileUrlToPath, hasDebugPort, launchBrowser, looksLikeVideoUrl, readBrowserPosition, waitForPort,
 } from './browser-time.js';
@@ -474,8 +474,7 @@ export async function runWatchPass(args, deps) {
   // 两条路径分开处理：
   //   · 本次就要交付（already due）→ 别为了预取拖慢返回，丢后台串行建
   //   · 本次要阻塞等待 → **先把窗口建完再进入等待**，这样醒来时下一批已就绪
-  const needDepth = depthForBuffer(plan, cur.index, lookahead);
-  const winSegs = plan.from(cur.index, needDepth)
+  const winSegs = windowFor(plan, cursor, lookahead)
     .filter((s) => !Number.isFinite(activeSession?.dur) || s.from < activeSession.dur);
   const willWait = !d.due && args.wait === true;
   const pending = winSegs
