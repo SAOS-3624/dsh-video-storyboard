@@ -12,6 +12,12 @@
   already absolute, but the OCR frame picker added `winStart` a second time; a window starting at 600 s
   looked around 1200 s. Detail=high with a windowed read could therefore OCR unrelated frames.
 
+### Internal
+
+- **OCR rule comments now match the thresholds the code enforces** (confidence 0.65, max length gap 50%,
+  LCS coverage 0.6–0.98), and the static-shot e2e fixture invokes `DEFAULT_FFMPEG` instead of a bare
+  `ffmpeg`, so it still runs when DSH's media binary is not on `PATH`.
+
 ## [0.4.4] — 2026-10-29
 
 ### Fixed

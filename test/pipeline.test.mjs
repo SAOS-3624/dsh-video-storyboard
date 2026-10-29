@@ -503,7 +503,7 @@ test('e2e: 极静素材（PPT 型）也能找到那一刀', async (t) => {
   const out = join(dir, 'static.mp4');
   const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');
-  await promisify(execFile)('ffmpeg', [
+  await promisify(execFile)(DEFAULT_FFMPEG, [
     '-hide_banner', '-v', 'error', '-y',
     '-f', 'lavfi', '-i', 'color=c=0x101010:s=320x180:r=25:d=6',
     // 第 2 秒出现一块约 8% 的画面（相当于 PPT 上换了一段字）。

@@ -806,7 +806,7 @@ async function mapPool(items, limit, fn) {
  *   ① 抽 2–3 张**原分辨率**帧做一次全图检测，定出字幕带   （≈3 s）
  *   ② 对若干条台词，只裁那一条带子做识别（不做检测）      （≈0.26 s/条）
  *
- * 只有三条都成立才替换（见 shouldReplace）：OCR 置信度够、长度差不多、相似度落在 0.2–0.9。
+ * 只有三条都成立才替换（见 shouldReplace）：OCR 置信度 ≥ 0.65、长度差 ≤ 50%、ASR 被 OCR 分句覆盖 0.6–0.98。
  * 剩下的情况一律保留 ASR 原文 —— 宁可留一个已知的错字，也不要引入一个来源不明的句子。
  */
 async function correctByOnScreenSubs({

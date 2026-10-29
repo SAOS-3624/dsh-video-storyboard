@@ -38,6 +38,12 @@ test('shouldReplace: 低置信度不认（宁可留 ASR 的已知错字）', () 
   assert.equal(shouldReplace({ asr: '他也忘记', ocr: '也要忘记吗', conf: 0.4 }).reason, 'low-conf');
 });
 
+test('shouldReplace: 置信度边界以 0.65 为准（注释与代码同一条线）', () => {
+  const base = { asr: '他也忘记。', ocr: '你连，也要忘记吗' };
+  assert.equal(shouldReplace({ ...base, conf: 0.65 }).replace, true);
+  assert.equal(shouldReplace({ ...base, conf: 0.64 }).reason, 'low-conf');
+});
+
 test('shouldReplace: 两边本来就一致就不动', () => {
   assert.equal(shouldReplace({ asr: '他说我们要走了', ocr: '他说我们要走了', conf: 0.9 }).reason, 'agree');
 });
