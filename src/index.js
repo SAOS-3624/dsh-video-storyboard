@@ -16,9 +16,11 @@ import { DETAIL_CHARS, runStoryboard, formatManifest, formatProbe, formatRemoteP
 import { probeVideo } from './probe.js';
 import { formatMatches, matchSegments, recallSegments } from './locate.js';
 import { lookupCell } from './cells.js';
+import { runWatchPass } from './watch-run.js';
 import { isHttpUrl, probeUrl, resolveDirectUrl, resolveInput } from './fetch.js';
 import {
-  storyboardToolSpec, zoomToolSpec, probeToolSpec, locateToolSpec, validateToolArgs, validateZoomArgs,
+  storyboardToolSpec, zoomToolSpec, probeToolSpec, locateToolSpec, watchToolSpec,
+  validateToolArgs, validateZoomArgs, validateWatchArgs,
 } from './tool-spec.js';
 
 export const name = 'dsh-video-storyboard';
@@ -169,6 +171,27 @@ export async function apply(ctx) {
     },
   });
 
+  // ---- 一起看：按用户的播放进度一段段往下看（预取 + 到点交付）
+  // 具体逻辑在 watch-run.js，这里只做参数校验 + 把宿主的能力（存图、跑分镜）递进去。
+  const watchCache = new Map();
+  const watch = defineTool({
+    ...watchToolSpec(),
+    async execute(args) {
+      const problems = validateWatchArgs(args);
+      if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
+      const r = await runWatchPass(args, {
+        cache: watchCache,
+        resolveInput,
+        runStoryboard,
+        formatManifest,
+        saveImage: async ({ data, name }) => ctx.attachments.saveImage({
+          data, mediaType: 'image/png', name,
+        }),
+      });
+      return { text: r.text, images: r.images };
+    },
+  });
+
   // 只读容器头，不花图片 token —— 让模型在第一次出图前先知道"多长、按什么粒度读"
   const probe = defineTool({
     ...probeToolSpec(),
@@ -222,6 +245,7 @@ export async function apply(ctx) {
     ctx.tools.register(zoom),
     ctx.tools.register(probe),
     ctx.tools.register(locate),
+    ctx.tools.register(watch),
   ];
   return () => {
     for (const dispose of disposers.reverse()) dispose?.();

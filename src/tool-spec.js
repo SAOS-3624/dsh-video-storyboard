@@ -471,3 +471,101 @@ export function locateToolSpec() {
     },
   };
 }
+
+export const WATCH_TOOL_NAME = 'video_watch';
+
+/**
+ * 一起看：按用户的播放进度一段段往下看。
+ *
+ * 宿主侧定时调它（建议每 15–30 秒一次）：
+ *   - 还没到交付点 → 返回一行状态，几乎不花 token，也不打断
+ *   - 到了交付点（段末前 lead 秒）→ 返回这一段的**格子图 + 清单**
+ * 第一次调它会现场算（8–10 s），之后同一段直接命中，所以用户感知到的延迟是 0。
+ */
+export function watchToolSpec() {
+  return {
+    name: WATCH_TOOL_NAME,
+    description: [
+      'Watch a video together with the user, segment by segment, following their playback position.',
+      '',
+      'Call it repeatedly while the user is watching (every 15–30s). When their position approaches the end of ',
+      'the current segment it returns that segment as a storyboard image plus transcript — i.e. exactly what they ',
+      'just watched. Until then it returns one line of status so you stay quiet and cheap.',
+      '',
+      'The playback position is read from the OS media session (SMTC), so it works for local files in VLC / ',
+      'PotPlayer / Movies & TV and for browser playback, without any player plugin. If it cannot be read, pass ',
+      'cursor yourself — do not guess.',
+      '',
+      'Typical use: video_watch({ input }) every ~20s. When it returns an image, say at most one sentence about ',
+      'what changed; do not retell the plot the user just watched.',
+    ].join('\n'),
+    // 宿主的 parameters 是**扁平 DSL**：每个字段一项，required 写在字段上，不是 JSON Schema 外壳
+    parameters: {
+      input: {
+        type: 'string',
+        required: true,
+        description: 'Local path or Bilibili URL being watched. Same value every call — it keys the session.',
+      },
+      cursor: {
+        type: 'number',
+        description: 'Where the user is, in seconds. Omit to read it from the OS media session (SMTC).',
+      },
+      segment: {
+        type: 'number',
+        description: 'Segment length in seconds (default 120). Shorter = more connected, more tokens.',
+      },
+      lead: {
+        type: 'number',
+        description: 'How many seconds before the segment end to deliver it (default 15).',
+      },
+      cells: {
+        type: 'number',
+        description: 'Cells per segment sheet (default 5). Each segment is one image.',
+      },
+      title: {
+        type: 'string',
+        description: 'Video title, used to pick the right media session when several are playing.',
+      },
+      transcript: {
+        type: 'string',
+        enum: ['auto', 'off'],
+        description: 'auto (default) transcribes each segment; off skips speech entirely.',
+      },
+      cookies: { type: 'string', description: 'cookies.txt path for login-gated sources.' },
+      allowAnonymous: { type: 'boolean', description: 'Allow anonymous fetches for links.' },
+    },
+    // 和 zoom 同一套输出形态：图片在前、文本在后。没有这一段工具注册不起来。
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string', required: true },
+          images: { type: 'array', required: true, items: { type: 'json' } },
+        },
+      },
+      render(args, value) {
+        return [
+          ...value.images.map((attachment) => ({ type: 'image', attachment })),
+          { type: 'text', text: value.text },
+        ];
+      },
+    },
+    timeoutMs: 300_000,
+    isConcurrencySafe() {
+      return false;    // 读同一个会话的指针，不能并发
+    },
+  };
+}
+
+export function validateWatchArgs(args) {
+  const problems = [];
+  if (!args?.input || typeof args.input !== 'string') problems.push('input is required');
+  if (args?.cursor !== undefined && !(args.cursor >= 0)) problems.push('cursor must be >= 0');
+  if (args?.segment !== undefined && !(args.segment >= 20)) problems.push('segment must be >= 20 seconds');
+  if (args?.lead !== undefined && !(args.lead >= 0)) problems.push('lead must be >= 0');
+  if (args?.cells !== undefined && (!Number.isInteger(args.cells) || args.cells < 1 || args.cells > 9)) {
+    problems.push('cells must be an integer 1..9');
+  }
+  return problems;
+}
