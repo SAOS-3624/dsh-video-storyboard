@@ -35,7 +35,8 @@ let launchTried = false;
  * 为什么必须插件来起：外部工具进程派生出的浏览器会随它的 Job Object 被回收。
  */
 async function ensureWatchBrowser(port) {
-  if (!port || launchTried) return false;
+  // 小于 1024 是特权端口，起不来的；测试里也常用 1 这类假端口
+  if (!port || port < 1024 || launchTried) return false;
   if (await hasDebugPort({ port })) return true;
   launchTried = true;
   const r = launchBrowser({ port });
@@ -315,6 +316,40 @@ export async function runWatchPass(args, deps) {
     + ` · ${Math.max(0, d.remaining)}s left`
     + (builtMs ? ` · built in ${(builtMs / 1000).toFixed(1)}s` : ' · ready');
 
+  // ---- 2.5 阻塞等待（wait: true）
+  // 用户的思路：与其"结束这轮、等定时器把我叫醒"，不如**让这次调用一直挂着**，
+  // 就像等 npm 上传结果一样 —— 到点了工具自己返回，对话根本没断过。
+  // 好处：完全不依赖 sessionController.prompt（那个能不能用还没验证过）。
+  // 代价：等待期间这个会话被占着，用户插话要等它返回。
+  let waitedSec = 0;
+  if (!d.due && args.wait === true) {
+    const capSec = Math.min(600, Math.max(5, Number(args.maxWaitSec) || 180));
+    const deadline = Date.now() + capSec * 1000;
+    while (Date.now() < deadline) {
+      // 位置来源：浏览器（准）> 上次测得的 SMTC 快照（凑合能用来判断"到没到"）
+      const np = browserPort
+        ? await readBrowser({ port: browserPort }).catch(() => null)
+        : null;
+      const posNow = np ? np.pos : (Number.isFinite(cursor) ? cursor + waitedSec : null);
+      if (posNow !== null) {
+        cursor = posNow;
+        waitedSec = +(waitedSec + 2).toFixed(1);
+        const nd = deliveryState({ cursor, segment: segStart, size, lead });
+        if (nd.due) {
+          d.due = true;
+          d.remaining = nd.remaining;
+          break;
+        }
+        if (cursor < segStart) break;            // 用户倒回到上一段去了，别干等
+        if (np?.paused) break;                   // 暂停了就别挂着了，让用户能说话
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+      if (np === null) waitedSec += 2;           // 没有浏览器读数时按墙钟推进
+    }
+  }
+
+  const waitNote = waitedSec > 0 ? ` · waited ${waitedSec}s` : '';
+
   // ---- 3. 还没到交付点：保持安静
   if (!d.due) {
     return {
@@ -327,7 +362,7 @@ export async function runWatchPass(args, deps) {
       cursor,
       measuredAt,
       segment: segStart,
-      text: `${head}\nnot yet — keep watching. I will speak near ${mmss(segStart + size - lead)}.`
+      text: `${head}${waitNote}\nnot yet — keep watching. I will speak near ${mmss(segStart + size - lead)}.`
         + await latencyNote() + nextHint,
       images: [],
     };
@@ -382,7 +417,7 @@ export async function runWatchPass(args, deps) {
     cursor,
     measuredAt,
     segment: segStart,
-    text: `${head}\n${guidance}${await latencyNote()}${nextHint}\n\n${entry.manifest}`,
+    text: `${head}${waitNote}\n${guidance}${await latencyNote()}${nextHint}\n\n${entry.manifest}`,
     images,
   };
 }

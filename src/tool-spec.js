@@ -173,7 +173,7 @@ export function storyboardToolSpec() {
         ];
       },
     },
-    timeoutMs: 900_000,
+    timeoutMs: 300_000,
     isConcurrencySafe() {
       return true;
     },
@@ -535,6 +535,16 @@ export function watchToolSpec() {
         type: 'boolean',
         description: 'Stop the background watch loop (it wakes the session on its own). Idempotent.',
       },
+      wait: {
+        type: 'boolean',
+        description: 'Block this call until the batch is actually due, then return the segment. This is the '
+          + 'alternative to being woken by a timer: the turn stays open, the tool returns by itself when it is '
+          + 'time to speak (default false).',
+      },
+      maxWaitSec: {
+        type: 'number',
+        description: 'Upper bound for wait: how long this call may block (default 180, max 600).',
+      },
       testWake: {
         type: 'boolean',
         description: 'Try to wake this session once, right now, and report exactly what happened '
@@ -599,7 +609,8 @@ export function watchToolSpec() {
         ];
       },
     },
-    timeoutMs: 300_000,
+    // 阻塞等待最长 600 s，工具超时必须比它宽，否则会被宿主先掐断
+    timeoutMs: 900_000,
     isConcurrencySafe() {
       return false;    // 读同一个会话的指针，不能并发
     },
