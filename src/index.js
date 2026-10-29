@@ -16,6 +16,7 @@ import { DETAIL_CHARS, runStoryboard, formatManifest, formatProbe, formatRemoteP
 import { probeVideo } from './probe.js';
 import { formatMatches, matchSegments, recallSegments } from './locate.js';
 import { lookupCell } from './cells.js';
+import { probeHost } from './probe-host.js';
 import { runWatchPass } from './watch-run.js';
 import { isHttpUrl, probeUrl, resolveDirectUrl, resolveInput } from './fetch.js';
 import {
@@ -70,6 +71,8 @@ async function runAndAttach(ctx, options, problems, cellRange) {
 }
 
 export async function apply(ctx) {
+  // 一次性探测宿主能力（拿不拿得到 sessionController / 当前会话 id），写 ~/.dsh/watch-probe.json
+  void probeHost(ctx, { tag: 'apply' });
   const defineTool = await loadDefineTool();
 
   const storyboard = defineTool({
