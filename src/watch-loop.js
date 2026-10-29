@@ -91,6 +91,9 @@ export function startWatchLoop({
   const now = deps.now ?? (() => Date.now());
   const ticker = deps.ticker ?? startTicker;
   const readLatency = deps.loadLatency ?? loadLatency;
+  // 读进度的间隔可注入：真机 15 秒够了（起一次 python ≈1 s）；
+  // 但仿真用倍速跑，倍速越高越要读得勤，否则一整段会在两次采样之间被跳过。
+  const probeEveryMs = deps.probeEveryMs ?? PROBE_EVERY_MS;
   if (!sessionId) return { ok: false, reason: 'no-session-id' };
   if (!Array.isArray(segments) || segments.length === 0) return { ok: false, reason: 'no-segments' };
 
@@ -127,7 +130,7 @@ export function startWatchLoop({
     tick: async () => {
       const tNow = now();
 
-      if (tNow - loop.lastProbeAt >= PROBE_EVERY_MS) {
+      if (tNow - loop.lastProbeAt >= probeEveryMs) {
         loop.lastProbeAt = tNow;
         const p = await probe();
         const s = p.ok ? pickSession(p.sessions ?? [], { input: loop.input }) : null;
