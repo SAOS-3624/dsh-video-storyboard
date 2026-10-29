@@ -24,7 +24,7 @@ const DEFAULT_PORT = 9333;
 
 import { spawn } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -241,11 +241,18 @@ export function launchBrowser({
   const profile = profileDir ?? join(homedir(), '.dsh', 'edge-watch');
   if (!existsSync(edge)) return { ok: false, reason: 'edge-not-found' };
   mkdirSync(profile, { recursive: true });
+  // **清掉上次的会话**：用独立 profile 冷启动时，Edge 会自动恢复上次开的标签页，
+  // 于是旧视频页 + 陪看页每启动一次就多一份，标签栏越积越乱。
+  // 这里清的是 session 文件，不影响登录态（Cookie / Local Storage 都在别处）。
+  for (const sub of ['Sessions', join('Default', 'Sessions')]) {
+    try { rmSync(join(profile, sub), { recursive: true, force: true }); } catch { /* 删不掉就算了 */ }
+  }
   const args = [
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
     '--no-first-run',
     '--no-default-browser-check',
+    '--no-restore-last-session',
     ...(url ? [url] : []),
   ];
 
