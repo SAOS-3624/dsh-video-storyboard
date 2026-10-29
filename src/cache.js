@@ -15,7 +15,10 @@ import { mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promi
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-export const CACHE_VERSION = 1;
+// 缓存版本：**切点判定逻辑一变就要加 1** —— 版本进了 key，旧条目自动失效，不需要用户手清。
+// 1 → 2：0.4.3 改了极静素材的相对基线判定（spikeCuts）、平铺格与 suppressClose 的用法，
+// 旧缓存里的 cuts 与现在的算法不是一回事，留着会让"改了却看不出变化"。
+export const CACHE_VERSION = 2;
 export const MAX_CACHE_BYTES = 50 * 1024 * 1024;
 
 export function cacheDir(env = process.env) {
