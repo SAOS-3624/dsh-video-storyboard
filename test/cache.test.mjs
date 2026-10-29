@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { cacheKey, pruneCache, readCache, withCache, writeCache } from '../src/cache.js';
+import { CACHE_VERSION, cacheKey, pruneCache, readCache, withCache, writeCache } from '../src/cache.js';
 
 const withTemp = async (fn) => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-cache-'));
@@ -37,7 +37,8 @@ test('读写往返', async () => {
     await writeCache('abc', { value: { cuts: 3 } }, { dir });
     const hit = await readCache('abc', { dir });
     assert.deepEqual(hit.value, { cuts: 3 });
-    assert.equal(hit.v, 1);
+    // 别写死版本号：版本是用来失效旧缓存的，断言成常量会让每次升版都要改测试
+    assert.equal(hit.v, CACHE_VERSION);
   });
 });
 
