@@ -17,6 +17,18 @@
 
 ### Fixed
 
+- **Lines are pinned to a moment (`at`), and fired by playback position.** The script used to speak
+  one line every `speakEvery` *wall-clock* seconds, with lines keyed to a 60-second batch: four lines
+  written for 02:00–03:00 were all spent by 02:36, so the voice ran half a minute ahead of the picture
+  and the last line of the batch was never reached at all (observed in a real run: 02:26 / 02:38 /
+  02:50 / 03:03 …). Each line can now carry `at`, the second it describes; the loop asks "what is due
+  at *this position*" instead of "has N seconds passed". Pausing pauses the script, seeking moves it.
+  A line that is more than 10 seconds late is discarded rather than spoken over the wrong shot.
+
+- **`speakEvery` no longer doubles as the TTS cadence**, and a TTS loop no longer wakes the model at
+  batch boundaries: if nothing is due, the script stays quiet — deciding that there should be more words
+  is the model's job, not the clock's.
+
 - **The look-ahead is a duration now, not a segment count.** "Keep two batches ready" means two minutes
   at the start of the ramp, where batches are 1/2/3 minutes — shorter than one slow build, so the buffer
   was effectively nothing right when it mattered. `lookahead` (default 300 s) states how much *ready video*

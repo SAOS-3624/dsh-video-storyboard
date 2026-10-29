@@ -22,7 +22,9 @@ import {
 } from './browser-time.js';
 import { estimate, makeAnchor } from './position.js';
 import { resolvePlayingSource } from './resolve-playing.js';
-import { consumeLine, hasLine, saveLines } from './watch.js';
+import { boardOptions, charsForDetail } from './board.js';
+import { mmss } from './time.js';
+import { consumeLine, dueLine, hasLine, saveLines } from './watch.js';
 
 // 模块级：latencyNote() 需要知道"这一轮从什么时候开始"
 let tStartForNote = Date.now();
@@ -55,6 +57,13 @@ export function makeBuilder({ input, args = {}, runStoryboard, formatManifest, c
 }
 
 /**
+ * 陪看的清单总预算（字符）。**每格多少字**由 detail 决定（和 storyboard 同一个口径，
+ * 见 board.js 的 DETAIL_CHARS），这里只决定"整份最多读多少"——
+ * 陪看是反复调用，一次塞两万字会把上下文吃光。
+ */
+const WATCH_MANIFEST_BUDGET = { low: 1600, med: 2600, high: 6000 };
+
+/**
  * 建一段：分镜 + 清单，放进缓存。
  * 抽出来是为了"当前段"和"下一段的预取"用同一条代码路径（预取跑偏了就是白烧 CPU）。
  */
@@ -63,32 +72,20 @@ async function buildSegment({ input, segStart, size, args, runStoryboard, format
   const hit = cache.get(key);
   if (hit?.png) return hit;
 
+  const detail = args.detail ?? 'med';
   const r = await runStoryboard({
-    input,
-    from: segStart,
-    to: segStart + size,
-    cells: Number(args.cells) > 0 ? Number(args.cells) : 5,
-    sheets: 1,
-    pick: 'sharp',
-    burn: 'index',
-    minGap: 0.5,
-    // 爆点细扫**保留**（默认就是 true）。我一度把它关了"省时间"，但那是测错了：
-    // 9.2s vs 5.0s 的差来自 ASR 冷启动；交替复跑两次都是 4.5–4.6s，几乎没差，
-    // 而它多找到 3 刀（40 vs 37），直接影响快闪段落摊不摊成 2×2/3×3。
-    transcript: args.transcript ?? 'auto',
+    // 参数默认值只有一处定义（src/board.js）：陪看以前自己抄了一份，
+    // 于是 storyboard 有 detail、陪看没有 —— 同一个"仔细程度"在两条路上是两个值。
+    ...boardOptions({ ...args, input, from: segStart, to: segStart + size }, { kind: 'watch' }),
     // 陪看是持续调用：让本地 ASR 活过整段，别每段都冷启动一次（实测每段多 5 s）
     asrIdleMs: size * 1000 + 30_000,
-    adaptive: false,
-    // **cookies 必须塞进 fetchOptions**：runStoryboard 没有顶层 cookies 参数，
-    // 传顶层等于没传 —— 实测表现为 auth: 'anonymous'、只能拿 360p、也没有站点字幕。
-    fetchOptions: {
-      ...(args.cookies ? { cookies: args.cookies } : {}),
-      ...(args.allowAnonymous === true ? { allowAnonymous: true } : {}),
-    },
   });
   const entry = {
     png: r.sheets?.[0]?.png ?? null,
-    manifest: formatManifest(r, { maxChars: 2600, maxCellChars: 80 }),
+    manifest: formatManifest(r, {
+      maxChars: WATCH_MANIFEST_BUDGET[detail] ?? WATCH_MANIFEST_BUDGET.med,
+      maxCellChars: charsForDetail(detail),
+    }),
     cells: r.sheets?.[0]?.cells?.length ?? 0,
   };
   cache.set(key, entry);
@@ -102,11 +99,6 @@ async function latencyNote() {
   // 标定完成后就不再占 token 了
   return st.samples > 3 ? '' : `\n${describeLatency(st)}`;
 }
-
-const mmss = (sec) => {
-  const s = Math.max(0, Math.round(sec));
-  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-};
 
 /**
  * @param {object} args  工具参数
@@ -339,7 +331,13 @@ export async function runWatchPass(args, deps) {
     const pos = b?.pos ?? null;
     const plan2 = plan;
     const seg = pos !== null ? plan2.segmentAt(pos) : { from: 0, to: 0 };
-    const line = await consumeLine(input, seg.from).catch(() => null);
+    // 先问"到点了没有"：带 at 的台词只在它的时刻之后才发，否则同样的词会在段首提前跑出来。
+    // **这里不做迟到作废**（lateSec: Infinity）：逐句模式下是模型主动来要下一句，
+    // 位置停着不动也该把欠着的那句给它，而不是因为"晚了 30 秒"就丢掉。
+    const line = (Number.isFinite(pos)
+      ? await dueLine(input, pos, { size: seg.size ?? 0, lateSec: Infinity }).catch(() => null)
+      : null)
+      ?? await consumeLine(input, seg.from).catch(() => null);
 
     // **必须重新读一次状态再写**：consumeLine 内部已经保存过（把队列推进了一格），
     // 如果拿上面那份旧 st 覆盖回去，队列会退回原样 —— 表现就是同一句被反复返回。

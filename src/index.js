@@ -12,7 +12,8 @@
  *  - saveImage 要的是**真正编码后的字节**（PNG/JPEG），不是裸 RGB —— 它会解码校验
  */
 
-import { DETAIL_CHARS, runStoryboard, formatManifest, formatProbe, formatRemoteProbe } from './pipeline.js';
+import { runStoryboard, formatForDetail, formatManifest, formatProbe, formatRemoteProbe } from './pipeline.js';
+import { boardOptions } from './board.js';
 import { probeVideo } from './probe.js';
 import { formatMatches, matchSegments, recallSegments } from './locate.js';
 import { lookupCell } from './cells.js';
@@ -54,10 +55,11 @@ async function loadDefineTool() {
   throw new Error('cannot resolve @deepseek-ai/dsh-tools (set DSH_TOOLS_PATH for local dev)');
 }
 
-/** 跑一次管线，把每张图提交成附件，返回规范值 { images, text } */
-async function runAndAttach(ctx, options, problems, cellRange) {
-  if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
-  const result = await runStoryboard(options);
+/**
+ * 把每张分镜图提交成附件。storyboard 和 zoom 各写过一遍这段循环，
+ * 收成一处，免得以后改保存参数（mediaType / 命名）只改到一边。
+ */
+async function attachSheetImages(ctx, result) {
   const images = [];
   for (const sheet of result.sheets) {
     images.push(await ctx.attachments.saveImage({
@@ -66,14 +68,18 @@ async function runAndAttach(ctx, options, problems, cellRange) {
       name: `storyboard-${sheet.sheet}.png`,
     }));
   }
+  return images;
+}
+
+/** 跑一次管线，把每张图提交成附件，返回规范值 { images, text } */
+async function runAndAttach(ctx, options, problems, cellRange) {
+  if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
+  const result = await runStoryboard(options);
   // 预算：单次工具结果有上限，超出会被宿主折进磁盘（模型常常不会去读）。
   // 24k 字符 ≈ 一张 16 格图的完整清单还有余量；超了就在 cell 边界截断并给出续读方式。
   return {
-    images,
-    text: formatManifest(result, {
-      cellRange,
-      maxCellChars: DETAIL_CHARS[options.detail] ?? DETAIL_CHARS.med,
-    }),
+    images: await attachSheetImages(ctx, result),
+    text: formatForDetail(result, { detail: options.detail, cellRange }),
   };
 }
 
@@ -99,32 +105,8 @@ async function registerAll(ctx) {
 
   const storyboard = defineTool({
     ...storyboardToolSpec(),
-    execute: (args) => runAndAttach(ctx, {
-      input: args.input,
-      from: args.from ?? 0,
-      to: args.to ?? 0,
-      cells: args.cells ?? 0,
-      sheets: args.sheets ?? 0,
-      pick: args.pick ?? 'sharp',
-      burn: args.burn ?? 'index',
-      minGap: args.minGap ?? 1.2,
-      transcript: args.transcript ?? 'auto',
-      transcriptFile: args.transcriptFile,
-      // 这一次的热词（覆盖 asr.json）。学科不对时的负偏置，比不传更糟。
-      ...(typeof args.hotwords === 'string' ? { hotwords: args.hotwords } : {}),
-      sourceHash: args.sourceHash === true,
-      textOnly: args.textOnly === true,
-      detail: args.detail ?? 'med',
-      // detail=high 表示"要能引用原话"，这时才值得用硬字幕校正（本地 OCR，不花 token）
-      ocr: args.ocr === true || (args.ocr !== false && (args.detail ?? 'med') === 'high'),
-      ...(args.planThresholds && typeof args.planThresholds === 'object'
-        ? { planThresholds: args.planThresholds } : {}),
-      fetchOptions: {
-        cookies: args.cookies,
-        allowAnonymous: args.allowAnonymous === true,
-        scanHeight: args.scanHeight ?? 360,
-      },
-    }, validateToolArgs(args), args.cellRange ?? null),
+    execute: (args) => runAndAttach(ctx, boardOptions(args, { kind: 'board' }),
+      validateToolArgs(args), args.cellRange ?? null),
   });
 
   const zoom = defineTool({
@@ -146,14 +128,11 @@ async function registerAll(ctx) {
         from = hit.from;
         to = hit.to;
       }
-      const fetchOptions = {
-        cookies: args.cookies,
-        allowAnonymous: args.allowAnonymous === true,
-        // zoom 需要本地那份低清做兜底，所以这里也要提供落盘清晰度
-        scanHeight: 360,
-        zoomHeight: args.zoomHeight ?? 1080,
-      };
-      // 链接模式下先设法拿到高清直链：stroryboard 那次 `-J` 通常已经记下了，
+      // zoom 的参数只在一处定义（src/board.js）。这里先拿它的 fetchOptions 去解析直链，
+      // 免得"扫描清晰度/zoom 清晰度"在解析和取帧两处出现两个值。
+      const opts = boardOptions({ ...args, from, to }, { kind: 'zoom' });
+      const fetchOptions = opts.fetchOptions;
+      // 链接模式下先设法拿到高清直链：storyboard 那次 `-J` 通常已经记下了，
       // 这里多半是内存命中；实在没有才真的再解析一次（2.4 s）。
       let frameSource = null;
       if (isHttpUrl(args.input)) {
@@ -165,34 +144,11 @@ async function registerAll(ctx) {
           /* 直链拿不到就退回本地低清：糊一点，但整次调用不该失败 */
         }
       }
-      const result = await runStoryboard({
-        input: args.input,
-        from,
-        to,
-        cells: args.cells ?? 6,
-        sheets: 1,
-        // **必须显式传**：runStoryboard 的默认值是 1.2，不传就永远是 1.2 ——
-        // zoom 恰恰是最需要小间隔的场合（把半秒镜头拆成独立格）。真实反馈：
-        // `video_zoom({ minGap: 0.4 })` 要 4 格只出 2 格，而 tool-spec 声明了、validate 也校验了，中间断了。
-        minGap: args.minGap ?? 1.2,
-        pick: args.pick ?? 'sharp',
-        burn: args.burn ?? 'index',
-        transcript: args.transcript ?? 'auto',
-        sourceHash: args.sourceHash === true,
-        // 近距离重看时不再按密度挪格：窗口本来就短，均分更好预测
-        adaptive: false,
-        frameSource,
-        fetchOptions,
-      });
-      const images = [];
-      for (const sheet of result.sheets) {
-        images.push(await ctx.attachments.saveImage({
-          data: sheet.png,
-          mediaType: 'image/png',
-          name: `storyboard-${sheet.sheet}.png`,
-        }));
-      }
-      return { images, text: formatManifest(result, { maxCellChars: DETAIL_CHARS.med }) };
+      const result = await runStoryboard({ ...opts, frameSource });
+      return {
+        images: await attachSheetImages(ctx, result),
+        text: formatForDetail(result, { detail: args.detail ?? 'med' }),
+      };
     },
   });
 

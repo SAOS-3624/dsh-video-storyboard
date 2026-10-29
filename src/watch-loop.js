@@ -19,9 +19,8 @@ import { startTicker, wakeSession } from './timer.js';
 import { describePlan, depthForBuffer, makePlan } from './batches.js';
 import { readBrowserPosition } from './browser-time.js';
 import { speak as speakAloud, PREFERRED_VOICES } from './tts.js';
-import { consumeLine, hasLine, loadLine, pickSession, probePlayback } from './watch.js';
-
-const mmss = (s) => `${String(Math.floor(Math.max(0, s) / 60)).padStart(2, '0')}:${String(Math.round(Math.max(0, s) % 60)).padStart(2, '0')}`;
+import { consumeLine, dueLine, hasLine, loadLine, pickSession, probePlayback } from './watch.js';
+import { mmss } from './time.js';
 
 const TICK_MS = 2000;
 const PROBE_EVERY_MS = 15_000;
@@ -356,28 +355,35 @@ export function startWatchLoop({
         }
       }
 
+      // ---- TTS：到点念预设台词，不叫醒模型（0 token、0 等待）。
+      // **由播放位置触发，不由墙钟**：位置停在 03:12 就一直等着，不会自己往下念；
+      // 位置到哪一句的 at，就念哪一句。这里不看 speakEvery —— 那是"多久叫一次模型"，
+      // 和"什么时候该念这句话"是两件事，混在一起就是今晚"比画面快很多"的原因。
+      if (loop.tts?.enabled) {
+        const est = estimate(loop.anchor, tNow);
+        if (est.why !== 'paused' && Number.isFinite(est.pos)) {
+          const segNow = plan.segmentAt(est.pos);
+          // eslint-disable-next-line no-await-in-loop
+          const line = await dueLine(loop.input, est.pos, { size: segNow.size }).catch(() => null);
+          if (line) {
+            void speakAloud(line, { voice: loop.tts.voice, rate: loop.tts.rate });
+            loop.spokenAloud += 1;
+            note(`tts ${Math.round(est.pos)}s: ${line.slice(0, 20)}…`);
+            loop.lastReason = 'spoke';
+            return;          // 念了就不叫醒模型
+          }
+        }
+      }
+
       // ---- 高频模式：不受批次边界限制，每 speakEvery 秒叫一次（测试/密集解说用）
-      if (loop.speakEvery > 0) {
+      // TTS 开着的时候不用它：念稿的节奏由每句的 at 决定，不由这个间隔决定。
+      if (loop.speakEvery > 0 && !loop.tts?.enabled) {
         const est = estimate(loop.anchor, tNow);
         const gap = tNow - (loop.lastSpeakAt || 0);
         const within = Number.isFinite(loop.dur) ? est.pos < loop.dur - 1 : true;
         if (gap >= loop.speakEvery * 1000 && within && est.why !== 'paused') {
           loop.lastSpeakAt = tNow;
           const seg = plan.segmentAt(est.pos);
-          // **TTS 模式**：到点直接念预设台词，完全不叫醒模型（0 token、0 等待）
-          if (loop.tts?.enabled) {
-            const line = await consumeLine(loop.input, seg.from).catch(() => null);
-            if (line) {
-              void speakAloud(line, { voice: loop.tts.voice, rate: loop.tts.rate });
-              loop.spokenAloud += 1;
-              note(`tts ${Math.round(est.pos)}s: ${line.slice(0, 20)}…`);
-            } else {
-              // 没词就**安静地跳过**：补词是 refillBelow 的职责，
-              // 让它每 10 秒叫一次模型，等于把省下来的都还回去。
-              note(`tts ${Math.round(est.pos)}s: no line, skipped`);
-            }
-            return;
-          }
           const w = await wake(loop.ctx, {
             sessionId: loop.sessionId,
             text: `[一起看·高频] 现在 ${mmss(est.pos)}（这一段 ${mmss(seg.from)}–${mmss(seg.to)}）。`
@@ -426,20 +432,21 @@ export function startWatchLoop({
       loop.askedAt = 0;
 
       if (!r.speak) return;
-
-      loop.spoken.push(r.segment);
       const seg = loop.segments.find((x) => x.from === r.segment);
-      // 有预设台词就直接给稿子：省掉"现场想"的那 2–4 秒，也省一次看图的 token
-      // **念完就删**：取和删放一起，避免"取到了但没删"导致重看时同一句说两遍
-      const line = await consumeLine(loop.input, r.segment).catch(() => loadLine(loop.input, r.segment).catch(() => null));
-      // **TTS 模式**：有预设台词就直接念出来，不叫醒模型。
-      // 模型只在"没词可说、或者想补充自己观察"的时候才被叫——那才是它该花 token 的地方。
-      if (loop.tts?.enabled && line) {
-        void speakAloud(line, { voice: loop.tts.voice, rate: loop.tts.rate });
-        loop.spokenAloud += 1;
-        note(`tts ${r.segment}s: ${line.slice(0, 20)}…`);
+
+      // TTS 模式：段边界**不叫醒模型**。到点没说，就是没有到点的词 ——
+      // 该不该补词由模型自己那侧（或显式开着的 refillBelow）决定，不是这里替它决定。
+      if (loop.tts?.enabled) {
+        note(`tts: ${mmss(seg.from)} 到了边界但没有到点的词，保持安静`);
+        loop.lastReason = 'tts-no-due-line';
         return;
       }
+
+      loop.spoken.push(r.segment);
+      // 有预设台词就直接给稿子：省掉"现场想"的那 2–4 秒，也省一次看图的 token
+      // **念完就删**：取和删放一起，避免"取到了但没删"导致重看时同一句说两遍
+      const line = await consumeLine(loop.input, r.segment)
+        .catch(() => loadLine(loop.input, r.segment).catch(() => null));
       const head = `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 该说话了`
         + `（用户大约看到 ${mmss(r.pos)}${r.confidence === 'extrapolated' ? '，按墙钟推算' : ''}）。`;
       const text = line

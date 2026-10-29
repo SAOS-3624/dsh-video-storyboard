@@ -168,10 +168,32 @@ export function deliveryState({ cursor, segment, size = WATCH_SEGMENT, lead = WA
 /* ------------------------------------------------------------ 预设台词 */
 
 /**
- * 预设台词：agent 提前写好"这一段该说的一句"，到点直接念，不用现场想。
+ * 把槽位规范成 `[{ text, at }]`。兼容三种历史写法：
+ *   字符串队列（最早的格式） / 单句 `{ text }` / 带 `at` 的队列。
  *
- * 为什么存在：预取解决了"建图的十秒"，但"想说什么"还要模型跑一轮（2–4 秒）。
- * 提前写好就没有这一段延迟，而且**窗口只有 5 分钟**——中途不看了最多白写 2–3 段。
+ * 注意：只认**队列项**上的 `at`（= 该念的时刻）。槽位上那个 `at` 是"什么时候写的"，
+ * 拿它当念的时刻，整句会被推到几百年后。
+ */
+function slotItems(slot) {
+  if (!slot) return [];
+  const raw = Array.isArray(slot.queue) ? slot.queue : (slot.text ? [{ text: slot.text }] : []);
+  return raw
+    .map((it) => (typeof it === 'string'
+      ? { text: it, at: null }
+      : { text: String(it?.text ?? ''), at: Number.isFinite(it?.at) ? Number(it.at) : null }))
+    .filter((x) => x.text);
+}
+
+const writeSlot = (lines, from, items) => {
+  if (items.length > 0) lines[from] = { queue: items, savedAt: Date.now() };
+  else delete lines[from];
+};
+
+/**
+ * 预设台词：agent 提前写好，到点直接念，不用现场想。
+ *
+ * 每条可以带 `at`（绝对秒，位置轴上的时刻）：**到那个位置就念**，不由桶边界决定，
+ * 也不由墙钟决定。不带 `at` 就按原来的口径——进入这一段时念。
  */
 export async function saveLines(input, lines, { env = process.env } = {}) {
   if (!Array.isArray(lines) || lines.length === 0) return 0;
@@ -187,15 +209,18 @@ export async function saveLines(input, lines, { env = process.env } = {}) {
     const text = String(l?.text ?? '').trim();
     if (!Number.isFinite(from) || !text) continue;
     if (!grouped.has(from)) grouped.set(from, []);
-    grouped.get(from).push(text.slice(0, 300));
+    const at = Number(l?.at);
+    grouped.get(from).push({
+      text: text.slice(0, 300),
+      ...(Number.isFinite(at) ? { at } : {}),
+    });
   }
 
   let n = 0;
-  for (const [from, texts] of grouped) {
-    prev[from] = texts.length > 1
-      ? { queue: texts, at: Date.now() }
-      : { text: texts[0], at: Date.now() };
-    n += texts.length;
+  for (const [from, items] of grouped) {
+    // 一律存成队列：单句和连说几句走同一条读路径，少一个分支就少一类 bug
+    prev[from] = { queue: items, savedAt: Date.now() };
+    n += items.length;
   }
   st[sk] = { ...(st[sk] ?? {}), lines: prev, at: Date.now() };
   await saveWatch(st, env);
@@ -206,7 +231,7 @@ export async function saveLines(input, lines, { env = process.env } = {}) {
 export async function loadLine(input, from, { env = process.env } = {}) {
   const st = await loadWatch(env);
   const hit = st[sessionKey(input)]?.lines?.[Number(from)];
-  return hit?.text ?? null;
+  return slotItems(hit)[0]?.text ?? null;
 }
 
 /**
@@ -219,41 +244,98 @@ export async function consumeLine(input, from, { env = process.env } = {}) {
   const st = await loadWatch(env);
   const sk = sessionKey(input);
   const lines = st[sk]?.lines;
-  if (!lines || !lines[Number(from)]) return null;
-  const slot = lines[Number(from)];
-  let text = null;
-  if (Array.isArray(slot.queue) && slot.queue.length > 0) {
-    // 队列里有就取第一条，取完还有就留着，取完最后一条才删
-    text = slot.queue[0];
-    if (slot.queue.length > 1) {
-      lines[Number(from)] = { queue: slot.queue.slice(1), at: Date.now() };
-    } else {
-      delete lines[Number(from)];
-    }
-  } else {
-    text = slot.text ?? null;
-    delete lines[Number(from)];
-  }
+  if (!lines) return null;
+  const key = Number(from);
+  const items = slotItems(lines[key]);
+  if (items.length === 0) return null;
+  const [hit, ...rest] = items;
+  writeSlot(lines, key, rest);
   st[sk] = { ...(st[sk] ?? {}), lines, at: Date.now() };
   await saveWatch(st, env);
-  return text;
+  return hit.text;
+}
+
+/**
+ * **到点的那一句**：在所有已写好的台词里，找 `at` 最小且已经到点的那一条，念掉它。
+ *
+ * 为什么需要它：剧本是按"段"写的，但说话的时刻是**位置**上的一个点。
+ * 拿段边界当触发点，一段里写四句就会在段首连着说完、然后整整一分钟没词 ——
+ * 听起来就是"比我看到的快很多"（实测日志：02:26 / 02:38 / 02:50 … 每 12 秒一句，
+ * 而画面是一分钟才跨一个内容段）。
+ *
+ * 这里按 `at` 触发：位置到哪，就说到哪。暂停时位置不动，也就不会继续说。
+ * 不带 `at` 的老台词按"进入这一段"处理，并在段内均匀铺开（每条占 1/k 段）。
+ * 迟到超过 `lateSec`（默认 10 秒）的词直接作废：位置跳过去了，那句描述的画面已经不在。
+ *
+ * @param {number} pos  当前播放位置（秒）
+ * @param {{ size?: number, lateSec?: number }} [o] 当前段长（给没写 at 的台词分位）、迟到宽限
+ */
+export async function dueLine(input, pos, { size = 0, lateSec = 10, env = process.env } = {}) {
+  const now = Number(pos);
+  if (!Number.isFinite(now)) return null;
+  const st = await loadWatch(env);
+  const sk = sessionKey(input);
+  const lines = st[sk]?.lines;
+  if (!lines) return null;
+
+  let best = null;
+  let dirty = false;
+  for (const [key, slot] of Object.entries(lines)) {
+    const from = Number(key);
+    // 未来段落的词不参与：写 360s 的词不该在 150s 就被念出来
+    if (!(from <= now)) continue;
+    let items = slotItems(slot);
+    // **把"没写 at"的台词当场钉死**：一旦有了段长，就把它们均匀铺进这一段并存回去。
+    // 不能每次读都现算：念掉一条之后队列长度变了，后面几条的时刻会跟着往前跳
+    // （实测：四句 60 秒的稿子，念掉第一句后第二句的时刻从 135 变成 120，于是连珠炮）。
+    if (size > 0 && items.some((x) => x.at === null)) {
+      const n = items.length;
+      items = items.map((x, i) => (x.at === null ? { ...x, at: from + (i * size) / n } : x));
+      dirty = true;
+    }
+    // **迟到就作废**：位置跳过去了（拖进度条 / 快进），那句描述的画面已经不在银幕上，
+    // 补念出来只会和画面对不上。停顿几秒内的正常延迟仍然会念。
+    const kept = items.filter((x) => !(x.at !== null && x.at < now - lateSec));
+    if (kept.length !== items.length) {
+      items = kept;
+      dirty = true;
+    }
+    if (dirty) writeSlot(lines, from, items);
+    items.forEach((item, i) => {
+      if (item.at > now) return;
+      if (!best || item.at < best.at) best = { from, index: i, at: item.at, text: item.text };
+    });
+  }
+  if (!best) {
+    if (dirty) {
+      st[sk] = { ...(st[sk] ?? {}), lines, at: Date.now() };
+      await saveWatch(st, env);
+    }
+    return null;
+  }
+
+  const items = slotItems(lines[best.from]);
+  writeSlot(lines, best.from, items.slice(0, best.index).concat(items.slice(best.index + 1)));
+  st[sk] = { ...(st[sk] ?? {}), lines, at: Date.now() };
+  await saveWatch(st, env);
+  return best.text;
 }
 
 /** 这一段还有没有台词（给"余量不足就叫醒模型"用） */
 export async function hasLine(input, from, { env = process.env } = {}) {
   const st = await loadWatch(env);
-  const slot = st[sessionKey(input)]?.lines?.[Number(from)];
-  if (!slot) return false;
-  if (Array.isArray(slot.queue)) return slot.queue.length > 0;
-  return Boolean(slot.text);
+  return slotItems(st[sessionKey(input)]?.lines?.[Number(from)]).length > 0;
 }
 
 /** 库存概览：已经写好台词的段有哪些（诊断用） */
 export async function linesOverview(input, { env = process.env } = {}) {
   const st = await loadWatch(env);
   const lines = st[sessionKey(input)]?.lines ?? {};
-  return Object.entries(lines).map(([from, slot]) => ({
-    from: Number(from),
-    count: Array.isArray(slot.queue) ? slot.queue.length : (slot.text ? 1 : 0),
-  })).filter((x) => x.count > 0).sort((a, b) => a.from - b.from);
+  return Object.entries(lines)
+    .map(([from, slot]) => {
+      const items = slotItems(slot);
+      return { from: Number(from), count: items.length, ats: items.map((x) => x.at).filter((x) => x !== null) };
+    })
+    .filter((x) => x.count > 0)
+    .sort((a, b) => a.from - b.from);
 }

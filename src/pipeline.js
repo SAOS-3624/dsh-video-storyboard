@@ -21,6 +21,8 @@ import { rememberSegments } from './locate.js';
 import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import { fitSegments, segmentsFromCuts, totalDur } from './segments.js';
 import { bestLayout, fillLayout, groupByCount, suggest, PLAN_THRESHOLDS } from './plan.js';
+// 每格多少字只在 board.js 定义一次，三个入口共用；这里转出去给老调用方（index/bin）
+import { charsForDetail, DETAIL_CHARS } from './board.js';
 import { findBursts, planCellRanges } from './density.js';
 import { describeMemory, remember } from './memory.js';
 import { analyzeAudio, describeAudio, detectOnsets } from './audio.js';
@@ -1135,7 +1137,7 @@ export function formatRemoteProbe(remote) {
 }
 
 /** 三档台词预算（字符）：low 只判断"这段在讲什么"，high 要能引用原话 */
-export const DETAIL_CHARS = { low: 60, med: 120, high: 400 };
+export { DETAIL_CHARS };
 
 /**
  * 在**句末**截断，而不是从第 N 个字符硬切。
@@ -1227,6 +1229,23 @@ function formatPlanLine(plan) {
  * @param {object} result runStoryboard 的返回值
  * @param {{maxCellChars?:number, maxChars?:number, cellRange?:[number,number]}} opts
  */
+/**
+ * 按 `<detail>` 渲染清单：每格多少字由它决定，三个入口共用。
+ *
+ * 以前 storyboard 用 detail、zoom 写死 med、watch 写死 80 —— 同一个"仔细程度"在三条路上
+ * 是三个值。现在只有一个换算点：low/med/high = 60/120/400 字每格。
+ *
+ * @param {object} result runStoryboard 的返回值
+ * @param {{detail?: 'low'|'med'|'high', maxChars?: number, cellRange?: number[]|null}} [o]
+ */
+export function formatForDetail(result, { detail = 'med', maxChars, cellRange = null } = {}) {
+  return formatManifest(result, {
+    cellRange,
+    ...(Number.isFinite(maxChars) ? { maxChars } : {}),
+    maxCellChars: charsForDetail(detail),
+  });
+}
+
 export function formatManifest(result, {
   maxCellChars = 120, maxChars = 24_000, cellRange = null,
 } = {}) {

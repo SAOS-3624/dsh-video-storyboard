@@ -10,7 +10,100 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { loadLine, saveLines, watchPath } from '../src/watch.js';
+import { dueLine, loadLine, linesOverview, saveLines, watchPath } from '../src/watch.js';
+
+/**
+ * 台词怎么"到点"是这一轮最贵的教训：
+ * 按段触发（段首一口气说完）听起来就是"嘴比画面快很多"，
+ * 按墙钟触发更糟 —— 暂停也继续说。只认位置。
+ */
+test('dueLine: 没到 at 就不给，到了才给，且只给一次', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'due-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    await saveLines('b.mp4', [
+      { from: 120, at: 150, text: 'A' },
+      { from: 120, at: 171, text: 'B' },
+    ]);
+    assert.equal(await dueLine('b.mp4', 149, { size: 60 }), null, '差一秒都不给');
+    assert.equal(await dueLine('b.mp4', 150, { size: 60 }), 'A');
+    assert.equal(await dueLine('b.mp4', 160, { size: 60 }), null, '下一句还没到');
+    assert.equal(await dueLine('b.mp4', 171, { size: 60 }), 'B');
+    assert.equal(await dueLine('b.mp4', 200, { size: 60 }), null, '念过就没了');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('dueLine: 未来段落的词不该提前念（写 240s 的词，150s 时不许开口）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'due2-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    await saveLines('c.mp4', [{ from: 240, at: 252, text: '还早' }]);
+    assert.equal(await dueLine('c.mp4', 150, { size: 60 }), null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('dueLine: 位置停在原地时不会把后面的词提前掏空', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'due3-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    await saveLines('d.mp4', [
+      { from: 120, at: 150, text: 'A' },
+      { from: 120, at: 171, text: 'B' },
+      { from: 120, at: 195, text: 'C' },
+    ]);
+    assert.equal(await dueLine('d.mp4', 150, { size: 60 }), 'A');
+    // 停在 150 反复问：只该 null，不该把 B、C 也吐出来（这是"暂停还在念"的真因）
+    for (let i = 0; i < 5; i += 1) {
+      assert.equal(await dueLine('d.mp4', 150, { size: 60 }), null);
+    }
+    assert.equal((await linesOverview('d.mp4'))[0].count, 2, 'B、C 还在库存里');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('dueLine: 没写 at 的老台词，按段首算，并在段内均匀铺开', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'due4-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    await saveLines('e.mp4', [
+      { from: 120, text: '一' },
+      { from: 120, text: '二' },
+      { from: 120, text: '三' },
+      { from: 120, text: '四' },
+    ]);
+    // 60 秒一段、四句 → 段首、+15、+30、+45
+    assert.equal(await dueLine('e.mp4', 120, { size: 60 }), '一');
+    assert.equal(await dueLine('e.mp4', 130, { size: 60 }), null, '15 秒前不该轮到第二句');
+    assert.equal(await dueLine('e.mp4', 135, { size: 60 }), '二');
+    assert.equal(await dueLine('e.mp4', 151, { size: 60 }), '三');
+    assert.equal(await dueLine('e.mp4', 165, { size: 60 }), '四');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('dueLine: 迟到几秒照念，迟到太多直接作废（拖进度条之后不追着说旧画面）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'due5-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  try {
+    await saveLines('g.mp4', [
+      { from: 120, at: 150, text: '旧' },
+      { from: 120, at: 200, text: '稍晚' },
+    ]);
+    // 停在 155：迟到 5 秒，还在宽限里，照念
+    assert.equal(await dueLine('g.mp4', 155, { size: 60 }), '旧');
+    // 跳到 260：200 那句迟到 60 秒，作废；库存清空
+    assert.equal(await dueLine('g.mp4', 260, { size: 60 }), null);
+    assert.equal((await linesOverview('g.mp4')).length, 0, '迟到的词应被丢弃，而不是攒着连珠炮');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test('存了就能按段取回', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'lines-'));

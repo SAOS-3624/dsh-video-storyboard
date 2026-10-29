@@ -642,13 +642,18 @@ export function watchToolSpec() {
       lines: {
         type: 'array',
         items: { type: 'json' },
-        description: 'Pre-written lines: [{ from: <segment start in seconds>, text: "<one sentence>" }]. '
+        description: 'Pre-written lines: [{ from: <segment start in seconds>, at: <second this line belongs to>, '
+          + 'text: "<one sentence>" }]. '
+          + '"at" is the moment on the playback clock that this sentence describes — the script speaks the line '
+          + 'when the playhead reaches it. Pin it to what you actually saw in that cell, not to the segment start; '
+          + 'a segment that starts at 120 can hold lines at 126, 143, 158. Without "at" the line fires when its '
+          + 'segment starts, which is rarely what you want for more than one line. '
           + 'Recommended order: look at the picture FIRST (speakNow: true), then read the transcript lines for '
           + 'that window, then write what you actually want to say. Writing from subtitles alone makes you talk '
-          + 'about what is said instead of what is shown. Repeat the same "from" in one call to queue several '
-          + 'lines for that segment (one per 10 s). '
-          + 'The background loop reads the line out when that segment becomes due, so nothing has to be '
-          + 'generated at that moment. Only write them for the prefetched window (default 5 minutes).',
+          + 'about what is said instead of what is shown. '
+          + 'The background loop reads each line out on position, so nothing has to be generated at that moment, '
+          + 'and pausing the video pauses the script. Only write them for the prefetched window (lookahead, '
+          + 'default 5 minutes).',
       },
       depth: {
         type: 'number',
@@ -672,6 +677,19 @@ export function watchToolSpec() {
       title: {
         type: 'string',
         description: 'Video title, used to pick the right media session when several are playing.',
+      },
+      detail: {
+        type: 'string',
+        enum: ['low', 'med', 'high'],
+        description: 'How much transcript per cell in this segment: low=60 chars, med=120 (default), '
+          + 'high=400 (quote-level, and it turns on hard-subtitle OCR correction). '
+          + 'Same scale as video_storyboard — the picture does not get sharper, the text does. '
+          + 'Raise cells instead if what you want is more pictures.',
+      },
+      ocr: {
+        type: 'boolean',
+        description: 'Correct the transcript against burned-in subtitles (local OCR, no tokens). '
+          + 'Defaults to true when detail=high. Costs ~3 s per segment, so it is off otherwise.',
       },
       transcript: {
         type: 'string',
@@ -720,6 +738,19 @@ export function validateWatchArgs(args) {
   if (lead >= seg) problems.push('lead must be smaller than segment, otherwise every call delivers immediately');
   if (args?.cells !== undefined && (!Number.isInteger(args.cells) || args.cells < 1 || args.cells > 9)) {
     problems.push('cells must be an integer 1..9');
+  }
+  if (args?.detail !== undefined && !['low', 'med', 'high'].includes(args.detail)) {
+    problems.push('detail must be one of low|med|high');
+  }
+  // 台词：at 必须在它所属的段里，否则这句永远不会到点（dueLine 只认 from <= 当前位置 的槽）
+  if (Array.isArray(args?.lines)) {
+    args.lines.forEach((l, i) => {
+      if (!(Number(l?.from) >= 0)) {
+        problems.push(`lines[${i}].from must be >= 0`);
+      } else if (l?.at !== undefined && !(Number(l.at) >= Number(l.from))) {
+        problems.push(`lines[${i}].at (${l.at}) must be >= its from (${l.from})`);
+      }
+    });
   }
   return problems;
 }
