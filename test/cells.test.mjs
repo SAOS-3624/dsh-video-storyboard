@@ -59,7 +59,7 @@ test('validateZoomArgs: 有 cellId 就不再强制 from/to；越界的 cellId �
 });
 
 test('suggest: 阈值可覆盖，且覆盖真的改变分类结果', () => {
-  // 同一份元数据：按默认阈值算音乐片（meanLufs -16 > -22 且 speechRate 0.5 < 1）
+  // 同一份元数据：按默认阈值算音乐片（meanLufs -16 > -18 且 speechRate 0.5 < 1）
   const meta = { duration: 300, cuts: 40, speechRate: 0.5, meanLufs: -16, hasSubtitle: false };
   const a = suggest(meta);
   // 把 musicLufs 抬到 -10，就不该再判成音乐驱动

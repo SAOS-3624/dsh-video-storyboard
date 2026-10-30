@@ -16,18 +16,9 @@ export const MIN_CELL_H = 135;
 export const MAX_SHEETS = 99;   // 不封顶：片长决定张数（每 5 分钟一张），token 随片长线性增长
 export const DEFAULT_ASPECT = 16 / 9;
 
-/**
- * Content-classification thresholds. Kept in one place so the manifest can report them.
- *
- * `musicLufs` 从 -18 放宽到 -22（2026-10-30 实测打脸）：
- * 原来的 -18 是从"口播 -23 / 音乐 -14.2"两个极端样本的中点划的，**中间地带从没有样本**。
- * 《记忆管理局》正式 PV 是纯音乐快剪，母带 -18.4 —— 差 0.4 没过线，于是整片按"有字"处理，
- * 一格不摊，90 秒只有 9 个画面；同一作者的《概念 PV》(-14.2) 却有 33 个。两支差 3.7 倍。
- * 响度不是"有没有字"的可靠代理：它反映母带电平，不反映内容。
- * 口播片普遍在 -23（实测基准），留 1 LU 余量取 -22。
- */
+/** Content-classification thresholds. Kept in one place so the manifest can report them. */
 export const PLAN_THRESHOLDS = Object.freeze({
-  musicLufs: -22,
+  musicLufs: -18,
   musicSpeechRate: 1,
   speechRateCut: 3,
 });
@@ -406,38 +397,4 @@ export function validatePlan(plan, aspect = DEFAULT_ASPECT) {
   }
   if (sheets < 1 || sheets > MAX_SHEETS) errors.push(`sheets must be 1..${MAX_SHEETS}`);
   return { ok: errors.length === 0, errors, warnings };
-}
-
-/**
- * 把 `total` 个整数配额按 `weights` 分给 n 份，**总和精确等于 total**，且每份 ≥ min。
- *
- * 为什么需要它：原来分给"黑场之间的内容区"时，每段各自 `Math.max(1, Math.round(份额))`，
- * 一段一段往上报，总和可以超过 total（实测 24 格算出 25 段，多出来那一格只能靠下游"补满"
- * 或者"按容量砍"去兜）。偏差一旦进了调用方，后面所有"格数/张数/token"都对不上账。
- *
- * 最大余额法：先按权重取整，余数按小数部分从大到小补。加权为零时退化成均分。
- */
-export function allocateIntegerBudget(total, weights, { min = 0 } = {}) {
-  const n = weights.length;
-  if (n === 0) return [];
-  const t = Math.max(0, Math.round(Number(total) || 0));
-  const floor = Math.max(0, Math.round(Number(min) || 0));
-  // 连保底都给不出：按顺序发到没有为止（总和仍然精确）
-  if (t < floor * n) {
-    let rest = t;
-    return weights.map(() => {
-      const v = Math.min(floor, rest);
-      rest -= v;
-      return v;
-    });
-  }
-  const left = t - floor * n;
-  const w = weights.map((x) => (Number.isFinite(x) && x > 0 ? x : 0));
-  const sumW = w.reduce((a, b) => a + b, 0);
-  const raw = sumW > 0 ? w.map((x) => (x / sumW) * left) : w.map(() => left / n);
-  const out = raw.map((x) => Math.floor(x));
-  let rest = left - out.reduce((a, b) => a + b, 0);
-  const order = raw.map((x, i) => ({ i, frac: x - Math.floor(x) })).sort((a, b) => b.frac - a.frac);
-  for (let k = 0; k < rest; k += 1) out[order[k % n].i] += 1;
-  return out.map((x) => x + floor);
 }
