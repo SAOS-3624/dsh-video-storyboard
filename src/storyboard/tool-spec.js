@@ -74,7 +74,9 @@ export function storyboardToolSpec() {
       },
       sheets: {
         type: 'integer',
-        description: 'How many images to return, 1-4 (default: auto). Each extra image costs another ~384 tokens in DSH (host-dependent).',
+        description: 'How many images to return, 1-16 (default: auto). Each image costs another ~384 tokens '
+          + '(16 means ~6k): ask for many only when the user wants a dense pass over a long video. '
+          + 'The auto value is not capped by this — a 66-minute lecture already returns 3.',
       },
       pick: {
         type: 'string',
@@ -378,8 +380,8 @@ export function validateToolArgs(args) {
   if (args.cells !== undefined && (!Number.isInteger(args.cells) || args.cells < 1 || args.cells > 16)) {
     problems.push('cells must be an integer 1..16');
   }
-  if (args.sheets !== undefined && (!Number.isInteger(args.sheets) || args.sheets < 1 || args.sheets > 4)) {
-    problems.push('sheets must be an integer 1..4');
+  if (args.sheets !== undefined && (!Number.isInteger(args.sheets) || args.sheets < 1 || args.sheets > 16)) {
+    problems.push('sheets must be an integer 1..16');
   }
   if (args.from !== undefined && args.from < 0) problems.push('from must be >= 0');
   if (args.to !== undefined && args.from !== undefined && args.to <= args.from) {

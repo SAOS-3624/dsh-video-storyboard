@@ -153,6 +153,14 @@ test('本地兜底校验：越界参数被自己挡住（schema 子集不支持 
   assert.ok(validateToolArgs({ input: 'a', minGap: -1 }).length > 0);
 });
 
+test('本地兜底校验：sheets 上限与 cells 对齐（1..16）', () => {
+  // 旧上限 4 是自己跟自己打架：自动档按帧数能算出 5 张、8 张，
+  // 而用户/模型手动要 5 张反而被拒。上限该由调用方判断，不该藏一个自动能越过的阈值。
+  assert.deepEqual(validateToolArgs({ input: 'a', sheets: 5 }), [], '5 张应该放行');
+  assert.deepEqual(validateToolArgs({ input: 'a', sheets: 16 }), [], '16 张是上限');
+  assert.ok(validateToolArgs({ input: 'a', sheets: 17 }).length > 0, '17 张要挡住');
+});
+
 test('本地兜底校验：zoom 要求 from/to 且区间有效', () => {
   assert.deepEqual(validateZoomArgs({ input: 'a', from: 0, to: 5 }), []);
   assert.ok(validateZoomArgs({ input: 'a' }).length > 0);

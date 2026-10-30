@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- `sheets` 的参数上限是 4，而自动档按帧数能算出 5、8 张 —— **自动能做的事，手动反而做不到**。
+  上限放开到 1..16（与 `cells` 对称）；自动档不受这个数约束，仍由帧预算决定。
 - `pipeline` 里 `spawnImpl: spawn` —— 0.4.4 里这个 import 是有的（`import { execFile, spawn } from 'node:child_process'`），
   拆成 `src/storyboard/` 时丢了。之后每次运行都 `ReferenceError`，被外层 catch 吞成
   `asr-failed · spawn is not defined`，转写因此一直是空的。
