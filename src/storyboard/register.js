@@ -10,11 +10,12 @@
  */
 
 import {
-  locateToolSpec, probeToolSpec, storyboardToolSpec, zoomToolSpec,
+  locateToolSpec, probeToolSpec, storyboardToolSpec, subtitlesToolSpec, zoomToolSpec,
 } from './tool-spec.js';
 import * as locate from '../tools/locate.js';
 import * as probe from '../tools/probe.js';
 import * as storyboard from '../tools/storyboard.js';
+import * as subtitles from '../tools/subtitles.js';
 import * as zoom from '../tools/zoom.js';
 
 /**
@@ -28,5 +29,6 @@ export function storyboardTools(defineTool, ctx) {
     defineTool({ ...zoomToolSpec(), execute: (args) => zoom.execute(ctx, args) }),
     defineTool({ ...probeToolSpec(), execute: (args) => probe.execute(ctx, args) }),
     defineTool({ ...locateToolSpec(), execute: (args) => locate.execute(ctx, args) }),
+    defineTool({ ...subtitlesToolSpec(), execute: (args) => subtitles.execute(ctx, args) }),
   ];
 }
