@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   displayAspect, endEdge, normalizeRotation, parseRational, parseSar, uprightSize,
-} from '../src/probe.js';
+} from '../src/storyboard/probe.js';
 
 test('parseRational: 常见帧率字符串', () => {
   assert.equal(parseRational('25/1'), 25);

@@ -11,8 +11,8 @@ import { mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { PROTECTED_FILES, pruneCache } from '../src/cache.js';
-import { pruneStorage, storageUsage, STORAGE_BUDGET_BYTES } from '../src/storage.js';
+import { PROTECTED_FILES, pruneCache } from '../src/storyboard/cache.js';
+import { pruneStorage, storageUsage, STORAGE_BUDGET_BYTES } from '../src/storyboard/storage.js';
 
 const fill = async (path, bytes) => writeFile(path, Buffer.alloc(bytes, 1));
 

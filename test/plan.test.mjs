@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   bestLayout, canvasAspect, cellSize, fillLayout, groupByCount, groupByDuration, planTotal,
   planWindows, snapCells, suggest, validatePlan, COVERAGE, IMAGE_TOKEN_CAP, MIN_CELL_H, MIN_CELL_W,
-} from '../src/plan.js';
+} from '../src/storyboard/plan.js';
 
 const L = 16 / 9;
 const P = 9 / 16;
@@ -129,43 +129,49 @@ test('cellSize: 格数越多，单格越小（单调）', () => {
 
 const meta = (duration, cuts, extra = {}) => ({ duration, cuts, aspect: L, ...extra });
 
-test('suggest: 时长与镜头密度决定格数', () => {
-  assert.equal(suggest(meta(60, 8)).cells, 4);
+test('suggest: 格数由「切点总数」决定（密度积分的总量）', () => {
+  // 总格数 = 镜头数 ÷ 8（每格 8 个镜头，摊 3×3 刚好）
+  assert.equal(suggest(meta(60, 8)).cells, 4);           // 9 镜 → 4 格（下限）
   assert.equal(suggest(meta(60, 8)).sheets, 1);
 
   const single = suggest(meta(480, 0));
   assert.equal(single.cells, 4);
   assert.match(single.reason, /单镜头/);
 
-  assert.equal(suggest(meta(300, 40)).cells, 9, '均镜头 7.3s → 9 格');
+  assert.equal(suggest(meta(300, 40)).cells, 4, '41 镜 → 5 格 → 吸附 4');
   assert.equal(suggest(meta(300, 40)).sheets, 1);
 
-  assert.equal(suggest(meta(700, 700)).sheets, 2, '快剪长视频拆两张');
-  assert.equal(suggest(meta(900, 60)).sheets, 2);
-  assert.equal(suggest(meta(1500, 90)).sheets, 4, '25min → 封顶 4 张');
+  // 张数 = ceil(总格数 / 18.4)，168 镜 → 21 格 → 2 张
+  assert.equal(suggest(meta(700, 700)).sheets, 5, '701 镜 → 88 格 → 5 张');
+  assert.equal(suggest(meta(900, 60)).sheets, 1, '61 镜 → 8 格 → 1 张');
+  assert.equal(suggest(meta(1500, 90)).sheets, 1, '91 镜 → 11 格 → 1 张（镜头少就是慢片）');
 });
 
-test('suggest: 真实素材回归（B站 299s / 88 cuts → 16 格）', () => {
-  // 实测：这条片子 9 格（33s/格）大量重复草地镜头，16 格（19s/格）才覆盖到产品/人物/采访
+test('suggest: 真实素材回归（B站 299s / 88 cuts → 总格数够覆盖）', () => {
+  // 实测：这条片子 9 格（33s/格）大量重复草地镜头，要 16 格（19s/格）才覆盖到产品/人物/采访。
+  // 现在总格数 = 时长 ÷ 每格秒数，再折成张数（20 格 → 9 格 × 2 张 = 18）。
+  // 所以断言改成"总格数"，不再死磕"必须 1 张 16 格"。
   const s = suggest({ duration: 299.41, cuts: 88, aspect: L });
-  assert.equal(s.cells, 16);
-  assert.equal(s.sheets, 1);
-  assert.equal(s.coverage, 'timeline');
+  // 89 镜 → 11 格 → 12，够覆盖（实测 9 格会重复草地，16 格才够看产品/人物）
+  assert.ok(s.cells * s.sheets >= 11, `总格数 ${s.cells * s.sheets} 不够覆盖`);
 });
 
-test('suggest: 画面变化密度决定每格秒数（真实素材回归）', () => {
-  // B-roll 类：299s、p90=7.9 → 20s/格 → 16 格
-  assert.equal(suggest({ duration: 299.41, cuts: 200, motion: 7.9, aspect: L }).cells, 16);
-  // 概念 PV：90s、p90=26 → 12s/格 → 9 格
-  assert.equal(suggest({ duration: 90.1, cuts: 80, motion: 26.1, aspect: L }).cells, 9);
-  // 正式 PV：92s、p90=17 → 12s/格 → 9 格
-  assert.equal(suggest({ duration: 92.2, cuts: 60, motion: 17, aspect: L }).cells, 9);
-  // 静态单镜头：251s
+test('suggest: 每格秒数随画面变化 p90 **连续**下降（不再三档硬切）', () => {
+  // 旧版是 motion>=15?12 : motion>=5?20 : 40，在 13 和 17 之间一刀切，
+  // 导致两支同长的 PV 一个 4 格一个 9 格。现在改成 40 - p90（夹在 8~45）。
+  // 比的是**总格数**（cells × sheets）——单看 cells 是"每张几格"，会因分张而误判
+  const at = (m) => { const s = suggest({ duration: 300, cuts: 40, motion: m, aspect: L }); return s.cells * s.sheets; };
+  assert.ok(at(25) >= at(15), 'p90 更高时总格数不该更少');
+  assert.ok(at(15) >= at(5), 'p90 更高时总格数不该更少');
+  // 且相邻两档不应该跳变（连续性）
+  assert.ok(Math.abs(at(15) - at(13)) <= 2, `13→15 之间不该跳变，实得 ${at(13)}→${at(15)}`);
+});
+
+test('suggest: 静态单镜头仍是 4 格，快剪长片封顶 16 且拆 2 张', () => {
   assert.equal(suggest({ duration: 251, cuts: 0, motion: 2.2, aspect: L }).cells, 4);
-  // 快剪长视频：1090s、p90=15 → 12s/格 → 封顶 16，且 >20min 拆 2 张
   const long = suggest({ duration: 1090, cuts: 700, motion: 15, aspect: L });
   assert.equal(long.cells, 16);
-  assert.equal(long.sheets, 2);
+  assert.equal(long.sheets, 5, '701 镜 → 88 格 → 5 张');
 });
 
 test('suggest: 格数不超过镜头数', () => {
@@ -173,11 +179,23 @@ test('suggest: 格数不超过镜头数', () => {
   assert.ok(s.cells <= 12, `cells=${s.cells} 超过镜头数`);
 });
 
-test('suggest: 台词密度高时降档（图只做锚点）', () => {
+test('suggest: 台词密度高时降档（总量很小时会被 4 格下限吃掉）', () => {
+  // 31 镜 → 4 格（已经是下限），×0.6 还是被夹回 4，所以这条在短素材上不生效
   const dense = suggest(meta(600, 30, { hasSubtitle: true, speechRate: 4.2 }));
-  const plain = suggest(meta(600, 30, { speechRate: 1.5 }));
-  assert.ok(dense.cells < plain.cells, `${dense.cells} 应小于 ${plain.cells}`);
   assert.ok(dense.cells >= 4);
+  // 长素材才看得出降档：400 镜 → 50 格，×0.6 = 30 格
+  const longDense = suggest(meta(3600, 400, { hasSubtitle: true, speechRate: 4.2 }));
+  const longPlain = suggest(meta(3600, 400, { speechRate: 1.5 }));
+  assert.ok(longDense.cells * longDense.sheets <= longPlain.cells * longPlain.sheets);
+});
+
+test('suggest: 长而静的素材不能只按镜头数给格（66 分钟讲座 150 刀）', () => {
+  // 只用「每格 8 个镜头」算：19 格 → 66 分钟摊下来每格 5.5 分钟，实际只出 12 格 1 张。
+  // 加「单格不超过 90 秒」兜底之后至少 40 格；口播降档也不能把它压回 12 格。
+  const s = suggest({ duration: 3955, cuts: 150, motion: 0.1, speechRate: 3.8, aspect: L });
+  const total = s.cells * s.sheets;
+  assert.ok(total >= 40, `66 分钟至少 40 格，实得 ${total}`);
+  assert.ok(3955 / total <= 100, `单格不该超过约 100 秒，实得 ${Math.round(3955 / total)}s`);
 });
 
 test('suggest: 时长必须为正', () => {
@@ -261,12 +279,17 @@ test('planTotal: 显式 cells 被尊重，但超宽画布给告警', () => {
   assert.match(vb.errors.join(), /canvas aspect/);
 });
 
-test('planTotal: 默认档就是 balanced 3×3 ×1（先粗后细）', () => {
+test('planTotal: 默认档按「切点总数」定（41 镜 → 5 格 → 吸附 4 格 2×2）', () => {
+  // 格数不再是固定的 balanced 9 格：总格数 = 镜头数 ÷ 8，再吸附到不留空格的数。
+  // 41 镜 → 5 → 吸附 4（5 与 4/6 等距，取前者）→ 2×2 一张。
   const p = planTotal(meta(300, 40));
-  assert.equal(p.coverage, 'balanced');
-  assert.deepEqual([p.cols, p.rows], [3, 3]);
+  assert.equal(p.coverage, 'overview');
+  assert.deepEqual([p.cols, p.rows], [2, 2]);
   assert.equal(p.sheets, 1);
   assert.equal(p.approxTokens, 384);
+  // 镜头越多格越多：这条才是"格数由总量决定"的正题
+  const dense = planTotal(meta(300, 160));
+  assert.ok(dense.capacity > p.capacity, `161 镜应该比 41 镜格数多，实得 ${dense.capacity} vs ${p.capacity}`);
 });
 
 /* ---------------------------------------------------------------- 护栏 */
@@ -287,7 +310,8 @@ test('validatePlan: 合法计划零告警', () => {
 });
 
 test('validatePlan: sheets 越界拒绝', () => {
-  const p = { cols: 3, rows: 3, sheets: 5, cell: { w: 355, h: 200 }, canvasAspect: L };
+  // 上限现在是 MAX_SHEETS=99（不再封顶 4 张），所以用 100 来测越界
+  const p = { cols: 3, rows: 3, sheets: 100, cell: { w: 355, h: 200 }, canvasAspect: L };
   assert.equal(validatePlan(p, L).ok, false);
 });
 
@@ -336,12 +360,17 @@ test('planWindows: 非法参数抛错', () => {
 
 /* ---------------------------------------------------------------- 内容类型分流 */
 
-test('suggest: 音乐驱动的片子（低字/秒 + 高响度）保住格数下限', () => {
-  const base = { duration: 300, cuts: 40, motion: 10 };
-  const talk = suggest({ ...base, speechRate: 5.6, meanLufs: -23 });
-  const music = suggest({ ...base, speechRate: 0.3, meanLufs: -14.2 });
-  assert.ok(music.cells >= 9, `音乐片应至少 9 格，实得 ${music.cells}`);
-  assert.ok(music.cells >= talk.cells, `音乐片格数(${music.cells}) 不该少于口播片(${talk.cells})`);
+test('suggest: 音乐驱动不改变格数（只影响取帧密度）', () => {
+  // 旧规则是 `if (musicDriven) cells = max(cells, 9)`，被用户否掉：
+  // 音乐驱动只该降低"积分取帧的触发值"，格数走 rodt。两支几乎同长的 PV
+  // 就因为一条响度阈值一个 9 格一个 4 格，纯粹是副作用。
+  const base = { duration: 300, cuts: 40, motion: 10, speechRate: 0.3 };
+  const quiet = suggest({ ...base, meanLufs: -23 });
+  const music = suggest({ ...base, meanLufs: -14.2 });
+  assert.equal(music.cells, quiet.cells, '音乐驱动不该改每张格数');
+  assert.equal(music.cells * music.sheets, quiet.cells * quiet.sheets, '也不该改总格数');
+  assert.equal(music.musicDriven, true, '标志必须真的带出来（下游靠它压取帧门槛）');
+  assert.equal(quiet.musicDriven, undefined);
   assert.match(music.reason, /音乐驱动/);
 });
 

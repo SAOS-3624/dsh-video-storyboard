@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { hasDebugPort, listTargets, pickVideoTarget, probeBrowser, readBrowserPosition } from '../src/browser-time.js';
+import { hasDebugPort, listTargets, pickVideoTarget, probeBrowser, readBrowserPosition } from '../src/storyboard/browser-time.js';
 
 test('端口没开就返回 null（不抛错，不打扰）', async () => {
   const port = 6553;                       // 没人监听
@@ -47,7 +47,7 @@ test('没有页面目标就 null（不是抛错）', () => {
 });
 
 test('file:// 地址能还原成本地路径（本地视频用浏览器打开时靠它）', async () => {
-  const { fileUrlToPath } = await import('../src/browser-time.js');
+  const { fileUrlToPath } = await import('../src/storyboard/browser-time.js');
   assert.equal(fileUrlToPath('file:///D:/a%20b.mp4'), 'D:/a b.mp4');
   assert.equal(fileUrlToPath('file:///D:/JiJiDown/x.mp4'), 'D:/JiJiDown/x.mp4');
   assert.equal(fileUrlToPath('https://www.bilibili.com/video/BV1'), null);
@@ -59,7 +59,7 @@ test('端口配置可以写在 ~/.dsh/video.json（桌面版读不到 setx 的 e
   const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const { configuredPort } = await import('../src/browser-time.js');
+  const { configuredPort } = await import('../src/storyboard/browser-time.js');
 
   const home = await mkdtemp(join(tmpdir(), 'vcfg-'));
   try {
@@ -77,7 +77,7 @@ test('端口配置可以写在 ~/.dsh/video.json（桌面版读不到 setx 的 e
 });
 
 test('cookie 能转成 Netscape 格式（yt-dlp 认这个）', async () => {
-  const { cookiesToNetscape } = await import('../src/browser-time.js');
+  const { cookiesToNetscape } = await import('../src/storyboard/browser-time.js');
   const txt = cookiesToNetscape([
     { name: 'SESSDATA', value: 'abc%2C123', domain: '.bilibili.com', path: '/', expires: 1800000000, secure: true },
     { name: 'buvid3', value: 'x', domain: 'www.bilibili.com', path: '/', expires: -1, secure: false },

@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-storyboard",
-  "version": "0.4.5",
+  "version": "0.5.0",
   "description": "Scene-aware storyboard for DeepSeek Harness: one addressable grid per video (numbered cells, timestamps, transcript, audio envelope) so a text-only agent can look at the video itself instead of being told a summary.",
   "keywords": [
     "dsh",
@@ -27,13 +27,24 @@
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./plan": "./src/plan.js",
-    "./scan": "./src/scan.js",
-    "./segments": "./src/segments.js",
-    "./probe": "./src/probe.js",
-    "./sheet": "./src/sheet.js",
-    "./pipeline": "./src/pipeline.js",
-    "./tool-spec": "./src/tool-spec.js"
+    "./plan": "./src/storyboard/plan.js",
+    "./scan": "./src/storyboard/scan.js",
+    "./segments": "./src/storyboard/segments.js",
+    "./probe": "./src/storyboard/probe.js",
+    "./sheet": "./src/storyboard/sheet.js",
+    "./frames": "./src/storyboard/frames.js",
+    "./format": "./src/storyboard/format.js",
+    "./pipeline": "./src/storyboard/pipeline.js",
+    "./tool-spec": "./src/tool-spec.js",
+    "./storyboard": "./src/storyboard/index.js",
+    "./board": "./src/storyboard/board.js",
+    "./cache": "./src/storyboard/cache.js",
+    "./storage": "./src/storyboard/storage.js",
+    "./locate": "./src/storyboard/locate.js",
+    "./subtitles": "./src/storyboard/subtitles.js",
+    "./ytdlp": "./src/storyboard/ytdlp.js",
+    "./python": "./src/storyboard/python.js",
+    "./browser-time": "./src/storyboard/browser-time.js"
   },
   "bin": {
     "dsh-video-scan": "./bin/scan-video.mjs",
@@ -59,9 +70,7 @@
   "scripts": {
     "test": "node --test",
     "prepublishOnly": "npm test",
-    "check": "node scripts/check-syntax.mjs",
-    "sim": "node scripts/watch-sim.mjs",
-    "e2e": "node scripts/watch-e2e.mjs"
+    "check": "node scripts/check-syntax.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.7"

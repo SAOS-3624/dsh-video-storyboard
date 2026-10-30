@@ -4,8 +4,8 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { ffmpegVersion, sha256File } from '../src/provenance.js';
-import { DEFAULT_FFMPEG } from '../src/probe.js';
+import { ffmpegVersion, sha256File } from '../src/storyboard/provenance.js';
+import { DEFAULT_FFMPEG } from '../src/storyboard/probe.js';
 
 test('sha256File: hashes file bytes', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-prov-'));

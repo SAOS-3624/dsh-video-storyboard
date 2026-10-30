@@ -1,17 +1,16 @@
 /**
- * board.test.mjs — 三个入口的参数只在一处定义。
+ * board.test.mjs — 几个入口的参数只在一处定义。
  *
- * 这条测试守的是"功能漂移"：storyboard 有 detail、watch 没有，就是各自手写默认值的后果。
- * 现在只要 boardOptions 的每种 kind 都正确，三个入口自然一致。
+ * 这条测试守的是"功能漂移"：storyboard 有 detail、别人没有，就是各自手写默认值的后果。
+ * 现在只要 boardOptions 的每种 kind 都正确，各入口自然一致。
+ *
+ * `kind: 'watch'` 这一档留在本包里，因为 `dsh-watch-together` 就是调它来拿默认值的 ——
+ * 那边不再重复一遍这些数字，改这里就等于改那边。所以这里要盯着它。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
-import { boardOptions, charsForDetail, DETAIL_CHARS, ocrFor } from '../src/board.js';
-import { runWatchPass } from '../src/watch-run.js';
+import { boardOptions, charsForDetail, DETAIL_CHARS, ocrFor } from '../src/storyboard/board.js';
 
 test('board: 全片概览的默认值', () => {
   const o = boardOptions({ input: 'a.mp4' }, { kind: 'board' });
@@ -75,32 +74,13 @@ test('board 独有的参数不会漏到别的入口', () => {
   assert.equal(w.textOnly, undefined);
 });
 
-test('陪看把 detail 透传进管线，并按档位收紧清单预算', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'board-watch-'));
-  process.env.DSH_VIDEO_CACHE_DIR = dir;
-  try {
-    const seen = {};
-    const deps = {
-      cache: new Map(),
-      saveImage: async ({ data }) => data,
-      runStoryboard: async (opts) => {
-        seen.opts = opts;
-        return { sheets: [{ png: Buffer.from('x'), cells: [] }] };
-      },
-      formatManifest: (result, opts) => { seen.fmt = opts; return 'm'; },
-      probe: async () => ({ ok: true, sessions: [] }),
-    };
-
-    await runWatchPass(
-      { input: 'w.mp4', cursor: 106, segment: 120, lead: 15, detail: 'high' },
-      deps,
-    );
-    assert.equal(seen.opts.detail, 'high', 'detail 必须传进 runStoryboard');
-    assert.equal(seen.opts.ocr, true);
-    assert.equal(seen.opts.minGap, 0.5, '陪看的 minGap 仍由 board.js 决定');
-    assert.equal(seen.fmt.maxCellChars, 400, '清单每格字数跟着 detail 走');
-    assert.equal(seen.fmt.maxChars, 6000, 'high 档位给更大的总预算');
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+test('board: 陪看那一档的默认值（dsh-watch-together 依赖它）', () => {
+  const w = boardOptions({}, { kind: 'watch' });
+  assert.equal(w.cells, 5, '陪看每段默认 5 格');
+  assert.equal(w.sheets, 1);
+  assert.equal(w.minGap, 0.5, '陪看窗口短，格子要更密');
+  assert.equal(w.adaptive, false, '窗口本来就短，均分比按密度挪格好预测');
+  // 显式给了 cells 就用给的
+  assert.equal(boardOptions({ cells: 9 }, { kind: 'watch' }).cells, 9);
+  assert.equal(boardOptions({ cells: 0 }, { kind: 'watch' }).cells, 5, '0 等于没给');
 });

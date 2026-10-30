@@ -7,11 +7,11 @@
  * 顺序：字幕轨 → ASR。没有配置 key 时会直接告诉你缺什么，不会发请求。
  */
 import { args as parse } from './_args.mjs';
-import { probeVideo } from '../src/probe.js';
+import { probeVideo } from '../src/storyboard/probe.js';
 import {
   ASR_DEFAULTS, describeAsrTarget, extractSubtitleTrack, filterSuspectSegments, transcribeLong,
-} from '../src/asr.js';
-import { analyzeAudio } from '../src/audio.js';
+} from '../src/storyboard/asr.js';
+import { analyzeAudio } from '../src/storyboard/audio.js';
 
 const opt = parse(process.argv.slice(2), { from: 0, seconds: 12 });
 const input = opt._[0];

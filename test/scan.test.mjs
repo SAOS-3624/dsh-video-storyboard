@@ -5,7 +5,7 @@ import {
   assessDegraded, autoThreshold, decideCuts, DEFAULT_THRESHOLD, frameToHsv, quantile, rgbToHsv,
   scanSummary, scorePair, spikeCuts,
   suppressClose, SCAN_W,
-} from '../src/scan.js';
+} from '../src/storyboard/scan.js';
 
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
 

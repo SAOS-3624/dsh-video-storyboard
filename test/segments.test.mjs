@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fitSegments, segDur, segmentsFromCuts, totalDur } from '../src/segments.js';
+import { fitSegments, segDur, segmentsFromCuts, totalDur } from '../src/storyboard/segments.js';
 
 /* ---------------------------------------------------------------- 切点 → 区间 */
 

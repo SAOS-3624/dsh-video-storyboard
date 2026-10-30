@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { DEFAULT_FFMPEG, probeVideo } from '../src/probe.js';
-import { scanShots } from '../src/scan.js';
-import { segmentsFromCuts } from '../src/segments.js';
+import { DEFAULT_FFMPEG, probeVideo } from '../src/storyboard/probe.js';
+import { scanShots } from '../src/storyboard/scan.js';
+import { segmentsFromCuts } from '../src/storyboard/segments.js';
 
 const run = promisify(execFile);
 

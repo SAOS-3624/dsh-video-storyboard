@@ -2,6 +2,97 @@
 
 ## [Unreleased]
 
+### Added
+
+- **积分采样点（假切点）**：扫描之后沿时间累加画面变化率，累够阈值就记一个采样点并清零。
+  这些点作为**额外的分段边界**并进每一格的 `shots`，于是"变化攒得多的地方自然多分几段、
+  多取几帧"，而静止的段落一个点都不加、仍然是整帧一张。
+  阈值 = 全片平均每秒变化量 × `equivSeconds`（默认 6 秒；音乐驱动 4 秒）——
+  这是音频驱动唯一该动的数，格数与张数都不受影响。
+  采样点**不进 `cuts`**：清单里"切点 N 个"必须是真切点，否则等于告诉模型"这里有一刀"。
+- **黑场段独占一格**：亮度连续低于 12 且 ≥2 秒的黑场单独成格（`cell.dark`），
+  不再和后面的 logo/正片挤在一起、结果取到一张纯黑。
+- **rodt 分格**：每格长度 ∝ 1 / 该处切点密度（累积切点等分实现），
+  实测最密与最疏能拉开 4.6~5.5 倍，取代按密度积分/按镜头数均分。
+- **按累计帧数切 sheet**：先排好画面，再沿时间累加每格贡献的 `k²`，累到预算切一张。
+
+### Fixed
+
+- `sheets` 的参数上限是 4，而自动档按帧数能算出 5、8 张 —— **自动能做的事，手动反而做不到**。
+  上限放开到 1..16（与 `cells` 对称）；自动档不受这个数约束，仍由帧预算决定。
+- `pipeline` 里 `spawnImpl: spawn` —— 0.4.4 里这个 import 是有的（`import { execFile, spawn } from 'node:child_process'`），
+  拆成 `src/storyboard/` 时丢了。之后每次运行都 `ReferenceError`，被外层 catch 吞成
+  `asr-failed · spawn is not defined`，转写因此一直是空的。
+- `plan.pick()` 只有四个形参，调用处传的第五个 `musicDriven` 被丢掉 → 返回值里恒为
+  `undefined` → "音乐片取帧更密"（`minMotion` 1.5→0.7）写了却从没生效过。
+- 扫描缓存不保存 `darkRuns` → 命中缓存时黑场并回内容格，同一支片子第一次跑和第二次出图不一样。
+  （`CACHE_VERSION` 3 → 4，旧条目自动失效。）
+- `planSheetsByFrames` 是贪心的，最后一张常常只剩一两格：实测 18 格切成 16+2，
+  2 格按 `bestLayout` 排成 1×2（715×843 的竖长条），两个格子各占 707×396。
+  改成先算张数再均摊，18 格 → 9+9。
+- **长而静的素材被严重欠采样**：格数只按"每格 8 个镜头"算，于是 66 分钟讲座
+  （150 刀）算出 19 格 → 口播降档 → **12 格看 66 分钟**（每格 5.5 分钟）。
+  加一条「单格不超过 90 秒」的兜底（且不超过镜头数），口播降档也不能低于这个兜底：
+  同一支片子变成 16 格 × 3 张（每格 82 秒）。快剪素材不受影响（它们的镜头数口径本来就更大）。
+
+## [0.5.0] — 2026-10-30
+
+### BREAKING — co-watching is now a separate package
+
+`video_watch` / `watch_together` **is no longer in this plugin**. It is its own package,
+**`dsh-watch-together`**, starting at `0.1.0`:
+
+```bash
+npm i dsh-watch-together        # this also installs dsh-video-storyboard
+```
+
+Why: the two are different products. One turns a video into a citable grid; the other follows the
+user's playback position and keeps talking. Bundling them meant `dsh-video-storyboard` carried a
+Windows SMTC probe, a chat server, an HTTP page and a speech seam that had nothing to do with
+video recognition — and anyone who only wanted a storyboard got all of it.
+
+This package now ships **four** tools: `video_storyboard`, `video_zoom`, `video_probe`,
+`video_locate`. It has **zero** imports from co-watching, and never will — the dependency is
+one-way (`watch → storyboard`).
+
+Migration:
+
+- **You used `video_watch` / `watch_together`** → `npm i dsh-watch-together`, then keep calling the
+  same tool. The parameters are unchanged; only the package that provides it moved.
+- **You only used the storyboard tools** → nothing to do. `dsh-video-storyboard@0.5.0` drops code
+  you were not calling, and its four tools are untouched.
+
+Everything that was in the `[Unreleased]` section before this release — the speech seam, the
+path-loaded voice adapters, `examples/voice-edge-tts`, `examples/floating-chat`, the single text
+stream, the `video_watch → watch_together` rename — moved with the feature and is documented in
+`dsh-watch-together`'s CHANGELOG under `0.1.0`.
+
+### Added
+
+- **Seven more public subpaths**, because `dsh-watch-together` needs them to build a segment:
+  `./board`, `./cache`, `./storage`, `./locate`, `./subtitles`, `./ytdlp`, `./python`,
+  `./browser-time`. They were always there as files; now they are a stated contract.
+- **`test/schema-audit.test.mjs` now audits this package only.** The same audit exists in
+  `dsh-watch-together` for `watch_together`, including a check that the entry point never
+  registers a `video_*` tool.
+
+### Kept on purpose
+
+- `boardOptions()` still accepts `kind: 'watch'` (5 cells, `minGap: 0.5`, `adaptive: false`) —
+  `dsh-watch-together` calls it for those numbers instead of keeping a second copy.
+  `test/board.test.mjs` pins the values.
+- `cache.js` `PROTECTED_FILES` still protects `watch.json` / `latency.json` / `seen.jsonl` /
+  `cells.json`. Both packages share one cache directory, so pruning from this side must not delete
+  the other side's data.
+
+### Removed
+
+- `src/watch/` (27 modules), `src/watch_smtc.py`, `test/layering.test.mjs` (the import rule it
+  enforced is now a package boundary), 22 test files, `examples/`, `scripts/watch-sim.mjs`,
+  `scripts/watch-e2e.mjs`, `docs/WATCH.zh.md`.
+- `scripts/start-edge-debug.cmd` moved to `dsh-watch-together/scripts/` — it exists to read
+  `video.currentTime`, which only co-watching needs.
+
 ## [0.4.5] - 2026-10-30
 
 ### Fixed

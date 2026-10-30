@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CACHE_VERSION, cacheKey, pruneCache, readCache, withCache, writeCache } from '../src/cache.js';
+import { CACHE_VERSION, cacheKey, pruneCache, readCache, withCache, writeCache } from '../src/storyboard/cache.js';
 
 const withTemp = async (fn) => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-cache-'));

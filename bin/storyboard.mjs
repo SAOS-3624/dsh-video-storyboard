@@ -11,12 +11,13 @@
 import { writeFile } from 'node:fs/promises';
 
 import { args as parse } from './_args.mjs';
-import { probeVideo } from '../src/probe.js';
-import { planWindows } from '../src/plan.js';
-import { isHttpUrl, resolveInput } from '../src/fetch.js';
+import { probeVideo } from '../src/storyboard/probe.js';
+import { planWindows } from '../src/storyboard/plan.js';
+import { isHttpUrl } from '../src/storyboard/url.js';
+import { resolveInput } from '../src/storyboard/fetch.js';
 import {
   DETAIL_CHARS, formatManifest, formatTimeline, runStoryboard, saveStoryboards,
-} from '../src/pipeline.js';
+} from '../src/storyboard/pipeline.js';
 
 const opt = parse(process.argv.slice(2), {
   cells: 0, sheets: 0, from: 0, to: 0, threshold: 'auto', 'min-gap': 1.2,
@@ -82,7 +83,7 @@ if (batchStep > 0) {
   let boundaries = [];
   let precomputed = null;
   if (opt.snap !== false) {
-    const { scanShots } = await import('../src/scan.js');
+    const { scanShots } = await import('../src/storyboard/scan.js');
     console.log('[batch] 全片扫描切点（用于窗口对齐，可加 --no-snap 跳过）…');
     // 这一遍的切点也直接喂给每个窗口，省掉"每个窗口各扫一遍"的重复解码
     precomputed = await scanShots({ input: localPath, fps: info.fps, threshold: 'auto' });

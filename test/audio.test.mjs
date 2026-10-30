@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { analyzeAudio, detectOnsets, detectSilence, measureLoudness } from '../src/audio.js';
-import { alignCells, parseSrt, speechCurve } from '../src/asr.js';
-import { DEFAULT_FFMPEG } from '../src/probe.js';
-import { addAudioStrip, composeSheet, layoutCanvas, STRIP_BAR, STRIP_SEP } from '../src/sheet.js';
+import { analyzeAudio, detectOnsets, detectSilence, measureLoudness } from '../src/storyboard/audio.js';
+import { alignCells, parseSrt, speechCurve } from '../src/storyboard/asr.js';
+import { DEFAULT_FFMPEG } from '../src/storyboard/probe.js';
+import { addAudioStrip, composeSheet, layoutCanvas, STRIP_BAR, STRIP_SEP } from '../src/storyboard/sheet.js';
 
 const run = promisify(execFile);
 let hasFfmpeg = false;

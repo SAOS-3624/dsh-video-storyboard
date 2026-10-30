@@ -15,7 +15,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-  probeToolSpec, storyboardToolSpec, validateToolArgs, validateZoomArgs, zoomToolSpec,
+  locateToolSpec, probeToolSpec, storyboardToolSpec, validateToolArgs,
+  validateZoomArgs, zoomToolSpec,
 } from '../src/tool-spec.js';
 
 const HOST_TOOLS = join(homedir(), '.dsh/profiles/node_modules/@deepseek-ai/dsh-tools/lib/index.js');
@@ -85,12 +86,48 @@ test('contract: video_zoom 的 schema 同样过宿主 defineTool', async (t) => 
   const spec = zoomToolSpec();
   const tool = host.defineTool({ ...spec, execute: async () => ({ images: [], text: '' }) });
   assert.equal(tool.name, 'video_zoom');
-  assert.deepEqual(tool.parameters.required.sort(), ['from', 'input', 'to']);
+  // from/to 只有在没有 cellId 时才必需：schema 必须放行 { input, cellId }，
+  // 否则视频格寻址在宿主参数校验阶段就死了。
+  assert.deepEqual(tool.parameters.required.sort(), ['input']);
+  assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a.mp4', cellId: 8 }), []);
   assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a.mp4', from: 10, to: 20 }), []);
-  assert.ok(host.validateArgs(spec.parameters, { input: 'a.mp4' }).length > 0, '缺 from/to 应报错');
+  assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a.mp4' }), [],
+    'schema 层放行；缺窗口由 validateZoomArgs 报更明确的错');
+  assert.ok(validateZoomArgs({ input: 'a.mp4' }).length > 0, '缺 from/to 且无 cellId，本地必须挡住');
+  // 这两个参数以前只在 handler 里被读取、没有进 schema，宿主传不进来。
+  assert.equal(spec.parameters.transcriptFile.type, 'string');
+  assert.deepEqual(spec.parameters.detail.enum, ['low', 'med', 'high']);
+  assert.deepEqual(host.validateArgs(spec.parameters, {
+    input: 'a.mp4', cellId: 1, transcriptFile: 'subs.srt', detail: 'high',
+  }), []);
+  assert.deepEqual(validateZoomArgs({
+    input: 'a.mp4', cellId: 1, transcriptFile: 'subs.srt', detail: 'high',
+  }), []);
+  assert.ok(validateZoomArgs({ input: 'a.mp4', cellId: 1, transcriptFile: '' }).length > 0);
+  assert.ok(validateZoomArgs({ input: 'a.mp4', cellId: 1, detail: 'ultra' }).length > 0);
+  // 这两个也是 board.js 会读、schema 以前没有的（审计扫出来的）
+  assert.equal(spec.parameters.ocr.type, 'boolean');
+  assert.equal(spec.parameters.scanHeight.type, 'integer');
+  assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a.mp4', from: 0, to: 5, ocr: false, scanHeight: 720 }), []);
+  assert.ok(validateZoomArgs({ input: 'a.mp4', from: 0, to: 5, scanHeight: 40 }).length > 0);
   // 宿主 schema 没有数值上限，cells:20 会被放行 —— 这正是本地校验必须存在的理由
   assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a', from: 1, to: 2, cells: 20 }), []);
   assert.ok(validateZoomArgs({ input: 'a', from: 1, to: 2, cells: 20 }).length > 0, '本地必须挡住');
+});
+
+test('contract: video_locate 暴露 cookies / allowAnonymous', async (t) => {
+  if (!host) return t.skip('host @deepseek-ai/dsh-tools not found');
+  const spec = locateToolSpec();
+  const tool = host.defineTool({ ...spec, execute: async () => ({ text: '' }) });
+  assert.equal(tool.name, 'video_locate');
+  assert.equal(spec.parameters.cookies.type, 'string');
+  assert.equal(spec.parameters.allowAnonymous.type, 'boolean');
+  assert.deepEqual(
+    host.validateArgs(spec.parameters, {
+      input: 'a.mp4', query: 'x', cookies: 'c.txt', allowAnonymous: true,
+    }),
+    [],
+  );
 });
 
 test('contract: video_probe 的 schema 同样过宿主 defineTool', async (t) => {
@@ -114,6 +151,14 @@ test('本地兜底校验：越界参数被自己挡住（schema 子集不支持 
   assert.ok(validateToolArgs({ input: 'a', sheets: 0 }).length > 0);
   assert.ok(validateToolArgs({ input: 'a', from: 10, to: 5 }).length > 0);
   assert.ok(validateToolArgs({ input: 'a', minGap: -1 }).length > 0);
+});
+
+test('本地兜底校验：sheets 上限与 cells 对齐（1..16）', () => {
+  // 旧上限 4 是自己跟自己打架：自动档按帧数能算出 5 张、8 张，
+  // 而用户/模型手动要 5 张反而被拒。上限该由调用方判断，不该藏一个自动能越过的阈值。
+  assert.deepEqual(validateToolArgs({ input: 'a', sheets: 5 }), [], '5 张应该放行');
+  assert.deepEqual(validateToolArgs({ input: 'a', sheets: 16 }), [], '16 张是上限');
+  assert.ok(validateToolArgs({ input: 'a', sheets: 17 }).length > 0, '17 张要挡住');
 });
 
 test('本地兜底校验：zoom 要求 from/to 且区间有效', () => {

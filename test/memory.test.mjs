@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describeMemory, memoryPath, recall, remember } from '../src/memory.js';
+import { describeMemory, memoryPath, recall, remember } from '../src/storyboard/memory.js';
 
 async function withTempEnv(fn) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-mem-'));

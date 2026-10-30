@@ -1,7 +1,18 @@
 /**
- * index.js — DSH 插件入口。注册两个工具：
+ * index.js — DSH 插件入口。**只做注册**，四个工具：
+ *
  *   video_storyboard  全片（或一段）的概览宫格
  *   video_zoom        某一段的近距离重看（格少、每格大）
+ *   video_probe       只读容器头，不花图片 token
+ *   video_locate      纯文本定位：那句话在第几分钟
+ *
+ * 陪看（`watch_together`）不在这个包里 —— 它是 **`dsh-watch-together`**，一个单独的插件，
+ * 单向依赖本包。本包不 import 它任何一行，所以这里也不注册它的工具。
+ *
+ * 每个工具的 execute 在 `src/tools/<name>.js` —— 拆开是有原因的：
+ * 宿主管参数走的是 schema，**schema 没声明的参数会被直接丢掉**。
+ * 所以"handler 读了哪些 args"必须能被静态扫出来，和"schema 声明了哪些"对上；
+ * 一个文件里塞五个 handler 就扫不出边界了（见 test/schema-audit.test.mjs）。
  *
  * 契约要点（都是对着 @deepseek-ai/dsh-tools 的类型定义核对的）：
  *  - `apply` 返回 disposer（把所有 `ctx.tools.register()` 的返回值串起来）
@@ -12,26 +23,8 @@
  *  - saveImage 要的是**真正编码后的字节**（PNG/JPEG），不是裸 RGB —— 它会解码校验
  */
 
-import { runStoryboard, formatForDetail, formatManifest, formatProbe, formatRemoteProbe } from './pipeline.js';
-import { boardOptions } from './board.js';
-import { probeVideo } from './probe.js';
-import { formatMatches, matchSegments, recallSegments } from './locate.js';
-import { lookupCell } from './cells.js';
-import { DEFAULT_RAMP, DEFAULT_SEGMENT } from './batches.js';
-import { configuredLaunch, configuredPort, listTargets, probeBrowser } from './browser-time.js';
-import { chatAlive, startChatServer, DEFAULT_CHAT_PORT } from './chat.js';
-import { checkBiliLogin, fetchRemoteSubtitles } from './subtitles.js';
-import { listVoices, speak as speakAloud } from './tts.js';
-import { makeBuilder, runWatchPass } from './watch-run.js';
-import {
-  DEFAULT_LOOKAHEAD, loopStatus, startWatchLoop, stopWatchLoop,
-} from './watch-loop.js';
-import { wakeSession } from './timer.js';
-import { isHttpUrl, probeUrl, resolveDirectUrl, resolveInput } from './fetch.js';
-import {
-  storyboardToolSpec, zoomToolSpec, probeToolSpec, locateToolSpec, watchToolSpec,
-  validateToolArgs, validateZoomArgs, validateWatchArgs,
-} from './tool-spec.js';
+// 四个视频识别工具各自的注册入口：契约、handler、注册都在 src/storyboard/ 里。
+import { storyboardTools } from './storyboard/register.js';
 
 export const name = 'dsh-video-storyboard';
 export const inject = ['tools', 'attachments'];
@@ -56,62 +49,6 @@ async function loadDefineTool() {
   throw new Error('cannot resolve @deepseek-ai/dsh-tools (set DSH_TOOLS_PATH for local dev)');
 }
 
-/**
- * 把每张分镜图提交成附件。storyboard 和 zoom 各写过一遍这段循环，
- * 收成一处，免得以后改保存参数（mediaType / 命名）只改到一边。
- */
-async function attachSheetImages(ctx, result) {
-  const images = [];
-  for (const sheet of result.sheets) {
-    images.push(await ctx.attachments.saveImage({
-      data: sheet.png,
-      mediaType: 'image/png',
-      name: `storyboard-${sheet.sheet}.png`,
-    }));
-  }
-  return images;
-}
-
-/**
- * 把陪看的聊天框支起来（只做一次）。
- *
- * 为什么要在插件里做：DSH 的 `wait: true` 一遇到 `paused` 就返回，用户想"不暂停视频、
- * 只说一句"没有别的入口；而宿主的输入框在阻塞期间又不会把话送到工具里。
- * 这个 localhost 页面写盘即时，`watch-run` 的等待循环每 500ms 读一次就能听见。
- *
- * 起不来（端口被占 / 没浏览器）就算了 —— 它是加分项，不该拖累陪看本身。
- */
-let chatBoxTried = false;
-async function ensureChatBox(browserPort) {
-  if (chatBoxTried) return;
-  chatBoxTried = true;
-  try {
-    if (!(await chatAlive(DEFAULT_CHAT_PORT))) {
-      await startChatServer({ port: DEFAULT_CHAT_PORT, log: () => {} });
-    }
-    const bp = browserPort ?? configuredPort();
-    if (!bp) return;
-    const ts = await listTargets({ port: bp }).catch(() => null);
-    const already = (ts ?? []).some((t) => String(t.url ?? '').includes(`:${DEFAULT_CHAT_PORT}`));
-    if (already) return;
-    // 在调试浏览器里开一个标签（CDP 的 /json/new，Chrome 111+ 要求 PUT）
-    await fetch(`http://127.0.0.1:${bp}/json/new?${encodeURIComponent(`http://127.0.0.1:${DEFAULT_CHAT_PORT}/`)}`,
-      { method: 'PUT' }).catch(() => null);
-  } catch { /* 静默：聊天框是可选能力 */ }
-}
-
-/** 跑一次管线，把每张图提交成附件，返回规范值 { images, text } */
-async function runAndAttach(ctx, options, problems, cellRange) {
-  if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
-  const result = await runStoryboard(options);
-  // 预算：单次工具结果有上限，超出会被宿主折进磁盘（模型常常不会去读）。
-  // 24k 字符 ≈ 一张 16 格图的完整清单还有余量；超了就在 cell 边界截断并给出续读方式。
-  return {
-    images: await attachSheetImages(ctx, result),
-    text: formatForDetail(result, { detail: options.detail, cellRange }),
-  };
-}
-
 export async function apply(ctx) {
   try {
     return await registerAll(ctx);
@@ -132,256 +69,13 @@ export async function apply(ctx) {
 async function registerAll(ctx) {
   const defineTool = await loadDefineTool();
 
-  const storyboard = defineTool({
-    ...storyboardToolSpec(),
-    execute: (args) => runAndAttach(ctx, boardOptions(args, { kind: 'board' }),
-      validateToolArgs(args), args.cellRange ?? null),
-  });
+  const tools = storyboardTools(defineTool, ctx);
 
-  const zoom = defineTool({
-    ...zoomToolSpec(),
-    async execute(args) {
-      const problems = validateZoomArgs(args);
-      if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
-
-      // cellId → 该格的绝对时间区间（上一次分镜落下的表）。
-      // 找不到就明确报错并指路，而不是悄悄退回一个"猜的"窗口。
-      let from = args.from;
-      let to = args.to;
-      if (args.cellId !== undefined && args.cellId !== null) {
-        const hit = await lookupCell(args.input, args.cellId);
-        if (!hit) {
-          throw new Error(`no cell map recorded for this input (cellId ${args.cellId}). ` +
-            'Run video_storyboard on it first, or pass from/to.');
-        }
-        from = hit.from;
-        to = hit.to;
-      }
-      // zoom 的参数只在一处定义（src/board.js）。这里先拿它的 fetchOptions 去解析直链，
-      // 免得"扫描清晰度/zoom 清晰度"在解析和取帧两处出现两个值。
-      const opts = boardOptions({ ...args, from, to }, { kind: 'zoom' });
-      const fetchOptions = opts.fetchOptions;
-      // 链接模式下先设法拿到高清直链：storyboard 那次 `-J` 通常已经记下了，
-      // 这里多半是内存命中；实在没有才真的再解析一次（2.4 s）。
-      let frameSource = null;
-      if (isHttpUrl(args.input)) {
-        try {
-          const resolved = await resolveInput(args.input, fetchOptions);
-          frameSource = resolved.frameSource
-            ?? await resolveDirectUrl(args.input, { ...fetchOptions, height: fetchOptions.zoomHeight });
-        } catch {
-          /* 直链拿不到就退回本地低清：糊一点，但整次调用不该失败 */
-        }
-      }
-      const result = await runStoryboard({ ...opts, frameSource });
-      return {
-        images: await attachSheetImages(ctx, result),
-        text: formatForDetail(result, { detail: args.detail ?? 'med' }),
-      };
-    },
-  });
-
-  // ---- 一起看：按用户的播放进度一段段往下看（预取 + 到点交付）
-  // 具体逻辑在 watch-run.js，这里只做参数校验 + 把宿主的能力（存图、跑分镜）递进去。
-  const watchCache = new Map();
-  const watch = defineTool({
-    ...watchToolSpec(),
-    async execute(args) {
-      const problems = validateWatchArgs(args);
-      if (args.stopLoop === true) return { text: JSON.stringify(stopWatchLoop('requested')), images: [] };
-      // 即将进入阻塞：把聊天框支起来（第一次会起服务 + 开标签，之后什么都不做）
-      if (args.wait === true) void ensureChatBox(args.browserPort ?? configuredPort());
-      // 只看钟的状态，不读进度、不出图 —— 排查"它为什么不说话"时用。
-      // **顺带报浏览器状态**：这是唯一一个"只问不建"的入口，模型想知道
-      // "浏览器到底开着没"的时候应该走这里，而不是拿播放位置去倒推。
-      if (args.statusOnly === true) {
-        const bp = args.browserPort ?? configuredPort() ?? null;
-        const browser = bp
-          ? await probeBrowser({ port: bp }).catch(() => ({ state: 'error', port: bp }))
-          : { state: 'unconfigured', port: null };
-        return { text: JSON.stringify({ ...loopStatus(), browser }, null, 1), images: [] };
-      }
-      // 看这台机器有哪些声音（TTS 用）
-      if (args.listVoices === true) return { text: JSON.stringify(await listVoices()), images: [] };
-
-      // 立刻念一句（脚本发声，不经过模型）：配合 nextLine 之外的"单发"场景
-      if (args.speakAloud === true) {
-        const text = String(args.text ?? '').trim();
-        if (!text) return { text: JSON.stringify({ ok: false, reason: 'empty-text' }), images: [] };
-        const r = await speakAloud(text, { voice: args.voice ?? undefined, rate: args.rate ?? 0 });
-        return { text: JSON.stringify(r), images: [] };
-      }
-
-      // 检查 B 站登录态与字幕可用性：这一条能立刻回答"为什么还在用 ASR"
-      if (args.checkCookies === true) {
-        const login = await checkBiliLogin({ cookies: args.cookies });
-        const url = typeof args.input === 'string' && /^https?:/i.test(args.input) ? args.input : null;
-        const subs = url ? await fetchRemoteSubtitles({ url, cookies: args.cookies }) : null;
-        return {
-          text: JSON.stringify({
-            login,
-            subtitles: subs ? { ok: subs.ok, reason: subs.reason, count: subs.segments?.length ?? 0, lang: subs.lang } : 'pass a video URL in input to check subtitles',
-          }),
-          images: [],
-        };
-      }
-      // 立刻试一次唤醒，把结果原样报出来。这一条能 5 秒内回答"loop 到底叫不叫得醒我"。
-      if (args.testWake === true) {
-        const r = await wakeSession(ctx, {
-          sessionId: lastSessionId,
-          text: '[一起看] 这是一次唤醒连通性测试，收到就不用回复内容，回一句"收到"即可。',
-        });
-        return {
-          text: JSON.stringify({
-            sessionId: lastSessionId ?? null,
-            hasSessionController: Boolean(ctx?.sessionController),
-            hasPrompt: typeof ctx?.sessionController?.prompt === 'function',
-            ...r,
-          }),
-          images: [],
-        };
-      }
-      if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
-      // 批次表的默认值在这里定一次，工具和循环共用同一份（否则两边段边界会各算各的）
-      const segment = Number(args.segment) > 0 ? Number(args.segment) : DEFAULT_SEGMENT;
-      const ramp = args.ramp === undefined ? [...DEFAULT_RAMP] : args.ramp;
-      const callArgs = { ...args, segment, ramp };
-
-      // 机器配置只在这里读一次，然后显式传给库层
-      const browserPort = args.browserPort ?? configuredPort() ?? undefined;
-      const autoLaunch = configuredLaunch();
-
-      const r = await runWatchPass(callArgs, {
-        browserPort, autoLaunch,
-        cache: watchCache,
-        runStoryboard,
-        formatManifest,
-        saveImage: async ({ data, name }) => ctx.attachments.saveImage({
-          data, mediaType: 'image/png', name,
-        }),
-      });
-
-      // 起陪看循环：从这里往后每 120 秒一段，到点自己叫醒。
-      // 没有会话 id 就不起（只是不会自动说话，工具本身照常可用）。
-      // tts 模式下不需要会话 id：脚本自己念，不叫醒任何人。
-      // 没有 session/event 的宿主里，这一条就是"台词到底会不会出声"的开关。
-      const canLoop = Boolean(lastSessionId) || args.tts === true;
-      if (args.loop !== false && canLoop && Number.isFinite(r.cursor)) {
-        const size = r.size ?? 120;
-        const startSeg = r.segment ?? 0;
-        // 余量按**时间**算（默认 5 分钟）：开头段短就多备几段。
-        // 以前固定"两段"，在 1/2/3 分钟的阶梯上最前面只等于 2 分钟 —— 不够保险。
-        // depth 只在调用方显式给了的时候才按段数算（旧口径，一般不要用）。
-        const lookahead = args.lookahead === undefined
-          ? DEFAULT_LOOKAHEAD
-          : Math.max(0, Number(args.lookahead) || 0);
-        const depth = Number(args.depth) >= 1 ? Math.floor(Number(args.depth)) : null;
-        const speakEvery = Math.max(0, Number(args.speakEvery) || 0);
-        // tts: true → 到点由脚本念台词，不叫醒模型（省 token、也没有等待）
-        const tts = args.tts === true
-          ? { enabled: true, voice: args.voice ?? undefined, rate: args.rate ?? 0 }
-          : null;
-        // 台词库存的"补词判定"**默认关闭**：
-        // 分段 + 阻塞等待已经足够知道"该看下一段了"，再加一层库存判断反而会把模型叫得太频繁，
-        // 而且有些模型本来就不爱说话 —— 不该逼它产出台词。
-        const refillBelow = args.refillBelow === undefined ? 0 : Math.max(0, Number(args.refillBelow) || 0);
-        startWatchLoop({
-          ctx, sessionId: lastSessionId, input: r.input,
-          cursor: r.cursor, status: r.status,
-          // 段长 / 阶梯 / 余量交给循环：之后它自己往前滚、自己补建
-          segment, ramp, lookahead, depth, speakEvery, tts, refillBelow,
-          // 循环负责"什么时候建"，这里给它"怎么建"
-          deps: {
-            browserPort,
-            build: makeBuilder({
-              input: r.input, args: callArgs, runStoryboard, formatManifest, cache: watchCache,
-            }),
-          },
-          log: () => {},
-        });
-      }
-      return { text: r.text, images: r.images };
-    },
-  });
-
-  // 只读容器头，不花图片 token —— 让模型在第一次出图前先知道"多长、按什么粒度读"
-  const probe = defineTool({
-    ...probeToolSpec(),
-    async execute(args) {
-      if (!args?.input) throw new Error('input is required');
-      const fetchOptions = { cookies: args.cookies, allowAnonymous: args.allowAnonymous === true };
-      // 链接只解析、不下载：probe 的价值是"便宜"，下载 7 MB 就失去意义了
-      if (isHttpUrl(args.input)) {
-        const remote = await probeUrl(args.input, fetchOptions);
-        return { text: formatRemoteProbe(remote) };
-      }
-      const info = { ...(await probeVideo(args.input)), path: args.input };
-      return { text: await formatProbe(info) };
-    },
-  });
-
-  // 纯文本定位：不读帧、不出图，靠已有的转写回答"那句话在第几分钟"
-  const locate = defineTool({
-    ...locateToolSpec(),
-    async execute(args) {
-      if (!args?.input) throw new Error('input is required');
-      if (!args?.query) throw new Error('query is required');
-      const max = Math.min(20, Math.max(1, Number(args.max) || 5));
-      const resolved = await resolveInput(args.input, {
-        cookies: args.cookies, allowAnonymous: args.allowAnonymous === true,
-      });
-      let segments = recallSegments(resolved.path);
-      if (!segments) {
-        // 没有现成转写就补跑一次（只出文本、不出图）：复用 storyboard 的全套配置，
-        // 跑完它会自己把转写塞进 locate 的缓存里
-        await runStoryboard({
-          input: resolved.path, from: args.from, to: args.to, cells: 1,
-          transcriptFile: args.transcriptFile, textOnly: true, encode: false,
-        });
-        segments = recallSegments(resolved.path);
-      }
-      if (!segments || segments.length === 0) {
-        return { text: 'no transcript available for this file: run video_storyboard first, ' +
-          'or pass transcriptFile. Without a transcript there is nothing to match on.' };
-      }
-      const lo = Number.isFinite(args.from) ? args.from : 0;
-      const hi = Number.isFinite(args.to) ? args.to : Infinity;
-      const inWindow = segments.filter((x) => x.to >= lo && x.from <= hi);
-      const matches = matchSegments(inWindow, args.query, { max });
-      return { text: formatMatches(args.query, matches, { total: inWindow.length }) };
-    },
-  });
-
-  // **disposers 必须在最前面声明**：它以前声明在 ctx.on 之后，于是 `disposers.push(off)`
+  // **disposers 必须在最前面声明**：它曾经声明在别的钩子之后，于是 `disposers.push(off)`
   // 撞上 const 的暂时性死区，抛 ReferenceError，又被下面的 catch 静默吞掉 ——
-  // 监听器注册成功了，解绑函数却从来没登记过（插件卸载时不会解绑，而且没人知道出过错）。
+  // 工具注册成功了，解绑函数却从来没登记过（插件卸载时不会解绑，而且没人知道出过错）。
   const disposers = [];
-
-  // 当前会话：从 session/event 里拿（`session.header.id`）。这是 dsh-fish 的做法，
-  // 比反射 ctx 安全得多 —— 反射会把整个应用搞崩（见 apply 的注释）。
-  let lastSessionId = null;
-  if (typeof ctx.on === 'function') {
-    try {
-      const off = ctx.on('session/event', (session) => {
-        const id = session?.header?.id ?? session?.id;
-        if (id) lastSessionId = id;
-      });
-      if (typeof off === 'function') disposers.push(off);
-    } catch (e) {
-      // 拿不到就退化成"只能手动触发"，但要说出来 —— 静默失败是这类 bug 的温床
-      try {
-        ctx?.logger?.warn?.(`[dsh-video-storyboard] session/event hook failed: ${e?.message ?? e}`);
-      } catch { /* 日志都没有就只能算了 */ }
-    }
-  }
-
-  disposers.push(
-    ctx.tools.register(storyboard),
-    ctx.tools.register(zoom),
-    ctx.tools.register(probe),
-    ctx.tools.register(locate),
-    ctx.tools.register(watch),
-  );
+  disposers.push(...tools.map((tool) => ctx.tools.register(tool)));
   return () => {
     for (const dispose of disposers.reverse()) dispose?.();
   };

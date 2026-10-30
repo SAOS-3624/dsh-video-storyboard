@@ -18,8 +18,8 @@ import { promisify } from 'node:util';
 import {
   applyTermMap, canTranscribe, chunkWindows, describeAsrTarget, filterSuspectSegments, mergeSegments,
   needsCloudKey, resolveAsrConfig, transcribe, transcribeLong,
-} from '../src/asr.js';
-import { DEFAULT_FFMPEG } from '../src/probe.js';
+} from '../src/storyboard/asr.js';
+import { DEFAULT_FFMPEG } from '../src/storyboard/probe.js';
 
 const run = promisify(execFile);
 let hasFfmpeg = false;

@@ -10,21 +10,28 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 
-const DIRS = ['src', 'bin', 'scripts'];
+const DIRS = ['src', 'bin', 'scripts', 'examples'];
 const EXT = /\.(mjs|js)$/;
 
-const files = [];
-for (const dir of DIRS) {
+// **必须递归**：src/tools/ 这种子目录里的文件不扫，等于给自己留了个"语法错了但 check 通过"的洞。
+async function walk(dir) {
   let entries = [];
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch {
-    continue;
+    return [];
   }
+  const out = [];
   for (const e of entries) {
-    if (e.isFile() && EXT.test(e.name)) files.push(join(dir, e.name));
+    const p = join(dir, e.name);
+    if (e.isDirectory()) out.push(...await walk(p));
+    else if (e.isFile() && EXT.test(e.name)) out.push(p);
   }
+  return out;
 }
+
+const files = [];
+for (const dir of DIRS) files.push(...await walk(dir));
 
 if (files.length === 0) {
   console.error('check: no source files found (run from the repo root)');
