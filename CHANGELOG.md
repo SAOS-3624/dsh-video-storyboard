@@ -18,8 +18,9 @@
 
 ### Fixed
 
-- `pipeline` 里 `spawnImpl: spawn` —— 这个文件从来没 import 过 `spawn`，每次运行都
-  `ReferenceError`，被外层 catch 吞成 `asr-failed · spawn is not defined`，**转写永远是空的**。
+- `pipeline` 里 `spawnImpl: spawn` —— 0.4.4 里这个 import 是有的（`import { execFile, spawn } from 'node:child_process'`），
+  拆成 `src/storyboard/` 时丢了。之后每次运行都 `ReferenceError`，被外层 catch 吞成
+  `asr-failed · spawn is not defined`，转写因此一直是空的。
 - `plan.pick()` 只有四个形参，调用处传的第五个 `musicDriven` 被丢掉 → 返回值里恒为
   `undefined` → "音乐片取帧更密"（`minMotion` 1.5→0.7）写了却从没生效过。
 - 扫描缓存不保存 `darkRuns` → 命中缓存时黑场并回内容格，同一支片子第一次跑和第二次出图不一样。
