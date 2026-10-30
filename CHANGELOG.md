@@ -2,6 +2,69 @@
 
 ## [Unreleased]
 
+### BREAKING — the TTS engine is out of core
+
+`video_watch` no longer speaks. The plugin ships **no engine, no default adapter, and no voice
+parameters**; it only emits timed speech events (issue #27, decided with @ggfgfgf-on). Keeping a
+Windows SAPI + `ffplay` + registry implementation inside a general video plugin made the core
+platform-specific, raced any speech plugin the host already had, and put an engine choice in the
+model-visible schema where it did not belong.
+
+Removed from `video_watch.parameters`: `tts`, `voice`, `rate`, `listVoices`, `speakAloud`, `text`
+(`text` existed only for `speakAloud`).
+
+Migration:
+
+- **Nothing attached to speech** → nothing to do. Lines that come due still wake the model, which
+  says them itself. Unchanged, and still the default.
+- **Something attached** → subscribe with `onSpeech()`. While a subscriber is attached the loop
+  hands each due line over instead of waking you; with none it wakes you.
+- **You were passing `tts: true`** → drop it and attach a consumer. `examples/voice-edge-tts/` is a
+  worked example (edge-tts → `ffplay` → system-voice fallback); it was `src/tts.js` until now.
+
+### Added
+
+- **`src/voice.js` — the speech seam.** `onSpeech(handler, { voice })` returns an unsubscribe
+  function; events are `{ seq, at, text, state, input?, segment?, origin? }` and are frozen.
+  `emitSpeech()` returns the number of **successful** deliveries and does nothing when nobody is
+  subscribed — that is what keeps the zero-engine promise. `speechEvents(lines, …)` turns stored
+  line slots into that shape, and `video_watch` results now carry `speech: [{ at, text, state }]`.
+- **Plug-in adapters, loaded by path.** `~/.dsh/voice.json` `{ "adapter": "<path or module>" }` (or
+  `DSH_VOICE_ADAPTER`) is `import()`ed at startup; the module exports `attach(api)` and returns a
+  detach. Nothing is bundled and a failure only logs a warning.
+- **`examples/voice-edge-tts/`** — a working adapter. It prints `[voice 03:11.4] <line>` to stderr
+  for every line that comes due; that log is the point when you are checking *when* text fires.
+- **`test/schema-audit.test.mjs`** — the host filters tool arguments by the declared schema, so a
+  parameter the handler reads but the schema omits is silently dropped. That class of bug produced
+  four PRs in one day. The audit scrapes `args.X` per tool, asserts every name is declared, rejects
+  duplicate keys and keeps `dsh.plugin.json` in step with `package.json`.
+- **One text stream for the chat box.** `chat.jsonl` now carries `line` (scripted), `assistant`
+  (interjection) and `user`; `say: true` marks the speakable ones. `video_watch({ say: "…" })` is how
+  the model gets its interjection in — the plugin cannot read a normal reply. `attachSpeechToChat()`
+  subscribes with `voice: false`, so a display-only consumer can never silence the loop.
+- **`examples/floating-chat/window.py`** — a real floating window, no browser: frameless, always on
+  top, semi-transparent, drag by the header, Esc to close. Standard-library tkinter only.
+
+### Changed
+
+- `pipeline.js` 1502 → 689 lines (`format.js`, `frames.js`, `ocr-subs.js` split out);
+  `fetch.js` 913 → 373 (`ytdlp.js`, `media-store.js`, `direct-url.js`, `url.js`);
+  `watch-run.js` 844 → 534 (`watch-source.js`, `watch-modes.js`, `watch-browser.js`).
+  All pure moves — the storyboard PNG is byte-identical afterwards.
+- **Each tool's `execute` lives in `src/tools/<name>.js`**; `index.js` is registration only. The
+  split is what lets the audit above know which args belong to which tool.
+- `wakeOnLinesEmpty` no longer implies `tts: true` — it wakes whenever the current segment runs out
+  of pre-written lines, which is exactly what a voice consumer cannot report.
+- Starting the loop without a session id is allowed when a speech subscriber is attached.
+- `scripts/check-syntax.mjs` walks subdirectories; `src/tools/` was previously unchecked.
+- Fixed schema gaps found by the audit: `video_watch.loop` (the background loop could not be turned
+  off at all), `video_zoom.ocr` / `scanHeight`, `video_storyboard.adaptive`.
+- `video_zoom` accepts `cellId` alone (`from`/`to` are optional in the schema now);
+  `transcriptFile` / `detail` / `cookies` / `allowAnonymous` / `browserPort` are declared where their
+  handlers already read them.
+- Truncated recordings no longer lose the whole sheet: `extractSharpest` keeps whatever settled and
+  `extractFrameRaw` retries earlier seeks (issue #30).
+
 ## [0.4.5] - 2026-10-30
 
 ### Fixed

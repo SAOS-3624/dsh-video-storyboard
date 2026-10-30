@@ -19,7 +19,7 @@
 
 模型得到的是"这 90 秒里发生了什么、大概在第几秒"，需要细节时再用 `video_zoom` 放大某一段。
 
-## 四个工具
+## 五个工具
 
 | 工具 | 干什么 | 何时用 |
 |---|---|---|
@@ -27,6 +27,7 @@
 | `video_storyboard` | 出宫格图 + 文本清单 | 主体功能 |
 | `video_zoom` | 只看某一段（更小的时间窗、更密的格） | 清单看完觉得某段重要，再放大 |
 | `video_locate` | **纯文本**：一句话 → 时间码 | 知道说了什么、不知道在第几分钟 |
+| `video_watch` | 陪看：按你的真实播放进度一段段往下看（见下文） | 用户说"陪我看" |
 
 ## 安装
 
@@ -326,6 +327,116 @@ video_watch({ ramp: [] })              // 全程等长，不要阶梯
 
 建一个批次要 2–10 秒，而看一个批次要 `segment` 秒，所以**总有时间在空闲里把它建完**。
 实测 4 次交付全部 **0.0 秒**（命中预取），批次之间无缝。
+
+### 接声音（核心不发声，声音你自己接）
+
+插件**不带任何 TTS 引擎**，也不读 `~/.dsh/tts.json`。它只做两件事：
+
+1. 在**正确的播放时刻**把台词交出去；
+2. 每次结果里带上 `speech` 事件，`at` 是这句话在时间轴上的位置。
+
+念不念、用什么念、念多快，全由你（或宿主）决定。
+
+#### 事件长什么样
+
+`video_watch` 交付一段时，返回值里有：
+
+```json
+"speech": [
+  { "at": 191, "text": "钓上来了，池子里那条比他想的配合。", "state": "scheduled", "segment": 180 }
+]
+```
+
+后台循环里某句到点时，会把同一条推给你，`state` 变成 `"due"`。
+
+#### 同进程：订阅
+
+```js
+import { onSpeech } from 'dsh-video-storyboard/src/voice.js';
+
+const off = onSpeech(async ({ state, text }) => {
+  if (state !== 'due') return;      // scheduled 只是清单，不是"现在念"
+  await mySpeak(text);              // ← 你自己的引擎
+});
+```
+
+**有人订阅时**：到点的台词直接交给订阅者，循环**不会**再叫醒模型（省 token，也避免同一句被说两遍）。
+**没人订阅时**：台词照旧走"叫醒模型、模型自己说"那条路 —— 功能完整，只是安静。
+
+> 只做展示的订阅者要传 `{ voice: false }`（聊天框就是这么干的）：否则循环会以为"有人会念"，
+> 从此不再叫醒模型 —— 陪看会**默默地**变成哑巴。
+
+#### 现成适配器：`examples/voice-edge-tts`
+
+仓库里带了一个可以直接用的适配器：edge-tts 合成 → `ffplay` 播放 → 失败退回系统声音。
+每一句都会在 **stderr 打一行时间码**：
+
+```
+[voice 03:11.4] 钓上来了，池子里那条比他想的配合。
+```
+
+调试时最想知道的就是"它到底是第几秒吐出来这句话"，这行比音频本身还有用。
+
+启用只要一个文件：
+
+```json
+// ~/.dsh/voice.json
+{ "adapter": "D:/deepseek/3-Life/dsh-video-storyboard/examples/voice-edge-tts/index.mjs" }
+```
+
+或者环境变量 `DSH_VOICE_ADAPTER=<同样的路径>`。插件启动时 `import()` 它，挂不上只写一行 warn，
+**不会**影响插件启动。
+
+#### 最小适配器（一分钟）
+
+```js
+// my-voice.mjs
+import { execFile } from 'node:child_process';
+
+export function attach({ onSpeech }) {
+  return onSpeech(({ state, text }) => {
+    if (state === 'due') execFile('say', [text], () => {});   // macOS；换成你自己的引擎
+  });
+}
+```
+
+`attach(api)` 收到 `{ onSpeech, speechSubscribers, emitSpeech, lastSpeech }`，返回一个退订函数即可。
+
+> 想让"这一段的词念完了"提醒你补写？开 `wakeOnLinesEmpty: true`。
+
+### 聊天框 / 悬浮窗：一条统一的文本流
+
+插话那句和剧本台词**走同一条流**，一起显示在聊天框里，也一起被念出来：
+
+| role | 是什么 | 会念 |
+|---|---|---|
+| `line` | 剧本台词（到点由循环写进来） | 是 |
+| `assistant` | 模型插话时说的那句 | 是 |
+| `user` | 你自己打的字 | 否 |
+
+它们都落在 `chat.jsonl`（`%LOCALAPPDATA%\dsh-video-storyboard\cache\`）。
+
+**模型自己说的话怎么进到框里？** 靠 `say`：
+
+```js
+video_watch({ say: "你看这条，鱼比人还紧张。" })
+```
+
+插件读不到模型的正常回复，所以插话时想让用户**看见并听见**，就得把这句话交给 `say`。
+
+#### 悬浮窗（不用浏览器）
+
+`examples/floating-chat/window.py` 是个**真·独立悬浮窗**：无边框、置顶、半透明、
+按住顶部拖动、回车发送、Esc 关闭。用标准库 tkinter，不装任何第三方包。
+
+```bash
+pythonw examples/floating-chat/window.py     # 无控制台
+```
+
+> **一定要用带 tkinter 的 Python**：Windows 商店版自带；python.org 官方安装包勾上 tcl/tk 也有。
+
+它和浏览器那个框看的是同一个文件，两个一起开着也不打架。浏览器画中画（"↑ 悬浮"）仍然保留：
+标签页已经开着时它最省事，而这个原生窗口不需要浏览器。
 
 ### 它不是全片概览
 
