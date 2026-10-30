@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { OCR_MAX_ITEMS, ocrPython, shouldReplace, similarity } from '../src/ocr.js';
+import { OCR_MAX_ITEMS, ocrPython, shouldReplace, similarity } from '../src/storyboard/ocr.js';
 
 test('similarity: 忽略标点，按字符算', () => {
   assert.equal(similarity('你好，世界', '你好世界'), 1);

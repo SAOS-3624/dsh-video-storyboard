@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { __resetLifecycle, ensureAsr, isOwned, keepAlive, lifecycleConfig, portOf, probeEndpoint, scheduleStop, stopViaHttp } from '../src/asr-lifecycle.js';
+import { __resetLifecycle, ensureAsr, isOwned, keepAlive, lifecycleConfig, portOf, probeEndpoint, scheduleStop, stopViaHttp } from '../src/storyboard/asr-lifecycle.js';
 
 test('lifecycleConfig: 没配 manage.start 就不托管', () => {
   assert.equal(lifecycleConfig({}), null);

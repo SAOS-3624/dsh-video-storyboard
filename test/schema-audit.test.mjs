@@ -33,15 +33,18 @@ const src = (name) => read(join(ROOT, 'src', name));
  * 每个工具的 handler 由哪些模块组成。
  *
  * **必须精确到工具**：一个模块里塞两个 handler，扫出来的就是并集，
- * 审计立刻失效。`board.js` 是 storyboard / zoom 共用的参数归一化层，所以两边都算。
+ * 审计立刻失效。`storyboard/board.js` 是 storyboard / zoom 共用的参数归一化层，所以两边都算。
+ *
+ * 路径相对 `src/`；`src/storyboard/` 与 `src/watch/` 的划分见 README 的模块表。
  */
 const HANDLER_MODULES = {
-  video_storyboard: ['tools/storyboard.js', 'tools/shared.js', 'board.js'],
-  video_zoom: ['tools/zoom.js', 'tools/shared.js', 'board.js'],
+  video_storyboard: ['tools/storyboard.js', 'tools/shared.js', 'storyboard/board.js'],
+  video_zoom: ['tools/zoom.js', 'tools/shared.js', 'storyboard/board.js'],
   video_probe: ['tools/probe.js'],
   video_locate: ['tools/locate.js'],
   video_watch: [
-    'tools/watch.js', 'watch-actions.js', 'watch-run.js', 'watch-modes.js', 'watch-source.js',
+    'tools/watch.js', 'watch/watch-actions.js', 'watch/watch-run.js',
+    'watch/watch-modes.js', 'watch/watch-source.js',
   ],
 };
 

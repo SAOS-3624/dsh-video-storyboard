@@ -16,7 +16,7 @@ import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, extname, join } from 'node:path';
 
-import { discoverYtdlp } from './ytdlp.js';
+import { discoverYtdlp } from '../storyboard/ytdlp.js';
 
 const VIDEO_EXT = new Set(['.mp4', '.mkv', '.mov', '.avi', '.flv', '.webm', '.ts', '.m4v']);
 

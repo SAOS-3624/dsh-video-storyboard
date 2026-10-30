@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 
 import {
   MAX_EXTRAPOLATE_MS, estimate, makeAnchor, shouldSpeak, updateAnchor,
-} from '../src/position.js';
+} from '../src/watch/position.js';
 
 const T0 = 1_700_000_000_000;   // 任意基准时刻
 

@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loopStatus, startWatchLoop, stopWatchLoop } from '../src/watch-loop.js';
+import { loopStatus, startWatchLoop, stopWatchLoop } from '../src/watch/watch-loop.js';
 
 const ok = { sessionController: { prompt: async () => {} } };
 const base = {

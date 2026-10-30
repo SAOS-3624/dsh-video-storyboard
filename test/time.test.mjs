@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mmss } from '../src/time.js';
+import { mmss } from '../src/watch/time.js';
 
 test('mmss: 常规值', () => {
   assert.equal(mmss(0), '00:00');

@@ -17,9 +17,9 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { formatManifest, runStoryboard } from '../src/pipeline.js';
-import { makeBuilder, runWatchPass } from '../src/watch-run.js';
-import { startWatchLoop, loopStatus, stopWatchLoop } from '../src/watch-loop.js';
+import { formatManifest, runStoryboard } from '../src/storyboard/pipeline.js';
+import { makeBuilder, runWatchPass } from '../src/watch/watch-run.js';
+import { startWatchLoop, loopStatus, stopWatchLoop } from '../src/watch/watch-loop.js';
 
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, cur, i, arr) => {

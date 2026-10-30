@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 
 import {
   deliveryState, pickSession, segmentStart, WATCH_LEAD, WATCH_SEGMENT,
-} from '../src/watch.js';
+} from '../src/watch/watch.js';
 import { validateWatchArgs, watchToolSpec } from '../src/tool-spec.js';
 
 test('segmentStart: 按段长向下取整', () => {

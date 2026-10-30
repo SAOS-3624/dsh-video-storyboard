@@ -10,7 +10,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { cleanTitle, findLocalByTitle } from '../src/resolve-playing.js';
+import { cleanTitle, findLocalByTitle } from '../src/watch/resolve-playing.js';
 
 test('cleanTitle: 去掉站点后缀《》包着的书名号', () => {
   assert.equal(
@@ -53,7 +53,7 @@ test('findLocalByTitle: 标题太短（<4 字）不搜，避免乱认', async ()
 });
 
 test('找不到时给原因，不是笼统的 null', async () => {
-  const { resolvePlayingSource, findBilibiliByTitle } = await import('../src/resolve-playing.js');
+  const { resolvePlayingSource, findBilibiliByTitle } = await import('../src/watch/resolve-playing.js');
   // 标题太短：不该去搜，直接说原因
   const r = await findBilibiliByTitle('短片', 100);
   assert.equal(r.ok, false);

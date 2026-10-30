@@ -10,8 +10,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { lookupCell, saveCells } from '../src/cells.js';
-import { suggest } from '../src/plan.js';
+import { lookupCell, saveCells } from '../src/storyboard/cells.js';
+import { suggest } from '../src/storyboard/plan.js';
 import { validateZoomArgs } from '../src/tool-spec.js';
 
 test('cells: 存了就能按 id 查回绝对时间', async () => {

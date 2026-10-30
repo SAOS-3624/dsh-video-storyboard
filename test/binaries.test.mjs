@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 
 import {
   describeMediaSearch, mediaCandidates, resolveMediaBinary,
-} from '../src/binaries.js';
+} from '../src/storyboard/binaries.js';
 
 function touch(path) {
   mkdirSync(dirname(path), { recursive: true });

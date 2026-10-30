@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { findBursts, planCellRanges } from '../src/density.js';
+import { findBursts, planCellRanges } from '../src/storyboard/density.js';
 
 /** 造一段：两个长镜头夹一段快切爆发 */
 function timeline() {

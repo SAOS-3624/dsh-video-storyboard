@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { isLoopback,
   alignCells, CELL_BREAK_GAP, chunkWindows, mergeSegments, shortStamp, transcribeLong,
-} from '../src/asr.js';
+} from '../src/storyboard/asr.js';
 
 /* ---------------------------------------------------------------- 空结果的诚实度 */
 

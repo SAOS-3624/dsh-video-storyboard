@@ -9,15 +9,15 @@
  * 本文件只负责"把宿主的 ctx 和机器配置接上去"，不做业务判断。
  */
 
-import { DEFAULT_RAMP, DEFAULT_SEGMENT } from '../batches.js';
-import { configuredLaunch, configuredPort } from '../browser-time.js';
-import { ensureChatSession } from '../chat.js';
-import { formatManifest } from '../format.js';
-import { runStoryboard } from '../pipeline.js';
+import { DEFAULT_RAMP, DEFAULT_SEGMENT } from '../watch/batches.js';
+import { configuredLaunch, configuredPort } from '../storyboard/browser-time.js';
+import { ensureChatSession } from '../watch/chat.js';
+import { formatManifest } from '../storyboard/format.js';
+import { runStoryboard } from '../storyboard/pipeline.js';
 import { validateWatchArgs } from '../tool-spec.js';
-import { makeBuilder, runWatchPass } from '../watch-run.js';
-import { runWatchAction } from '../watch-actions.js';
-import { DEFAULT_LOOKAHEAD, startWatchLoop } from '../watch-loop.js';
+import { makeBuilder, runWatchPass } from '../watch/watch-run.js';
+import { runWatchAction } from '../watch/watch-actions.js';
+import { DEFAULT_LOOKAHEAD, startWatchLoop } from '../watch/watch-loop.js';
 
 /**
  * @param {object} ctx   宿主上下文（存图用）

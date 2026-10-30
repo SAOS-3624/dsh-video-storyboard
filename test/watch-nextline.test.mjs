@@ -10,8 +10,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { runWatchPass } from '../src/watch-run.js';
-import { saveLines } from '../src/watch.js';
+import { runWatchPass } from '../src/watch/watch-run.js';
+import { saveLines } from '../src/watch/watch.js';
 
 const stubDeps = (pos) => ({
   cache: new Map(),

@@ -5,9 +5,9 @@
  * 的全套配置），跑完它会自己把转写塞进 locate 的缓存里，下次直接命中。
  */
 
-import { formatMatches, matchSegments, recallSegments } from '../locate.js';
-import { resolveInput } from '../fetch.js';
-import { runStoryboard } from '../pipeline.js';
+import { formatMatches, matchSegments, recallSegments } from '../storyboard/locate.js';
+import { resolveInput } from '../storyboard/fetch.js';
+import { runStoryboard } from '../storyboard/pipeline.js';
 
 export async function execute(ctx, args) {
   if (!args?.input) throw new Error('input is required');

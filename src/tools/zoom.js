@@ -7,13 +7,13 @@
  *      这里多半是内存命中；实在没有才真的再解析一次（2.4 s）。
  */
 
-import { boardOptions } from '../board.js';
-import { lookupCell } from '../cells.js';
-import { resolveInput } from '../fetch.js';
-import { isHttpUrl } from '../url.js';
-import { resolveDirectUrl } from '../direct-url.js';
-import { runStoryboard } from '../pipeline.js';
-import { formatForDetail } from '../format.js';
+import { boardOptions } from '../storyboard/board.js';
+import { lookupCell } from '../storyboard/cells.js';
+import { resolveInput } from '../storyboard/fetch.js';
+import { isHttpUrl } from '../storyboard/url.js';
+import { resolveDirectUrl } from '../storyboard/direct-url.js';
+import { runStoryboard } from '../storyboard/pipeline.js';
+import { formatForDetail } from '../storyboard/format.js';
 import { validateZoomArgs } from '../tool-spec.js';
 import { attachSheetImages } from './shared.js';
 

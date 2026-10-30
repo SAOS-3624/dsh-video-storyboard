@@ -7,7 +7,7 @@
  * 所以这里的每个返回值都要求能翻译成一句人话（`describeBrowser`）。
  */
 
-import { launchBrowser, waitForPort } from './browser-time.js';
+import { launchBrowser, waitForPort } from '../storyboard/browser-time.js';
 import { mmss } from './time.js';
 
 /**

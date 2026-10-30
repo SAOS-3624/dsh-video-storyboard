@@ -10,8 +10,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { boardOptions, charsForDetail, DETAIL_CHARS, ocrFor } from '../src/board.js';
-import { runWatchPass } from '../src/watch-run.js';
+import { boardOptions, charsForDetail, DETAIL_CHARS, ocrFor } from '../src/storyboard/board.js';
+import { runWatchPass } from '../src/watch/watch-run.js';
 
 test('board: 全片概览的默认值', () => {
   const o = boardOptions({ input: 'a.mp4' }, { kind: 'board' });

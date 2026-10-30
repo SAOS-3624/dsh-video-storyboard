@@ -11,7 +11,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { runWatchPass } from '../src/watch-run.js';
+import { runWatchPass } from '../src/watch/watch-run.js';
 
 const settle = () => new Promise((r) => setTimeout(r, 30));
 

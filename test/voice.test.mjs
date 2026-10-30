@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 
 import {
   __resetSpeech, emitSpeech, lastSpeech, onSpeech, speechEvents, speechSubscribers,
-} from '../src/voice.js';
+} from '../src/watch/voice.js';
 
 test('没有订阅者：emitSpeech 是空操作（这是零依赖路径）', () => {
   __resetSpeech();
@@ -103,7 +103,7 @@ import { join } from 'node:path';
 
 import {
   attachConfiguredVoice, attachedAdapters, configuredVoiceAdapter, detachAdapters, loadVoiceAdapter,
-} from '../src/voice.js';
+} from '../src/watch/voice.js';
 
 test('configuredVoiceAdapter：环境变量优先，其次 ~/.dsh/voice.json，都没有就 null', async () => {
   const home = await mkdtemp(join(tmpdir(), 'voice-cfg-'));

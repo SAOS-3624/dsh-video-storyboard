@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { forgetSegments, formatMatches, matchSegments, recallSegments, rememberSegments } from '../src/locate.js';
+import { forgetSegments, formatMatches, matchSegments, recallSegments, rememberSegments } from '../src/storyboard/locate.js';
 
 const segs = [
   { from: 0, to: 2, text: '所以你连他也要忘记吗' },

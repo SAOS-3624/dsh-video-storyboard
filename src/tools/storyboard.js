@@ -5,7 +5,7 @@
  * 这里只补一个"清单分页"的 cellRange。
  */
 
-import { boardOptions } from '../board.js';
+import { boardOptions } from '../storyboard/board.js';
 import { validateToolArgs } from '../tool-spec.js';
 import { runAndAttach } from './shared.js';
 

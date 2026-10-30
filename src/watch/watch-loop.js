@@ -17,7 +17,7 @@ import {
 } from './position.js';
 import { startTicker, wakeSession } from './timer.js';
 import { DEFAULT_LOOKAHEAD, describePlan, makePlan, windowFor } from './batches.js';
-import { readBrowserPosition } from './browser-time.js';
+import { readBrowserPosition } from '../storyboard/browser-time.js';
 import { readPositionOrNull } from './watch-browser.js';
 import { emitSpeech, speechSubscribers } from './voice.js';
 import { consumeLine, dueLine, hasLine, loadLine, pickSession, probePlayback } from './watch.js';

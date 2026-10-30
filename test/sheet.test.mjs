@@ -11,8 +11,8 @@ import {
   badgeScale, composeSheet, drawBadge, drawGlyphs, encodeRaw, extractFrameRaw,
   extractSharpest, fillRect, layoutCanvas, sharpness, tileSubFrames,
   STRIP_BAR, addAudioStrip,
-} from '../src/sheet.js';
-import { DEFAULT_FFMPEG, probeVideo } from '../src/probe.js';
+} from '../src/storyboard/sheet.js';
+import { DEFAULT_FFMPEG, probeVideo } from '../src/storyboard/probe.js';
 
 const run = promisify(execFile);
 const px = (buf, width, x, y) => {

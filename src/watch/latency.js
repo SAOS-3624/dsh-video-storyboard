@@ -15,7 +15,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { cacheDir } from './cache.js';
+import { cacheDir } from '../storyboard/cache.js';
 
 const FILE = 'latency.json';
 const ALPHA = 0.4;          // 指数平滑系数：新样本占 40%

@@ -22,7 +22,7 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 
-import { cacheDir } from './cache.js';
+import { cacheDir } from '../storyboard/cache.js';
 import { emitSpeech, onSpeech } from './voice.js';
 
 export const DEFAULT_CHAT_PORT = 9377;

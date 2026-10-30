@@ -11,9 +11,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loopStatus, startWatchLoop, stopWatchLoop } from '../src/watch-loop.js';
-import { saveLines } from '../src/watch.js';
-import { onSpeech } from '../src/voice.js';
+import { loopStatus, startWatchLoop, stopWatchLoop } from '../src/watch/watch-loop.js';
+import { saveLines } from '../src/watch/watch.js';
+import { onSpeech } from '../src/watch/voice.js';
 import { createSim } from './helpers/sim.mjs';
 
 const SEGMENTS = [

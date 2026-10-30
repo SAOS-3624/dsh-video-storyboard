@@ -15,9 +15,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { cacheDir } from './cache.js';
-import { findPython } from './python.js';
-import { recallSegments } from './locate.js';
+import { cacheDir } from '../storyboard/cache.js';
+import { findPython } from '../storyboard/python.js';
+import { recallSegments } from '../storyboard/locate.js';
 import { makeLagFn } from './speech.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));

@@ -11,9 +11,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { lagForAt, lineNear, makeLagFn, speechLag } from '../src/speech.js';
-import { dueLine, saveLines } from '../src/watch.js';
-import { forgetSegments, rememberSegments } from '../src/locate.js';
+import { lagForAt, lineNear, makeLagFn, speechLag } from '../src/watch/speech.js';
+import { dueLine, saveLines } from '../src/watch/watch.js';
+import { forgetSegments, rememberSegments } from '../src/storyboard/locate.js';
 
 test('speechLag: 按字数递增，夹在 0.4–2.0 秒', () => {
   assert.equal(speechLag(0), 0, '没有字数信息就不延');

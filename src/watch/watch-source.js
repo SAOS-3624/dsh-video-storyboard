@@ -12,7 +12,7 @@
  * 否则是 `{ input, resolved, activeSession }`。**判据只看 ok**。
  */
 
-import { fileUrlToPath, hasDebugPort, looksLikeVideoUrl } from './browser-time.js';
+import { fileUrlToPath, hasDebugPort, looksLikeVideoUrl } from '../storyboard/browser-time.js';
 import { readPositionOrNull } from './watch-browser.js';
 import { pickSession, saveWatch } from './watch.js';
 import { resolvePlayingSource } from './resolve-playing.js';

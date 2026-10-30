@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 import {
   DETAIL_CHARS, countTextInSilence, formatManifest, truncateAtSentence, withSheetSuffix,
-} from '../src/pipeline.js';
+} from '../src/storyboard/pipeline.js';
 
 /** 造一个 64 格的 result（每格 300 字），不跑 ffmpeg */
 function makeResult({ cells = 64, textLen = 300 } = {}) {

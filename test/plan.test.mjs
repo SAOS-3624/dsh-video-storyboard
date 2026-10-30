@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   bestLayout, canvasAspect, cellSize, fillLayout, groupByCount, groupByDuration, planTotal,
   planWindows, snapCells, suggest, validatePlan, COVERAGE, IMAGE_TOKEN_CAP, MIN_CELL_H, MIN_CELL_W,
-} from '../src/plan.js';
+} from '../src/storyboard/plan.js';
 
 const L = 16 / 9;
 const P = 9 / 16;

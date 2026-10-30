@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   loadTranscriptFile, parseJsonTranscript, parseSrt, parseTimecode, parseTranscript, stripMarkup,
-} from '../src/transcript-file.js';
+} from '../src/storyboard/transcript-file.js';
 
 /* ---------------------------------------------------------------- 时间码 */
 

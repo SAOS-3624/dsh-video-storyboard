@@ -29,8 +29,8 @@ import * as zoom from './tools/zoom.js';
 import * as probe from './tools/probe.js';
 import * as locate from './tools/locate.js';
 import * as watch from './tools/watch.js';
-import { attachSpeechToChat } from './chat.js';
-import { attachConfiguredVoice } from './voice.js';
+import { attachSpeechToChat } from './watch/chat.js';
+import { attachConfiguredVoice } from './watch/voice.js';
 
 export const name = 'dsh-video-storyboard';
 export const inject = ['tools', 'attachments'];

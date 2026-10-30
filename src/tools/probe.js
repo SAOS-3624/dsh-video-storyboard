@@ -5,10 +5,10 @@
  * 本地走 probeVideo（几毫秒）。下载 7 MB 再读头，这个工具就没有意义了。
  */
 
-import { probeVideo } from '../probe.js';
-import { formatProbe, formatRemoteProbe } from '../format.js';
-import { probeUrl } from '../fetch.js';
-import { isHttpUrl } from '../url.js';
+import { probeVideo } from '../storyboard/probe.js';
+import { formatProbe, formatRemoteProbe } from '../storyboard/format.js';
+import { probeUrl } from '../storyboard/fetch.js';
+import { isHttpUrl } from '../storyboard/url.js';
 
 export async function execute(ctx, args) {
   if (!args?.input) throw new Error('input is required');

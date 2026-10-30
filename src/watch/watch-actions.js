@@ -15,8 +15,8 @@
  * 返回 `null` 表示"这一轮不是单发命令"，交给主流程。**判据在调用方之外只有这一条**。
  */
 
-import { configuredPort, probeBrowser } from './browser-time.js';
-import { checkBiliLogin, fetchRemoteSubtitles } from './subtitles.js';
+import { configuredPort, probeBrowser } from '../storyboard/browser-time.js';
+import { checkBiliLogin, fetchRemoteSubtitles } from '../storyboard/subtitles.js';
 import { wakeSession } from './timer.js';
 import { loopStatus, stopWatchLoop } from './watch-loop.js';
 import { appendAssistantSay } from './chat.js';

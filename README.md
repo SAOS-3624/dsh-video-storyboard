@@ -328,6 +328,30 @@ video_watch({ ramp: [] })              // 全程等长，不要阶梯
 建一个批次要 2–10 秒，而看一个批次要 `segment` 秒，所以**总有时间在空闲里把它建完**。
 实测 4 次交付全部 **0.0 秒**（命中预取），批次之间无缝。
 
+### 代码结构：两个库层 + 一个入口层
+
+```
+src/
+  storyboard/   视频识别策略（32 个模块）—— 取流、扫描、转写、出图、清单
+  watch/        陪看（16 个模块）        —— 位置、节奏、台词、聊天、声音接口
+  tools/        五个工具的 handler
+  index.js      只做注册
+  tool-spec.js  五份 schema + 兜底校验
+```
+
+**依赖是单向的**：`watch/` 可以 import `storyboard/`，反过来不行。
+`test/layering.test.mjs` 把这条钉住了 —— 只要 `storyboard/` 里出现一个 `watch/` 的 import，
+构建就红。这样"把陪看拆成独立插件"才只需要搬目录，而不用先解耦。
+
+几条容易看错的分界：
+
+| 模块 | 在哪 | 为什么 |
+|---|---|---|
+| `browser-time.js` | storyboard | 它给 `subtitles.js` 从浏览器取 cookies（登录态字幕要用），所以没法算陪看专属 |
+| `resolve-playing.js` | watch | "系统媒体控件在放什么"只有陪看需要 |
+| `voice.js` | watch | 声音接口跟着陪看走；核心不 import 任何引擎 |
+| `cells.js` / `locate.js` | storyboard | cell 映射和台词定位是分镜自己的记忆 |
+
 ### 接声音（核心不发声，声音你自己接）
 
 插件**不带任何 TTS 引擎**，也不读 `~/.dsh/tts.json`。它只做两件事：
@@ -352,7 +376,7 @@ video_watch({ ramp: [] })              // 全程等长，不要阶梯
 #### 同进程：订阅
 
 ```js
-import { onSpeech } from 'dsh-video-storyboard/src/voice.js';
+import { onSpeech } from 'dsh-video-storyboard/src/watch/voice.js';
 
 const off = onSpeech(async ({ state, text }) => {
   if (state !== 'due') return;      // scheduled 只是清单，不是"现在念"

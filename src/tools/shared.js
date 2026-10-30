@@ -6,8 +6,8 @@
  * `test/schema-audit.test.mjs` 分不清某个参数到底属于哪个工具。
  */
 
-import { runStoryboard } from '../pipeline.js';
-import { formatForDetail } from '../format.js';
+import { runStoryboard } from '../storyboard/pipeline.js';
+import { formatForDetail } from '../storyboard/format.js';
 
 /** 把每张分镜图提交成附件。两个入口各写过一遍这段循环，收成一处 —— mediaType / 命名改一次就够。 */
 export async function attachSheetImages(ctx, result) {

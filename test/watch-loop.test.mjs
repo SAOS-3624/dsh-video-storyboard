@@ -7,9 +7,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { depthForBuffer, makePlan } from '../src/batches.js';
-import { loopStatus, startWatchLoop, stopWatchLoop } from '../src/watch-loop.js';
-import { onSpeech } from '../src/voice.js';
+import { depthForBuffer, makePlan } from '../src/watch/batches.js';
+import { loopStatus, startWatchLoop, stopWatchLoop } from '../src/watch/watch-loop.js';
+import { onSpeech } from '../src/watch/voice.js';
 
 const segs = [{ from: 0, to: 120 }, { from: 120, to: 240 }];
 const ctxStub = { sessionController: { prompt: async () => {} } };

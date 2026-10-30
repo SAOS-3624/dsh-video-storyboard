@@ -11,8 +11,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { runStoryboard, formatManifest, saveStoryboards } from '../src/pipeline.js';
-import { DEFAULT_FFMPEG } from '../src/probe.js';
+import { runStoryboard, formatManifest, saveStoryboards } from '../src/storyboard/pipeline.js';
+import { DEFAULT_FFMPEG } from '../src/storyboard/probe.js';
 
 const run = promisify(execFile);
 let hasFfmpeg = false;
@@ -243,7 +243,7 @@ test('e2e: 传入 precomputed 时不再自己扫描', async (t) => {
 });
 
 test('formatProbe: 长片给两种读法并标明剧透，短片不啰嗦', async () => {
-  const { formatProbe } = await import('../src/pipeline.js');
+  const { formatProbe } = await import('../src/storyboard/pipeline.js');
   const base = {
     width: 1920, height: 1080, fps: 24, aspect: 16 / 9, rotation: 0,
     videoCodec: 'h264', container: 'mp4', hasAudio: true, audioCodec: 'aac',
@@ -260,7 +260,7 @@ test('formatProbe: 长片给两种读法并标明剧透，短片不啰嗦', asyn
 });
 
 test('formatProbe: 有字幕轨时不提 ASR（字幕轨免费又最准）', async () => {
-  const { formatProbe } = await import('../src/pipeline.js');
+  const { formatProbe } = await import('../src/storyboard/pipeline.js');
   const text = await formatProbe({
     width: 1920, height: 1080, fps: 24, aspect: 16 / 9, rotation: 0,
     videoCodec: 'h264', container: 'mp4', hasAudio: true, audioCodec: 'aac',
@@ -274,7 +274,7 @@ test('formatProbe: 有字幕轨时不提 ASR（字幕轨免费又最准）', asy
  * 那句话推断"台词马上就来了"，最后拿到一个静默的空清单 —— 中间没有任何一步告诉它原因。
  */
 test('formatProbe: 没有字幕轨又没配 key 时必须直说"转写不会发生"', async () => {
-  const { formatProbe } = await import('../src/pipeline.js');
+  const { formatProbe } = await import('../src/storyboard/pipeline.js');
   const prevKey = process.env.DSH_ASR_KEY;
   const prevBase = process.env.DSH_ASR_BASE_URL;
   const prevHome = process.env.DSH_HOME;
@@ -393,7 +393,7 @@ test('transcriptFile: 文件不存在时标 file-failed，不让整次调用失�
 });
 
 test('formatRemoteProbe: 说明"什么还没下载"和下一步', async () => {
-  const { formatRemoteProbe } = await import('../src/pipeline.js');
+  const { formatRemoteProbe } = await import('../src/storyboard/pipeline.js');
   const text = formatRemoteProbe({
     url: 'https://www.bilibili.com/video/BV1xx', title: '示例', duration: 90,
     heights: [360, 480, 720, 1080], maxHeight: 1080, auth: 'cookies',
@@ -404,7 +404,7 @@ test('formatRemoteProbe: 说明"什么还没下载"和下一步', async () => {
 });
 
 test('formatRemoteProbe: 匿名时明确警告分辨率不保证', async () => {
-  const { formatRemoteProbe } = await import('../src/pipeline.js');
+  const { formatRemoteProbe } = await import('../src/storyboard/pipeline.js');
   const text = formatRemoteProbe({
     url: 'https://x/y', title: null, duration: 10, heights: [360], maxHeight: 360, auth: 'anonymous',
   });
@@ -424,7 +424,7 @@ const smooth = (n, score, from = 0) => Array.from({ length: n }, (_, i) => ({
 }));
 
 test('refineCutsByWindow: 快闪窗口被细判，运镜窗口保持粗判', async () => {
-  const { refineCutsByWindow } = await import('../src/pipeline.js');
+  const { refineCutsByWindow } = await import('../src/storyboard/pipeline.js');
   // 0-2s：每两帧一刀、分数 70（真剪辑）；2-4s：每帧都在变但只有 15 分（运镜）
   const stats = [...gapFrames(50, 70, 0), ...smooth(50, 15, 2)];
   const coarse = [{ t: 0.5, score: 70 }, { t: 4.9, score: 15 }];
@@ -438,7 +438,7 @@ test('refineCutsByWindow: 快闪窗口被细判，运镜窗口保持粗判', asy
 });
 
 test('refineCutsByWindow: 分数不够大时不采纳（宁可少报）', async () => {
-  const { refineCutsByWindow } = await import('../src/pipeline.js');
+  const { refineCutsByWindow } = await import('../src/storyboard/pipeline.js');
   // 同样密，但每刀只有 20 分 —— 低于 25 的门槛
   const stats = gapFrames(50, 20, 0);
   const coarse = [{ t: 0.5, score: 20 }];
@@ -450,7 +450,7 @@ test('refineCutsByWindow: 分数不够大时不采纳（宁可少报）', async 
 /* ---------------------------------------------------------------- 子格摊开 */
 
 test('chooseSubGrid: 按密度决定，不看镜头数', async () => {
-  const { chooseSubGrid } = await import('../src/pipeline.js');
+  const { chooseSubGrid } = await import('../src/storyboard/pipeline.js');
   // 15 秒 5 个镜头（0.33/s）是正常叙事节奏，不该摊
   assert.equal(chooseSubGrid({ shots: 5, dur: 15, cellW: 499, cellH: 278 }), 1);
   // 同样 5 个镜头挤在 3 秒里（1.7/s）就是快闪，该摊
@@ -458,7 +458,7 @@ test('chooseSubGrid: 按密度决定，不看镜头数', async () => {
 });
 
 test('chooseSubGrid: 子帧小于 100×56 就降档，3×3 布局不切 4×4', async () => {
-  const { chooseSubGrid } = await import('../src/pipeline.js');
+  const { chooseSubGrid } = await import('../src/storyboard/pipeline.js');
   // 331/4 = 82 < 100 → 最多 3×3
   assert.equal(chooseSubGrid({ shots: 20, dur: 5, cellW: 331, cellH: 184 }), 3);
   // 499/4 = 124 ≥ 100 → 允许 4×4
@@ -468,7 +468,7 @@ test('chooseSubGrid: 子帧小于 100×56 就降档，3×3 布局不切 4×4', a
 });
 
 test('chooseSubGrid: 镜头少到不值得摊时保持整格', async () => {
-  const { chooseSubGrid } = await import('../src/pipeline.js');
+  const { chooseSubGrid } = await import('../src/storyboard/pipeline.js');
   assert.equal(chooseSubGrid({ shots: 2, dur: 1, cellW: 499, cellH: 278 }), 1);
 });
 

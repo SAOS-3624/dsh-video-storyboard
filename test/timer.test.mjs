@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { dueDecision, startTicker } from '../src/timer.js';
+import { dueDecision, startTicker } from '../src/watch/timer.js';
 
 const segs = [
   { from: 0, to: 120 }, { from: 120, to: 240 },

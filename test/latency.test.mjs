@@ -10,7 +10,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { aheadSeconds, describeLatency, loadLatency, recordLatency } from '../src/latency.js';
+import { aheadSeconds, describeLatency, loadLatency, recordLatency } from '../src/watch/latency.js';
 
 test('一开始没有样本，提前量为 0（不猜）', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'lat-'));

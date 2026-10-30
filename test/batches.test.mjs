@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DEFAULT_RAMP, describePlan, makePlan, windowFor } from '../src/batches.js';
+import { DEFAULT_RAMP, describePlan, makePlan, windowFor } from '../src/watch/batches.js';
 
 test('默认阶梯：1 → 2 → 3 → 4 分钟，之后稳定 5 分钟', () => {
   const p = makePlan({});

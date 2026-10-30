@@ -13,8 +13,8 @@ import { join } from 'node:path';
 
 import {
   appendAssistantSay, appendChat, attachSpeechToChat, chatFile, makeChatWatcher, readChat,
-} from '../src/chat.js';
-import { __resetSpeech, emitSpeech, onSpeech, speechObservers, speechSubscribers } from '../src/voice.js';
+} from '../src/watch/chat.js';
+import { __resetSpeech, emitSpeech, onSpeech, speechObservers, speechSubscribers } from '../src/watch/voice.js';
 
 async function withCache(fn) {
   const dir = await mkdtemp(join(tmpdir(), 'chat-test-'));

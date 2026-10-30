@@ -10,7 +10,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { dueLine, loadLine, linesOverview, saveLines, watchPath } from '../src/watch.js';
+import { dueLine, loadLine, linesOverview, saveLines, watchPath } from '../src/watch/watch.js';
 
 /**
  * 台词怎么"到点"是这一轮最贵的教训：

@@ -7,8 +7,8 @@
  * 输出：分位数、各阈值下的切点数、切点间隔统计（判断是否有误检成簇）。
  */
 import { args as parse } from './_args.mjs';
-import { probeVideo } from '../src/probe.js';
-import { scanShots } from '../src/scan.js';
+import { probeVideo } from '../src/storyboard/probe.js';
+import { scanShots } from '../src/storyboard/scan.js';
 
 const opt = parse(process.argv.slice(2), { step: 2 });
 const input = opt._[0];

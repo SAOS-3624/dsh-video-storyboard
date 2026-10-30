@@ -6,9 +6,9 @@
  *
  * 用途：调阈值。先看 cuts 与 top peaks，再决定 threshold 要不要动。
  */
-import { probeVideo } from '../src/probe.js';
-import { scanShots } from '../src/scan.js';
-import { fitSegments, segmentsFromCuts, totalDur } from '../src/segments.js';
+import { probeVideo } from '../src/storyboard/probe.js';
+import { scanShots } from '../src/storyboard/scan.js';
+import { fitSegments, segmentsFromCuts, totalDur } from '../src/storyboard/segments.js';
 
 const [, , input, cellsArg] = process.argv;
 if (!input) {

@@ -11,7 +11,7 @@
  * 输出的每一行都是一次真实判定：说了 / 没说（为什么）。
  */
 
-import { LOOP_LIMITS, loopStatus, startWatchLoop, stopWatchLoop } from '../src/watch-loop.js';
+import { LOOP_LIMITS, loopStatus, startWatchLoop, stopWatchLoop } from '../src/watch/watch-loop.js';
 import { createSim } from '../test/helpers/sim.mjs';
 
 const SEG = 120;

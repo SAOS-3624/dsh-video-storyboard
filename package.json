@@ -27,14 +27,14 @@
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./plan": "./src/plan.js",
-    "./scan": "./src/scan.js",
-    "./segments": "./src/segments.js",
-    "./probe": "./src/probe.js",
-    "./sheet": "./src/sheet.js",
-    "./frames": "./src/frames.js",
-    "./format": "./src/format.js",
-    "./pipeline": "./src/pipeline.js",
+    "./plan": "./src/storyboard/plan.js",
+    "./scan": "./src/storyboard/scan.js",
+    "./segments": "./src/storyboard/segments.js",
+    "./probe": "./src/storyboard/probe.js",
+    "./sheet": "./src/storyboard/sheet.js",
+    "./frames": "./src/storyboard/frames.js",
+    "./format": "./src/storyboard/format.js",
+    "./pipeline": "./src/storyboard/pipeline.js",
     "./tool-spec": "./src/tool-spec.js"
   },
   "bin": {

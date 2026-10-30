@@ -4,11 +4,11 @@ import { mkdtemp, mkdir, readdir, readFile, rm, stat, utimes, writeFile } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { assertFetchableUrl, isHttpUrl, normalizeUrl } from '../src/url.js';
-import { discoverYtdlp, explainYtdlpError, formatSelector, loadVideoConfig, resolveAuth, summariseInfo, unwrapSingle } from '../src/ytdlp.js';
-import { fetchMedia } from '../src/fetch.js';
-import { mediaKey, pruneMedia } from '../src/media-store.js';
-import { pickVideoFormat, resolveDirectUrl, __clearDirectCache } from '../src/direct-url.js';
+import { assertFetchableUrl, isHttpUrl, normalizeUrl } from '../src/storyboard/url.js';
+import { discoverYtdlp, explainYtdlpError, formatSelector, loadVideoConfig, resolveAuth, summariseInfo, unwrapSingle } from '../src/storyboard/ytdlp.js';
+import { fetchMedia } from '../src/storyboard/fetch.js';
+import { mediaKey, pruneMedia } from '../src/storyboard/media-store.js';
+import { pickVideoFormat, resolveDirectUrl, __clearDirectCache } from '../src/storyboard/direct-url.js';
 
 /* ---------------------------------------------------------------- 链接判别 */
 
