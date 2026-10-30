@@ -9,85 +9,30 @@
  *
  * 关键取舍：交付点定在**段末前 lead 秒**，不是段末。用户正看着的时候插一句"这段快完了"，
  * 比卡在两段交界处更自然，也不打断。
+ *
+ * 本文件只留"一次调用按什么顺序做什么"。四块已经各自独立：
+ *   watch-source.js   "用户在看什么"（第 0 步，四条候选路）
+ *   watch-modes.js    三种替代入口（waitUntil / waitForRefill / nextLine）
+ *   watch-browser.js  陪看浏览器在不在、要不要拉起、怎么说清状态
+ *   batches.js        批次表（段边界只在那里定义一次）
  */
 
 import {
-  deliveryState, describeStatus, loadWatch, pickSession, probePlayback, saveWatch, segmentStart,
+  deliveryState, describeStatus, loadWatch, pickSession, probePlayback, readSlot, saveWatch,
   sessionKey, WATCH_LEAD, WATCH_SEGMENT,
 } from './watch.js';
+import { speechEvents } from './voice.js';
 import { describeLatency, recordLatency } from './latency.js';
 import { DEFAULT_LOOKAHEAD, makePlan, windowFor } from './batches.js';
 import { makeChatWatcher } from './chat.js';
-import {
-  fileUrlToPath, hasDebugPort, launchBrowser, looksLikeVideoUrl, probeBrowser, readBrowserPosition,
-  waitForPort,
-} from './browser-time.js';
+import { probeBrowser, readBrowserPosition } from './browser-time.js';
 import { estimate, makeAnchor } from './position.js';
-import { resolvePlayingSource } from './resolve-playing.js';
 import { boardOptions, charsForDetail } from './board.js';
 import { mmss } from './time.js';
-import { consumeLine, dueLine, hasLine, saveLines } from './watch.js';
-
-// 模块级：latencyNote() 需要知道"这一轮从什么时候开始"
-let tStartForNote = Date.now();
-// 自动拉浏览器每个进程只试一次（失败也别每次调用都弹窗）
-let launchTried = false;
-/** 上一次拉起浏览器为什么失败 —— 只试一次可以，但"为什么不试了"必须能说出来 */
-let launchFailWhy = null;
-
-/**
- * 端口没开时**自己把浏览器拉起来**（仅当 video.json 里 launchBrowser: true）。
- * 为什么必须插件来起：外部工具进程派生出的浏览器会随它的 Job Object 被回收。
- *
- * 返回 `{ ok, launched, via?, reason? }`：**`launched` 是关键**。
- * 以前只返回布尔，调用方分不清"本来就在"和"我刚给你开了一个新窗口"——
- * 于是模型看到"浏览器有位置"就以为用户在看的那个浏览器是好的，
- * 其实它刚开了一只空白的、独立 profile 的 Edge。
- */
-async function ensureWatchBrowser(port) {
-  // 小于 1024 是特权端口，起不来的；测试里也常用 1 这类假端口
-  if (!port || port < 1024) return { ok: false, launched: false, reason: 'no-port' };
-  if (await hasDebugPort({ port })) return { ok: true, launched: false };
-  if (launchTried) {
-    return {
-      ok: false,
-      launched: false,
-      reason: `already tried once in this process${launchFailWhy ? ` (${launchFailWhy})` : ''}`,
-    };
-  }
-  launchTried = true;
-  const r = launchBrowser({ port });
-  if (!r.ok) {
-    launchFailWhy = r.reason ?? 'launch-failed';
-    return { ok: false, launched: false, reason: launchFailWhy };
-  }
-  const up = await waitForPort(port, { timeoutMs: 10_000 });
-  if (!up) launchFailWhy = 'port-never-opened';
-  return { ok: up, launched: true, via: r.via, reason: up ? null : 'port-never-opened' };
-}
-
-/**
- * 一行说清"浏览器到底在不在"。
- *
- * 每个 video_watch 返回都带这行 —— 因为模型的判据里只有"能不能读到位置"，
- * 而位置可以来自系统媒体会话（任何播放器），于是"有位置"被当成了"浏览器开着"。
- * 把状态写在返回文本里，模型才不用靠猜。
- */
-function describeBrowser(s, launchNote = '') {
-  const st = s?.state ?? 'error';
-  const port = s?.port ? `:${s.port}` : '';
-  const line = {
-    unconfigured: 'browser: NOT configured (no debug port) — position comes from the OS media session, '
-      + 'which counts ANY player, not just your browser',
-    closed: `browser: CLOSED ${port} — no debug port is listening, so nothing here is read from a browser; `
-      + 'any position I report comes from the OS media session',
-    'no-video': `browser: open ${port} but NO tab is holding a <video> (${s?.pages ?? 0} tab(s))`,
-    watching: `browser: open ${port} · ${String(s?.title || s?.url || '').slice(0, 64)} · `
-      + `${s?.playing ? 'playing' : 'paused'} ${mmss(s?.pos ?? 0)}`,
-    error: `browser: probe FAILED ${port} — I cannot even tell whether it is open`,
-  }[st] ?? `browser: ${st}`;
-  return line + (launchNote || '');
-}
+import { saveLines } from './watch.js';
+import { describeBrowser, ensureWatchBrowser, readPositionOrNull } from './watch-browser.js';
+import { resolveWatchSource } from './watch-source.js';
+import { runWatchMode } from './watch-modes.js';
 
 /**
  * 给循环用的建段函数：传一次参数，返回 `build(from) => Promise`。
@@ -138,6 +83,9 @@ async function buildSegment({ input, segStart, size, args, runStoryboard, format
   return entry;
 }
 
+// 模块级：latencyNote() 需要知道"这一轮从什么时候开始"
+let tStartForNote = Date.now();
+
 async function latencyNote() {
   const st = await recordLatency(Date.now() - tStartForNote);
   // 标定完成后就不再占 token 了
@@ -173,285 +121,26 @@ export async function runWatchPass(args, deps) {
     ? DEFAULT_LOOKAHEAD
     : Math.max(0, Number(args.lookahead) || 0);
 
+
   // ---- 0. 源：没给 input 就自己从"系统里在播什么"反推
-  // 用户只会说"我在看这个"，不会报路径。SMTC 给标题和时长，够我们去找。
-  let input = args.input;
-  let resolved = null;
-  let activeSession = null;
   const stateEarly = await loadWatch();
-  const titleKey = (t) => String(t ?? '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '').slice(0, 40);
-  /**
-   * "可以开始看了"的判据 —— **能读到播放位置**，而不是"能读到页面地址"。
-   *
-   * 这两个以前被混为一谈：只要浏览器里有一个视频页，就把 `input` 定死、跳过 waitForVideo，
-   * 然后因为页面还没起播读不到位，秒回一句 "cannot read your playback position"，
-   * 还反过来让用户报时间。而"页面开着、但还没点播放"恰恰是最常见的场景。
-   *
-   * pos > 0.5 或正在播，才算就绪：暂停在 0:00 的人只是开着页面，不是在看。
-   */
-  const positionReady = (b) => Boolean(b) && Number.isFinite(b?.pos)
-    && (b.pos > 0.5 || b.paused === false);
-
-  if (!input) {
-    // 浏览器开过调试端口时，**页面地址就是源**（能直接拿到 BV 号），比拿标题去搜准得多
-    const b0 = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
-    // 只认"视频页地址"：B 站首页也有 <video>（自动播放的推荐），但它不是任何一条视频
-    if (b0?.url && looksLikeVideoUrl(b0.url) && /^https?:/i.test(b0.url) && positionReady(b0)) {
-      input = b0.url;
-      resolved = { input: b0.url, matchedBy: 'browser-url' };
-    } else if (fileUrlToPath(b0?.url) && positionReady(b0)) {
-      // **本地视频用浏览器打开**：页面地址就是那个文件，直接当 input（不用下载、不用问用户）
-      input = fileUrlToPath(b0.url);
-      resolved = { input, matchedBy: 'browser-file' };
-    }
-  }
-  if (!input) {
-    let p0 = await probe();
-    activeSession = p0.ok ? pickSession(p0.sessions, {}) : null;
-
-    // ---- 等视频出现（waitForVideo）
-    // 用户常常先叫一声、再去开视频。与其立刻失败让他再叫一次，不如在这里挂着等，
-    // 并且**把等待的结果说清楚**（等了多少秒、有没有等到）。
-    // 注意：工具调用中途没法说话，所以"我在等"这句必须由模型在调用**之前**说 ——
-    // 这一点写在工具描述和 manifest 的 guidance 里。
-    let waitedVideoSec = 0;
-    if (!activeSession?.title && args.waitForVideo === true) {
-      const cap = Math.min(600, Math.max(10, Number(args.maxWaitSec) || 120));
-      const deadline = Date.now() + cap * 1000;
-      const tWait = Date.now();
-      // **快慢两档**：浏览器读一次 CDP 是毫秒级，SMTC 要起一个 python 进程（最慢能到几秒）。
-      // 以前两者绑在同一个 2 秒节拍里，等于每个节拍都在等 python —— 用户视频都播半分钟了，
-      // 这边还在"等视频出现"。现在浏览器 300ms 一次，SMTC 2 秒一次且超时收到 1.5 秒。
-      let lastProbeAt = 0;
-      while (Date.now() < deadline) {
-        const bv = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
-        // 页面在、但还没起播 -> 继续等（以前这里只看有没有地址，于是"打开但没播"会立刻过关）
-        if (positionReady(bv)) {
-          if (looksLikeVideoUrl(bv.url) && /^https?:/i.test(bv.url)) {
-            input = bv.url;
-            resolved = { input: bv.url, matchedBy: 'browser-url' };
-          } else if (fileUrlToPath(bv.url)) {
-            input = fileUrlToPath(bv.url);
-            resolved = { input, matchedBy: 'browser-file' };
-          }
-          if (input) break;
-        }
-        if (Date.now() - lastProbeAt >= 2000) {
-          lastProbeAt = Date.now();
-          // eslint-disable-next-line no-await-in-loop
-          p0 = await probe({ timeoutMs: 1500 });
-          activeSession = p0.ok ? pickSession(p0.sessions, {}) : null;
-          if (activeSession?.title) break;
-        }
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise((r) => setTimeout(r, 300));
-        waitedVideoSec = Math.round((Date.now() - tWait) / 1000);
-      }
-      if (!input && !activeSession?.title) {
-        const whyBrowser = browserPort
-          // eslint-disable-next-line no-await-in-loop
-          ? (await hasDebugPort({ port: browserPort })
-            ? `browser: open :${browserPort} but no tab is holding a <video>`
-            : `browser: CLOSED :${browserPort} — no debug port is listening`)
-          : 'browser: NOT configured (no debug port), so only the OS media session could be read';
-        return {
-          ok: false,
-          waitedSec: waitedVideoSec,
-          reason: 'no-video-timeout',
-          browser: browserPort ? 'checked' : 'unconfigured',
-          text: `I waited ${waitedVideoSec}s and no video appeared `
-            + '(no browser tab holding a <video>, no OS media session).\n'
-            + `${whyBrowser}\n`
-            + 'Tell the user you are still waiting and that you will pick it up when it starts; '
-            + 'call again with waitForVideo: true when they say it is playing.',
-          images: [],
-        };
-      }
-    }
-
-    if (!activeSession?.title && !input) {
-      const whyBrowser = browserPort
-        ? (await hasDebugPort({ port: browserPort })
-          ? `browser: open :${browserPort} but no tab is holding a <video>`
-          : `browser: CLOSED :${browserPort} — no debug port is listening`)
-        : 'browser: NOT configured (no debug port), so only the OS media session could be read';
-      return {
-        ok: false,
-        reason: 'no-video',
-        browser: browserPort ? 'checked' : 'unconfigured',
-        text: `no video is playing right now (${p0.error ?? 'no active media session'}).\n`
-          + `${whyBrowser}\n`
-          + 'Play something, or pass input yourself (path or link). '
-          + 'If you would rather wait for them to start it, call again with waitForVideo: true — '
-          + 'but say you are waiting first: this call stays silent while it blocks.',
-        images: [],
-      };
-    }
-
-    // 已经有 input（从浏览器读到了地址）就不用再解析标题
-    if (!input) {
-    // 记住上一次为这个标题找到的源：搜索接口会限流，重复搜没意义，也慢（11 秒）。
-    const cachedInput = stateEarly.sources?.[titleKey(activeSession.title)];
-    if (cachedInput) {
-      input = cachedInput;
-      resolved = { input: cachedInput, matchedBy: 'remembered' };
-    } else {
-      resolved = await resolvePlayingSource({ title: activeSession.title, duration: activeSession.dur });
-      if (resolved?.kind !== 'failed') {
-        stateEarly.sources = {
-          ...(stateEarly.sources ?? {}),
-          [titleKey(activeSession.title)]: resolved.input,
-        };
-        await saveWatch(stateEarly);
-      }
-    }
-    if (resolved?.kind === 'failed') {
-      // **不同的失败原因要说不同的话**：被限流和"不是 B 站"对用户是两件事，
-      // 都归成"没搜到"会让人以为工具坏了（实际是它在猜一个猜不到的源）。
-      const why = {
-        'search-blocked': 'the Bilibili search endpoint is rate-limiting me right now (412 / captcha), '
-          + 'so this is not "no such video", it is "I could not look".',
-        'no-match': 'nothing on Bilibili matches that title *and* duration, so this is most likely not a '
-          + 'Bilibili source (Douyin / WeChat Channels / YouTube look exactly like this from the outside).',
-        'no-ytdlp': 'yt-dlp is not available, so I cannot search or fetch anything by myself.',
-        'title-too-short': 'the title is too short to search for anything meaningful.',
-        'search-failed': 'the Bilibili search failed for an unknown reason.',
-      }[resolved.reason] ?? `resolution failed (${resolved.reason}).`;
-      return {
-        ok: false,
-        reason: resolved.reason,
-        text: `you are watching "${activeSession.title}" (${Math.round(activeSession.dur)}s).\n`
-          + `${why}\n\n`
-          + 'Two ways forward, either is fine://n'
-          + '  1. paste the link or the file path — I remember it per title and stop asking;\n'
-          + '  2. start the browser with --remote-debugging-port=9222 and set DSH_BROWSER_DEBUG_PORT=9222 — '
-          + 'then I read the page URL directly and never have to guess.',
-        images: [],
-      };
-    }
-    input = resolved.input;
-    }
-  }
+  const src = await resolveWatchSource({
+    input: args.input, args, probe, readBrowser, browserPort, stateEarly,
+  });
+  // `ok: false` 是"这次调用到此为止"的完整结果（没视频 / 等超时 / 源搜不到）
+  if (src.ok === false) return src;
+  const { resolved } = src;
+  let { input, activeSession } = src;
 
   // 已经交付过的段：wait 模式不能把同一段反复交出来
   const state0 = await loadWatch();
   const sk0 = sessionKey(input);
   const lastDelivered = Number(state0[sk0]?.lastDelivered);
 
-  // ---- 0.4 两种"阻塞到条件成立"的等待（模型侧的节奏由它自己掌握）
-  //
-  // 用户描述的模型循环：
-  //   看视频 → 写台词 → （可选）阻塞到某个时间点核对进度 → 阻塞到"上一段余量用完" → 再看视频 …
-  //
-  // 这两种等待都不是定时器，而是**条件**：
-  //   waitUntil    : 等到播放进度到某个秒数（用来在下一段之前核对时间）
-  //   waitForRefill: 等到台词库存低于 refillBelow 段（用来知道"该看下一段了"）
-  if (args.waitUntil !== undefined || args.waitForRefill === true) {
-    const capSec = Math.min(900, Math.max(5, Number(args.maxWaitSec) || 300));
-    const deadline = Date.now() + capSec * 1000;
-    const below = Math.max(1, Number(args.refillBelow) || 2);
-    let last = null;
-    while (Date.now() < deadline) {
-      // eslint-disable-next-line no-await-in-loop
-      const b = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
-      last = b?.pos ?? null;
-      if (b?.ended) break;
-      if (b?.paused) break;
 
-      if (args.waitForRefill === true && last !== null) {
-        const idx = plan.indexAt(last);
-        let stocked = 0;
-        for (let i = idx + 1; i <= idx + below; i += 1) {
-          const seg = plan.from(i, 1)[0];
-          if (!seg) break;
-          // eslint-disable-next-line no-await-in-loop
-          if (await hasLine(input, seg.from).catch(() => false)) stocked += 1;
-        }
-        if (stocked < below) {
-          const missing = plan.from(idx + 1, below).filter((x) => x);
-          return {
-            ok: true, reason: 'refill-needed', at: last,
-            text: `库存不足（现在 ${mmss(last)}）：${missing.map((m) => `${mmss(m.from)}–${mmss(m.to)}`).join('、')}`
-              + '\n去看画面，用 lines: [...] 补上。',
-            images: [],
-          };
-        }
-      }
-
-      if (Number.isFinite(Number(args.waitUntil)) && last !== null && last >= Number(args.waitUntil)) {
-        return {
-          ok: true, reason: 'reached', at: last,
-          text: `到 ${mmss(last)} 了（目标 ${mmss(Number(args.waitUntil))}）。`,
-          images: [],
-        };
-      }
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-    return {
-      ok: true, reason: 'wait-timeout', at: last,
-      text: `等到封顶（${capSec}s）也没等到条件成立，现在 ${last !== null ? mmss(last) : '读不到位置'}。`,
-      images: [],
-    };
-  }
-
-  // ---- 0.5 逐句模式（nextLine）
-  // 一次调用只返回**一句**台词，并且阻塞到该说这句的时刻。
-  // 这样每次工具返回 = 一条真实消息，会话里能看见"它到点说了一句"，
-  // 而不是一口气把六句打印出来（那是脚本，不像陪看）。
-  if (args.nextLine === true) {
-    const everySec = Math.min(300, Math.max(3, Number(args.everySec) || 10));
-    const st = await loadWatch();
-    const key = sessionKey(input);
-    const lastAt = Number(st[key]?.lastLineAt) || 0;
-    const due = lastAt + everySec * 1000;
-    let waited = 0;
-    // 阻塞到点；中途暂停/视频结束就提前返回，让模型能说话
-    while (Date.now() < due) {
-      await new Promise((r) => setTimeout(r, 1000));
-      waited += 1;
-      const b = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
-      if (b?.paused) break;
-      if (b?.ended) break;
-      if (waited > 600) break;
-    }
-    const b = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
-    const pos = b?.pos ?? null;
-    const plan2 = plan;
-    const seg = pos !== null ? plan2.segmentAt(pos) : { from: 0, to: 0 };
-    // 先问"到点了没有"：带 at 的台词只在它的时刻之后才发，否则同样的词会在段首提前跑出来。
-    // **这里不做迟到作废**（lateSec: Infinity）：逐句模式下是模型主动来要下一句，
-    // 位置停着不动也该把欠着的那句给它，而不是因为"晚了 30 秒"就丢掉。
-    const line = (Number.isFinite(pos)
-      ? await dueLine(input, pos, { size: seg.size ?? 0, lateSec: Infinity }).catch(() => null)
-      : null)
-      ?? await consumeLine(input, seg.from).catch(() => null);
-
-    // **必须重新读一次状态再写**：consumeLine 内部已经保存过（把队列推进了一格），
-    // 如果拿上面那份旧 st 覆盖回去，队列会退回原样 —— 表现就是同一句被反复返回。
-    const st2 = await loadWatch();
-    st2[key] = { ...(st2[key] ?? {}), lastLineAt: Date.now(), at: Date.now() };
-    await saveWatch(st2).catch(() => {});
-
-    if (!line) {
-      return {
-        ok: true,
-        speaking: false,
-        reason: 'no-line',
-        text: `[${pos !== null ? mmss(pos) : '??:??'}] （这一段没有预设台词了）`
-          + '\nLook at the picture with speakNow: true and say one sentence of your own, '
-          + 'or write the next lines with lines: [...]',
-        images: [],
-      };
-    }
-    return {
-      ok: true,
-      speaking: true,
-      at: pos,
-      text: `[${pos !== null ? mmss(pos) : '??:??'}] ${line}`,
-      images: [],
-    };
-  }
+  // ---- 0.4 / 0.5 三种替代入口：命中就直接返回，不再往下走
+  const mode = await runWatchMode({ args, input, plan, browserPort, readBrowser });
+  if (mode) return mode;
 
   // ---- 1. 播放位置
   // 用户很可能直接说"12:30"，数字里带冒号解析成 NaN 就白跑一次探测，这里先认一下
@@ -471,7 +160,6 @@ export async function runWatchPass(args, deps) {
   // 都是"没有位置"，它只能拿位置去倒推浏览器 —— 猜错就对着空气写台词。
   let launchNote = '';
   if (!Number.isFinite(cursor) && browserPort && autoLaunch && args.attachOnly !== true) {
-    // eslint-disable-next-line no-await-in-loop
     const br = await ensureWatchBrowser(browserPort);
     if (br.launched) {
       launchNote = br.ok
@@ -485,7 +173,7 @@ export async function runWatchPass(args, deps) {
     : { state: 'unconfigured', port: null };
   if (!Number.isFinite(cursor)) {
     // 位置仍然走**可注入**的 readBrowser（测试/仿真靠它喂位置，别改成直接调 CDP）
-    const b = browserPort ? await readBrowser({ port: browserPort }).catch(() => null) : null;
+    const b = await readPositionOrNull(readBrowser, browserPort);
     if (b && Number.isFinite(b.pos)) {
       cursor = b.pos;
       confidence = 'browser';
@@ -596,7 +284,6 @@ export async function runWatchPass(args, deps) {
   if (willWait) {
     for (const s of toBuild) {
       try {
-        // eslint-disable-next-line no-await-in-loop
         await buildOne(s);
       } catch { /* 备不上就算了，到点再建 */ }
     }
@@ -605,7 +292,6 @@ export async function runWatchPass(args, deps) {
       void (async () => {
         for (const s of toBuild) {
           try {
-            // eslint-disable-next-line no-await-in-loop
             await buildOne(s);
           } catch { /* 后台失败不响 */ }
         }
@@ -668,9 +354,7 @@ export async function runWatchPass(args, deps) {
       const chatHit = chatPoll();
       if (chatHit) { d.chatNow = chatHit; break; }
       // 位置来源：浏览器（准）> 上次测得的 SMTC 快照（凑合能用来判断"到没到"）
-      const np = browserPort
-        ? await readBrowser({ port: browserPort }).catch(() => null)
-        : null;
+      const np = await readPositionOrNull(readBrowser, browserPort);
       const posNow = np ? np.pos : (Number.isFinite(cursor) ? cursor + waitedSec : null);
       if (posNow !== null) {
         cursor = posNow;
@@ -744,8 +428,7 @@ export async function runWatchPass(args, deps) {
       segment: segStart,
       chat: d.chatNow,
       text: `${head}${waitNote}\n**用户插话**：「${d.chatNow.text}」\n`
-        + '先回这一句（video_watch({ speakAloud: true, text: "…" }) 可以直接念出来），'
-        + '回完立刻再调一次 wait:true 继续陪看。',
+        + '先回这一句，回完立刻再调一次 wait:true 继续陪看。',
       images: [],
     };
   }
@@ -819,6 +502,11 @@ export async function runWatchPass(args, deps) {
   await saveWatch(st);
 
   const images = entry.png ? [await saveImage({ data: entry.png, name: `watch-${segStart}.png` })] : [];
+  // **文字流那一半**：这一段的稿子连同 `at` 一起交出去，谁接了声音谁就能照着念。
+  // 核心自己不发声，也不因此多加载任何东西（见 voice.js）。
+  const speech = speechEvents(await readSlot(input, segStart).catch(() => []), {
+    fallbackAt: segStart, segment: segStart,
+  });
   const guidance = [
     `[together-watch] The user just watched ${mmss(segStart)}–${mmss(segStart + size)} (now at ${mmss(cursor)}).`,
     'They watched it themselves — do NOT retell the plot.',
@@ -838,7 +526,9 @@ export async function runWatchPass(args, deps) {
     cursor,
     measuredAt,
     segment: segStart,
+    speech,
     text: `${head}${waitNote}\n${guidance}${await latencyNote()}${bufferHint}\n\n${entry.manifest}`,
     images,
   };
 }
+

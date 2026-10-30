@@ -16,7 +16,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { discoverYtdlp } from './fetch.js';
+import { discoverYtdlp } from './ytdlp.js';
 import { configuredPort, writeBrowserCookiesFile } from './browser-time.js';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';

@@ -32,6 +32,8 @@
     "./segments": "./src/segments.js",
     "./probe": "./src/probe.js",
     "./sheet": "./src/sheet.js",
+    "./frames": "./src/frames.js",
+    "./format": "./src/format.js",
     "./pipeline": "./src/pipeline.js",
     "./tool-spec": "./src/tool-spec.js"
   },
@@ -43,6 +45,7 @@
     "src",
     "bin",
     "scripts",
+    "examples",
     "docs",
     "cordis.patch.yml",
     "dsh.plugin.json",

@@ -23,6 +23,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 
 import { cacheDir } from './cache.js';
+import { emitSpeech, onSpeech } from './voice.js';
 
 export const DEFAULT_CHAT_PORT = 9377;
 
@@ -39,10 +40,56 @@ export function readChat(env = process.env) {
   } catch { return []; }
 }
 
-export function appendChat(role, text, env = process.env) {
+/**
+ * 追加一条到统一流。
+ *
+ * `at` 是**墙钟毫秒**（什么时候写进来的）；`t` 是**播放位置秒**（这句对应视频的哪一刻）——
+ * 两者别混：`at` 用来排序，`t` 用来和画面比对。
+ *
+ * @param {'line'|'assistant'|'user'} role
+ * @param {string} text
+ * @param {{ t?: number|null, say?: boolean }} [meta] `say` = 这条要不要念出来
+ */
+export function appendChat(role, text, meta = {}, env = process.env) {
   const dir = cacheDir(env);
   try { mkdirSync(dir, { recursive: true }); } catch { /* 已存在 */ }
-  appendFileSync(chatFile(env), `${JSON.stringify({ role, text: String(text).slice(0, 2000), at: Date.now() })}\n`, 'utf8');
+  const entry = {
+    role,
+    text: String(text).slice(0, 2000),
+    at: Date.now(),
+    ...(Number.isFinite(meta?.t) ? { t: +Number(meta.t).toFixed(2) } : {}),
+    ...(meta?.say === true ? { say: true } : {}),
+  };
+  appendFileSync(chatFile(env), `${JSON.stringify(entry)}\n`, 'utf8');
+  return entry;
+}
+
+/**
+ * 把"到点的台词"写进统一流 —— 这样聊天框里能看见剧本，声音也有得念。
+ *
+ * 只在 `state === 'due'` 时写：`scheduled` 是清单，不是"这句话现在说出来"。
+ * 订阅时带 `voice: false` —— 聊天框只是**看**，它不该让循环以为"有人会念"。
+ */
+export function attachSpeechToChat({ env = process.env, onEntry = null } = {}) {
+  return onSpeech((e) => {
+    if (e.state !== 'due') return;
+    // 插话那句是**先写流再广播**的（appendAssistantSay），这里再写就重复了
+    if (e.origin === 'chat') return;
+    const text = String(e.text ?? '').trim();
+    if (!text) return;
+    const entry = appendChat('line', text, { t: e.at, say: true }, env);
+    try { onEntry?.(entry); } catch { /* 展示层的事，别影响写盘 */ }
+  }, { voice: false });
+}
+
+/** 模型插话时说的那一句：写进流 + 交给声音（同一条事件，两个消费者各取所需） */
+export function appendAssistantSay(text, { t = null, env = process.env } = {}) {
+  const clean = String(text ?? '').trim();
+  if (!clean) return null;
+  const entry = appendChat('assistant', clean, { t, say: true }, env);
+  // `origin: 'chat'` 告诉展示层的订阅者"这条已经在流里了，别再写第二遍"
+  emitSpeech({ at: t, text: clean, state: 'due', origin: 'chat' });
+  return entry;
 }
 
 /**
@@ -108,6 +155,7 @@ body{background:#161616;color:#e0e0e0;font:16px/1.65 system-ui,-apple-system,"Se
 .m{margin:8px 0;padding:9px 12px;border-radius:10px;white-space:pre-wrap;word-break:break-word}
 .u{background:#26384a;margin-left:44px}
 .a{background:#242424;margin-right:44px}
+.l{background:#1c1a17;border-left:3px solid #7a5a2a;margin-right:44px}
 .t{font-size:11px;opacity:.45;margin-bottom:3px}
 form{display:flex;gap:8px;margin-top:10px}
 input{flex:1;padding:11px;background:#202020;border:1px solid #3a3a3a;color:#eee;border-radius:9px;font-size:16px;outline:none}
@@ -124,8 +172,12 @@ input:focus{border-color:#4a7ab5}
   var BASE="http://127.0.0.1:__PORT__";
   var f=document.getElementById("f"), i=document.getElementById("i"), log=document.getElementById("log");
   function esc(s){return String(s).replace(/[<>&]/g,function(c){return {"<":"&lt;",">":"&gt;","&":"&amp;"}[c];});}
-  function add(m){var d=document.createElement("div");d.className="m "+(m.role==="user"?"u":"a");
-    d.innerHTML="<div class=t>"+(m.role==="user"?"我":"陪看")+"</div>"+esc(m.text);
+  function fmt(s){s=Math.max(0,Number(s)||0);return ("0"+Math.floor(s/60)).slice(-2)+":"+("0"+(s%60).toFixed(1)).slice(-4);}
+  function add(m){
+    var kind=m.role==="user"?"u":(m.role==="line"?"l":"a");
+    var who=m.role==="user"?"我":(m.role==="line"?"剧本"+(m.t!=null?" "+fmt(m.t)):"陪看");
+    var d=document.createElement("div");d.className="m "+kind;
+    d.innerHTML="<div class=t>"+who+(m.say?" · 会念":'')+"</div>"+esc(m.text);
     log.appendChild(d);log.scrollTop=log.scrollHeight;}
   function send(){var v=i.value.trim();if(!v)return;i.value="";
     fetch(BASE+"/api/say",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({text:v})}).catch(function(){});}
@@ -192,7 +244,7 @@ export async function startChatServer({ port = DEFAULT_CHAT_PORT, env = process.
           const j = JSON.parse(body);
           const text = String(j?.text ?? '').trim().slice(0, 500);
           if (text) {
-            appendChat('user', text, env);
+            appendChat('user', text, {}, env);
             log?.(`[用户] ${text}`);
             onUser?.(text);
           }
@@ -212,6 +264,30 @@ export async function startChatServer({ port = DEFAULT_CHAT_PORT, env = process.
   });
 
   return { port, server, close: () => new Promise((r) => server.close(() => r())) };
+}
+
+/**
+ * 把聊天框**准备好**（幂等）：服务没起来就起，起来了就什么都不做。
+ *
+ * 为什么需要它：第一次调用要绑端口 + 可能要开标签页，是异步的；而调用方（`video_watch`
+ * 进入阻塞之前）只想要一句 `void ensureChatSession(port)` —— 起不来也不该让陪看失败，
+ * 所以这里把异常吞掉，只留一个失败的 promise。
+ */
+let chatSession = null;
+export function ensureChatSession(port = DEFAULT_CHAT_PORT) {
+  if (!chatSession) {
+    chatSession = startChatServer({ port }).catch(() => null);
+  }
+  return chatSession;
+}
+
+/** 把已经起好的那个服务关掉（测试/退出用） */
+export async function closeChatSession() {
+  const s = chatSession;
+  chatSession = null;
+  if (s) {
+    try { const r = await s; await r?.close?.(); } catch { /* 关不掉就算了 */ }
+  }
 }
 
 /** 这个端口上有没有已经跑着的聊天服务 */

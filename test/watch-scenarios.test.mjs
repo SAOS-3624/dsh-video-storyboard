@@ -12,6 +12,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { loopStatus, startWatchLoop, stopWatchLoop } from '../src/watch-loop.js';
+import { saveLines } from '../src/watch.js';
+import { onSpeech } from '../src/voice.js';
 import { createSim } from './helpers/sim.mjs';
 
 const SEGMENTS = [
@@ -273,17 +275,30 @@ test('⑯ 台词库存不足时叫醒模型补写（只有这一件事该叫它�
   stopWatchLoop('test');
 });
 
-test('⑰ tts 模式下脚本自己念，不叫醒模型', async () => {
+test('⑰ 有声音订阅者时，到点的台词交给它念，不叫醒模型', async () => {
+  // 位置每 15 秒才探一次（PROBE_EVERY_MS），所以第一句要放在 16 秒之后 ——
+  // 放在 06 秒会被"迟到作废"直接丢掉（位置第一次可读时已经过 12 秒了）。
   const sim = createSim({ refreshEveryMs: 30_000, duration: 900 });
   let woken = 0;
-  startWatchLoop({
-    ctx: ctxStub, sessionId: 's1', input: 'tts.mp4',
-    segment: 60, ramp: [], depth: 2, tts: { enabled: true }, speakEvery: 5,
-    deps: { ...sim.deps, wake: async () => { woken += 1; return { ok: true }; } },
-    log: () => {},
-  });
-  await sim.runTo(20);
-  // 没有台词可念 → 会被当成"缺词"叫醒（这是对的：脚本不会编词）
-  assert.ok(woken <= 2, `不该每 5 秒叫一次，实得 ${woken}`);
-  stopWatchLoop('test');
+  const heard = [];
+  const off = onSpeech((e) => heard.push(e.text));
+  try {
+    await saveLines('voice.mp4', [
+      { from: 0, at: 16, text: '第一句' },
+      { from: 0, at: 24, text: '第二句' },
+    ]);
+    startWatchLoop({
+      ctx: ctxStub, sessionId: 's1', input: 'voice.mp4',
+      segment: 60, ramp: [], depth: 2,
+      deps: { ...sim.deps, wake: async () => { woken += 1; return { ok: true }; } },
+      log: () => {},
+    });
+    await sim.runTo(30);
+    assert.deepEqual(heard, ['第一句', '第二句'], '两句都该按 at 交出去');
+    assert.equal(woken, 0, `交给订阅者之后不该再叫醒模型，实得 ${woken}`);
+    assert.equal(loopStatus().voice.listeners, 1);
+  } finally {
+    off();
+    stopWatchLoop('test');
+  }
 });

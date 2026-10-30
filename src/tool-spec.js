@@ -75,6 +75,12 @@ export function storyboardToolSpec() {
         type: 'number',
         description: 'Minimum spacing between sampled frames in seconds (default 1.2). Short shots get merged, not sampled twice.',
       },
+      adaptive: {
+        type: 'boolean',
+        description: 'Default true: distribute cells by local cut density, so a fast-cutting stretch gets ' +
+          'more cells than a static one. Set false for evenly spaced cells across the window — more ' +
+          'predictable when you want to compare two windows cell-by-cell.',
+      },
       transcript: {
         type: 'string',
         enum: ['auto', 'off'],
@@ -205,8 +211,8 @@ export function zoomToolSpec() {
           'A link is re-read from the original stream at high resolution, so cells here can be ' +
           'sharper than the storyboard even when the scan itself used a low tier.',
       },
-      from: { type: 'number', required: true, description: 'Window start in seconds.' },
-      to: { type: 'number', required: true, description: 'Window end in seconds.' },
+      from: { type: 'number', description: 'Window start in seconds. Required unless cellId is given.' },
+      to: { type: 'number', description: 'Window end in seconds. Required unless cellId is given.' },
       cells: {
         type: 'integer',
         description: 'Cells for this window, 1-9 (default 6). Fewer cells = bigger each.',
@@ -226,6 +232,16 @@ export function zoomToolSpec() {
         enum: ['auto', 'off'],
         description: 'Include subtitle/ASR text for this window. Default "auto".',
       },
+      transcriptFile: {
+        type: 'string',
+        description: 'Path to an existing transcript (SRT, or JSON with [{start,end,text}] / '
+          + '[{from,to,text}] / Bilibili {body:[{from,to,content}]}). Skips the subtitle track and ASR.',
+      },
+      detail: {
+        type: 'string',
+        enum: ['low', 'med', 'high'],
+        description: 'Characters of transcript per cell: low=60, med=120 (default), high=400.',
+      },
       cellId: {
         type: 'integer',
         description: 'Zoom by cell number from the last storyboard of this same input (e.g. 3 = the cell ' +
@@ -241,6 +257,17 @@ export function zoomToolSpec() {
         type: 'integer',
         description: 'For http(s) links: which resolution to read the original stream at (default 1080). ' +
           'One frame only — cheaper than downloading. Never exceeds what the source itself offers.',
+      },
+      scanHeight: {
+        type: 'integer',
+        description: 'For http(s) links: which resolution the downloaded scan copy uses (default 360). ' +
+          'Only matters when zoom has to fall back to the local copy because the direct URL expired — ' +
+          'raising it makes that fallback sharper at the cost of a bigger download.',
+      },
+      ocr: {
+        type: 'boolean',
+        description: 'Force hard-subtitle OCR correction on/off. Default: on only when detail is "high" ' +
+          '(it costs ~3 s of local OCR). Set false to keep the raw ASR text even at high detail.',
       },
       cookies: {
         type: 'string',
@@ -376,6 +403,12 @@ export function validateToolArgs(args) {
   if (args.allowAnonymous !== undefined && typeof args.allowAnonymous !== 'boolean') {
     problems.push('allowAnonymous must be a boolean');
   }
+  if (args.adaptive !== undefined && typeof args.adaptive !== 'boolean') {
+    problems.push('adaptive must be a boolean');
+  }
+  if (args.ocr !== undefined && typeof args.ocr !== 'boolean') {
+    problems.push('ocr must be a boolean');
+  }
   return problems;
 }
 
@@ -406,6 +439,23 @@ export function validateZoomArgs(args) {
   }
   if (args.allowAnonymous !== undefined && typeof args.allowAnonymous !== 'boolean') {
     problems.push('allowAnonymous must be a boolean');
+  }
+  if (args.transcript !== undefined && !['auto', 'off'].includes(args.transcript)) {
+    problems.push("transcript must be 'auto' or 'off'");
+  }
+  if (args.transcriptFile !== undefined
+    && (typeof args.transcriptFile !== 'string' || args.transcriptFile.trim() === '')) {
+    problems.push('transcriptFile must be a non-empty path');
+  }
+  if (args.detail !== undefined && !['low', 'med', 'high'].includes(args.detail)) {
+    problems.push("detail must be 'low', 'med' or 'high'");
+  }
+  if (args.ocr !== undefined && typeof args.ocr !== 'boolean') {
+    problems.push('ocr must be a boolean');
+  }
+  if (args.scanHeight !== undefined
+    && (!Number.isInteger(args.scanHeight) || args.scanHeight < 120 || args.scanHeight > 2160)) {
+    problems.push('scanHeight must be an integer 120..2160');
   }
   if (args.sourceHash !== undefined && typeof args.sourceHash !== 'boolean') {
     problems.push('sourceHash must be a boolean');
@@ -452,6 +502,8 @@ export function locateToolSpec() {
         type: 'string',
         description: 'Path to an existing SRT/JSON transcript. Skips ASR entirely.',
       },
+      cookies: { type: 'string', description: 'cookies.txt path for login-gated sources.' },
+      allowAnonymous: { type: 'boolean', description: 'Allow anonymous fetches for links.' },
     },
     output: {
       schema: {
@@ -497,16 +549,20 @@ export function watchToolSpec() {
       '     the tool cannot speak while it blocks) and call:',
       '       video_watch({ waitForVideo: true, maxWaitSec: 120 })',
       '  2. Look at the batch the user is already in - do not wait for it to end:',
-      '       video_watch({ speakNow: true, tts: true })',
+      '       video_watch({ speakNow: true })',
       '  3. Write the lines for that batch (see LINES), then:',
-      '       video_watch({ wait: true, tts: true })',
+      '       video_watch({ wait: true })',
       '  4. It returns when that batch is nearly over. Repeat from 3 forever. The conversation never ends',
       '     between batches: the blocking call IS the pause.',
       '',
-      'tts: true is what makes the SCRIPT read your lines out loud. Without it nothing is spoken - the lines',
-      'come back to you as text and you say them yourself. Pass it once and it stays on for the session.',
+      'SPEECH. Every result carries `speech: [{ at, text, state }]` - your lines with their timestamps.',
+      'The plugin itself never speaks: whether those lines are read out loud depends on whether the host has',
+      'a voice consumer attached (a companion plugin, a system speech service, or your own tooling). If one is',
+      'attached, the plugin hands each line over at the right playback moment and does NOT wake you - that is',
+      'the zero-token path. If none is attached, the loop wakes you at the batch boundary and YOU say it.',
+      'So: write the lines either way; do not try to make yourself the only voice.',
       '',
-      'LINES (the script speaks them; you only write them):',
+      'LINES (you write them; whoever is attached speaks them):',
       '  video_watch({ input, lines: [',
       '    { from: 180, at: 191, text: "钓上来了，池子里那条比他想的配合。" },',
       '    { from: 180, at: 214, text: "他一直在说饿，从昨天晚饭就空着。" }',
@@ -589,12 +645,6 @@ export function watchToolSpec() {
         type: 'boolean',
         description: 'Stop the background watch loop (it wakes the session on its own). Idempotent.',
       },
-      tts: {
-        type: 'boolean',
-        description: 'Let the SCRIPT read the pre-written lines out loud at the right moment, without waking '
-          + 'the model at all. Timing and delivery cost zero tokens; you only speak when you have something of '
-          + 'your own to add. This is the cheap mode: lines by TTS, observations by you.',
-      },
       waitForRefill: {
         type: 'boolean',
         description: 'Block until the line stock drops below refillBelow (i.e. it is time to look at the next '
@@ -615,52 +665,16 @@ export function watchToolSpec() {
       },
       wakeOnLinesEmpty: {
         type: 'boolean',
-        description: 'OPTIONAL, off by default. With tts: true the loop stays silent after speaking '
-          + '(that is what saves tokens), but then a finished line means silence until the user '
-          + 'speaks. Set this to be woken once when the current segment runs out of pre-written '
-          + 'lines, so you can look at the picture and write the next batch.',
-      },
-      attachOnly: {
-        type: 'boolean',
-        description: 'OPTIONAL. When true the plugin NEVER starts a browser of its own: if no '
-          + 'playback position can be read, it returns an error instead of launching one. Use this '
-          + 'when the user watches in their own browser and does not want another instance opened. '
-          + 'It also skips navigating or opening tabs.',
-      },
-      wakeOnLinesEmpty: {
-        type: 'boolean',
-        description: 'OPTIONAL, off by default. With tts: true the loop stays silent after speaking '
-          + '(that is what saves tokens), but then a finished line means silence until the user '
-          + 'speaks. Set this to be woken once when the current segment runs out of pre-written '
-          + 'lines, so you can look at the picture and write the next batch.',
+        description: 'OPTIONAL, off by default. Wake once when the current segment runs out of '
+          + 'pre-written lines, so you can look at the picture and write the next batch. Useful '
+          + 'whenever a voice consumer is attached: it keeps speaking your script, and without this '
+          + 'you would not notice the script ran dry until the user says something.',
       },
       refillBelow: {
         type: 'number',
         description: 'OPTIONAL and off by default (0). If you set it, the loop wakes you when fewer than N '
           + 'upcoming segments still have pre-written lines. Most models do not need this: segment boundaries '
           + 'plus wait: true already say when it is time to look again.',
-      },
-      speakAloud: {
-        type: 'boolean',
-        description: 'Read the given text out loud right now through system TTS (no model output involved). '
-          + 'Pair with text.',
-      },
-      text: {
-        type: 'string',
-        description: 'Text for speakAloud.',
-      },
-      voice: {
-        type: 'string',
-        description: 'TTS voice. Accepts a SAPI fragment ("Huihui"/"Yaoyao"/"Kangkang") OR a full '
-          + 'edge-tts neural name ("zh-CN-XiaoxuanNeural"). Default is Xiaoxuan; the mapping is automatic.',
-      },
-      rate: {
-        type: 'number',
-        description: 'TTS rate, -10..10 (0 = normal).',
-      },
-      listVoices: {
-        type: 'boolean',
-        description: 'List the TTS voices installed on this machine.',
       },
       nextLine: {
         type: 'boolean',
@@ -768,6 +782,24 @@ export function watchToolSpec() {
         type: 'string',
         description: 'Video title, used to pick the right media session when several are playing.',
       },
+      browserPort: {
+        type: 'integer',
+        description: 'Per-call CDP debug port for the browser holding the video (e.g. 9333). ' +
+          'Overrides ~/.dsh/video.json and DSH_BROWSER_DEBUG_PORT for this call.',
+      },
+      say: {
+        type: 'string',
+        description: 'Say this NOW, in your own words. It is appended to the shared chat stream ' +
+          '(the same timeline the user sees) and handed to whoever listens for speech, so it is ' +
+          'spoken and displayed exactly like a scripted line. Use it to answer an interjection: the ' +
+          'plugin cannot see your normal reply, so without this the chat box shows only the script.',
+      },
+      loop: {
+        type: 'boolean',
+        description: 'Default true: after this call, keep a background loop running so each new segment ' +
+          'wakes the session on its own. Set false to drive everything by hand — you call video_watch ' +
+          'again whenever you want the next segment, and nothing wakes you in between.',
+      },
       detail: {
         type: 'string',
         enum: ['low', 'med', 'high'],
@@ -831,6 +863,16 @@ export function validateWatchArgs(args) {
   }
   if (args?.detail !== undefined && !['low', 'med', 'high'].includes(args.detail)) {
     problems.push('detail must be one of low|med|high');
+  }
+  if (args?.browserPort !== undefined
+    && (!Number.isInteger(args.browserPort) || args.browserPort < 1 || args.browserPort > 65535)) {
+    problems.push('browserPort must be an integer 1..65535');
+  }
+  if (args?.loop !== undefined && typeof args.loop !== 'boolean') {
+    problems.push('loop must be a boolean');
+  }
+  if (args?.say !== undefined && (typeof args.say !== 'string' || args.say.trim() === '')) {
+    problems.push('say must be a non-empty string');
   }
   // 台词：at 必须在它所属的段里，否则这句永远不会到点（dueLine 只认 from <= 当前位置 的槽）
   if (Array.isArray(args?.lines)) {

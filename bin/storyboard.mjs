@@ -13,7 +13,8 @@ import { writeFile } from 'node:fs/promises';
 import { args as parse } from './_args.mjs';
 import { probeVideo } from '../src/probe.js';
 import { planWindows } from '../src/plan.js';
-import { isHttpUrl, resolveInput } from '../src/fetch.js';
+import { isHttpUrl } from '../src/url.js';
+import { resolveInput } from '../src/fetch.js';
 import {
   DETAIL_CHARS, formatManifest, formatTimeline, runStoryboard, saveStoryboards,
 } from '../src/pipeline.js';

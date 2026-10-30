@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 
 import { depthForBuffer, makePlan } from '../src/batches.js';
 import { loopStatus, startWatchLoop, stopWatchLoop } from '../src/watch-loop.js';
+import { onSpeech } from '../src/voice.js';
 
 const segs = [{ from: 0, to: 120 }, { from: 120, to: 240 }];
 const ctxStub = { sessionController: { prompt: async () => {} } };
@@ -101,16 +102,22 @@ test('不传 depth 时按时间算，status 报告 auto', () => {
   stopWatchLoop('cleanup');
 });
 
-test('没有会话 id 但开了 tts：仍然起循环（脚本自己念，不需要叫醒谁）', () => {
-  const r = startWatchLoop({
-    ctx: ctxStub, sessionId: null, input: 'tts.mp4', segment: 60, ramp: [], tts: { enabled: true },
-  });
-  assert.equal(r.ok, true, 'tts 模式不该被 sessionId 挡住');
-  assert.equal(loopStatus().active, true);
-  stopWatchLoop('cleanup');
+test('没有会话 id 但有声音订阅者：仍然起循环（台词交给订阅者念，不用叫醒谁）', () => {
+  const off = onSpeech(() => {});
+  try {
+    const r = startWatchLoop({
+      ctx: ctxStub, sessionId: null, input: 'voice.mp4', segment: 60, ramp: [],
+    });
+    assert.equal(r.ok, true, '有订阅者时不该被 sessionId 挡住');
+    assert.equal(loopStatus().active, true);
+    assert.equal(loopStatus().voice.listeners, 1);
+  } finally {
+    off();
+    stopWatchLoop('cleanup');
+  }
 });
 
-test('没有会话 id 又没开 tts：照旧拒绝（没人可叫，也没词可念）', () => {
+test('没有会话 id 又没有订阅者：照旧拒绝（没人可叫，也没人接声音）', () => {
   const r = startWatchLoop({ ctx: ctxStub, sessionId: null, input: 'x.mp4', segment: 60, ramp: [] });
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'no-session-id');

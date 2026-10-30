@@ -22,7 +22,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { cacheDir, cacheBytes, pruneCache } from './cache.js';
-import { mediaDir, pruneMedia } from './fetch.js';
+import { mediaDir, pruneMedia } from './media-store.js';
 
 /** 总预算：媒体 + JSON + 状态文件，加起来不超过这个数 */
 export const STORAGE_BUDGET_BYTES = 300 * 1024 * 1024;

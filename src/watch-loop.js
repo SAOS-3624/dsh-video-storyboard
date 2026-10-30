@@ -18,13 +18,12 @@ import {
 import { startTicker, wakeSession } from './timer.js';
 import { DEFAULT_LOOKAHEAD, describePlan, makePlan, windowFor } from './batches.js';
 import { readBrowserPosition } from './browser-time.js';
-import { speak as speakAloud, PREFERRED_VOICES } from './tts.js';
+import { readPositionOrNull } from './watch-browser.js';
+import { emitSpeech, speechSubscribers } from './voice.js';
 import { consumeLine, dueLine, hasLine, loadLine, pickSession, probePlayback } from './watch.js';
 import { mmss } from './time.js';
 
 const TICK_MS = 2000;
-/** 两句台词之间至少隔这么久（毫秒）：防止欠着的几句连着倒出来 */
-const TTS_MIN_GAP_MS = 6000;
 const PROBE_EVERY_MS = 15_000;
 /** 读不到位置多久后主动问一次（静默比问一句更糟：用户不知道它在等什么） */
 const ASK_AFTER_MS = 20_000;
@@ -59,6 +58,27 @@ const loop = {
   log: () => {},
 };
 
+/**
+ * 记一次唤醒的结果（四处叫醒共用）。
+ *
+ * **叫不醒必须能看出来**：以前只写进 log，而 log 被调用方传成了空函数，
+ * 于是"loop 在跑、位置也对、就是没人说话"完全查不出来。所以失败要计数 + 改 lastReason。
+ * `countFailure: false` 给"本来就只是通知一声"的场景（台词念完的提醒不算失败）。
+ */
+function recordWake(loop, w, { segment, cause, countFailure = true } = {}) {
+  loop.lastWake = {
+    at: new Date().toTimeString().slice(0, 8),
+    ok: Boolean(w?.ok),
+    reason: w?.reason ?? null,
+    segment,
+    ...(cause ? { cause } : {}),
+  };
+  if (!w?.ok && countFailure) {
+    loop.wakeFails += 1;
+    loop.lastReason = 'wake-failed';
+  }
+}
+
 export function loopStatus() {
   const est = loop.anchor ? estimate(loop.anchor) : null;
   return {
@@ -71,12 +91,11 @@ export function loopStatus() {
     depth: loop.depth ?? 'auto',
     bufferSec: loop.bufferSec ?? null,
     spoken: loop.spoken.length,
-    // 念出来的句数（spoken 是"写过的"，这两个不是一回事）
-    spokenAloud: loop.spokenAloud ?? 0,
-    // tts 状态：不加这一行，"它为什么不说话"只能靠猜
-    tts: loop.tts?.enabled
-      ? { enabled: true, voice: loop.tts.voice, rate: loop.tts.rate }
-      : { enabled: false },
+    // 声音：核心只发事件。listeners = 0 表示"没人接声音"，到点的词会改走叫醒模型。
+    voice: {
+      listeners: speechSubscribers(),
+      lastAt: loop.lastSpeechAt ?? null,
+    },
     pos: est ? +est.pos.toFixed(1) : null,
     confidence: est?.confidence ?? 'none',
     staleMs: est ? est.staleMs : null,
@@ -110,7 +129,7 @@ export function stopWatchLoop(reason = 'stopped') {
  */
 export function startWatchLoop({
   ctx, sessionId, input, segments, cursor = null, status = 'playing', log = () => {},
-  size = 120, depth = null, segment, ramp, speakEvery = 0, tts = null,
+  size = 120, depth = null, segment, ramp, speakEvery = 0,
   // 余量按**时间**算（秒）：当前位置之后已备好的时长不少于它。
   // 不再用"留两段"—— 批次表开头是 1/2/3 分钟，两段在最前面只有 2 分钟，等于没有余量。
   lookahead = DEFAULT_LOOKAHEAD,
@@ -141,10 +160,9 @@ export function startWatchLoop({
   // 端口来源：显式参数 → ~/.dsh/video.json → 环境变量（桌面版读不到 setx 的 env，所以文件优先）
   // 端口只从调用方传进来（工具层读配置）；库层不隐式读机器配置，否则单测会被本机状态影响
   const browserPort = deps.browserPort ?? undefined;
-  // 没有会话 id 也不许起循环 —— **除非**开着 TTS：那种模式下脚本自己念，
-  // 不需要叫醒任何模型。以前一刀切，于是在"没有 session/event 的宿主"里
-  // tts: true 传了等于没传，台词一声都不出（用户只能以为坏了）。
-  if (!sessionId && !tts?.enabled) return { ok: false, reason: 'no-session-id' };
+  // 没有会话 id 也不许起循环 —— **除非**已经有声音订阅者：那种情况下到点的词
+  // 交给订阅者念，不需要叫醒任何模型（宿主的 speech service 就属于这一类）。
+  if (!sessionId && speechSubscribers() === 0) return { ok: false, reason: 'no-session-id' };
   // 段可以由批次表生成，所以只有"既没给段、也没给段长"才算没段
   if ((!Array.isArray(segments) || segments.length === 0) && !(Number(segment) > 0 || Array.isArray(ramp))) {
     return { ok: false, reason: 'no-segments' };
@@ -183,15 +201,7 @@ export function startWatchLoop({
     if (Number.isFinite(cursor)) {
       loop.anchor = makeAnchor({ pos: cursor, dur: loop.dur, status, updated: Date.now() }, Date.now());
     }
-    // **中途加 `tts: true` 必须立刻生效。**
-    // `samePlan` 比的是 input / sessionId / 段长 / ramp，唯独没比 tts；而 `loop.tts`
-    // 只在"新建循环"时赋值。于是最常见的操作序列 —— 先 speakNow 起循环（不带 tts），
-    // 再带 `tts: true` 补词 —— 会一路 resumed 下去，`loop.tts` 永远是 null：
-    // 用户按下播放，一句都没念，而回复里还写着"到点就念"。实测 04:44 连撞两次。
-    loop.tts = tts?.enabled
-      ? { enabled: true, voice: tts.voice ?? PREFERRED_VOICES[0], rate: Number(tts.rate) || 0 }
-      : null;
-    // 同 tts：这类"行为开关"在 resume 时也必须跟着最新参数走，否则会一直用旧值
+    // "行为开关"在 resume 时也必须跟着最新参数走，否则会一直用旧值
     loop.wakeOnLinesEmpty = Boolean(wakeOnLinesEmpty);
     note('resumed (same input + same batch plan)');
     return { ok: true, resumed: true, ...loopStatus() };
@@ -219,8 +229,7 @@ export function startWatchLoop({
     depth: fixedDepth,
     bufferSec,
     speakEvery: Math.max(0, Number(speakEvery) || 0),
-    tts: tts?.enabled ? { enabled: true, voice: tts.voice ?? PREFERRED_VOICES[0], rate: Number(tts.rate) || 0 } : null,
-    spokenAloud: 0,
+    lastSpeechAt: null,
     wakeOnLinesEmpty: Boolean(wakeOnLinesEmpty),
     refillBelow: Math.max(0, Number(refillBelow) || 0),
     refillAskedAt: 0,
@@ -253,9 +262,7 @@ export function startWatchLoop({
         loop.lastProbeAt = tNow;
         // 1) 先问浏览器（准，但**必须显式开端口**）　2) 再问 SMTC（旧但能用）
         // 不默认读：这台机器上 WorkBuddy 自己就占着 9222，盲读会读到它的界面元素。
-        const b = browserPort
-          ? await readBrowser({ port: browserPort }).catch(() => null)
-          : null;
+        const b = await readPositionOrNull(readBrowser, browserPort);
         if (b) {
           loop.anchor = makeAnchor({
             pos: b.pos, dur: b.dur, status: b.paused ? 5 : 4,
@@ -386,7 +393,6 @@ export function startWatchLoop({
         for (let i = idxNow + 1; i <= idxNow + loop.refillBelow; i += 1) {
           const seg = plan.from(i, 1)[0];
           if (!seg) break;
-          // eslint-disable-next-line no-await-in-loop
           if (!(await hasLine(loop.input, seg.from).catch(() => false))) missing.push(seg);
         }
         if (missing.length > 0) {
@@ -397,40 +403,39 @@ export function startWatchLoop({
             text: `[一起看·补词] 台词库存不够了：${list} 还没有词（现在 ${mmss(estR.pos)}）。`
               + '先用 video_watch({ speakNow: true }) 看画面，再用 lines: [...] 补上。',
           });
-          loop.lastWake = { at: new Date().toTimeString().slice(0, 8), ok: Boolean(w?.ok), reason: w?.reason ?? null, segment: missing[0].from };
-          if (!w?.ok) { loop.wakeFails += 1; loop.lastReason = 'wake-failed'; }
+          recordWake(loop, w, { segment: missing[0].from });
           note(`refill-needed ${missing.map((m) => m.from).join(',')} → ${w?.ok ? 'ok' : w?.reason ?? 'failed'}`);
           return;
         }
       }
 
-      // ---- TTS：到点念预设台词，不叫醒模型（0 token、0 等待）。
-      // **由播放位置触发，不由墙钟**：位置停在 03:12 就一直等着，不会自己往下念；
-      // 位置到哪一句的 at，就念哪一句。这里不看 speakEvery —— 那是"多久叫一次模型"，
-      // 和"什么时候该念这句话"是两件事，混在一起就是今晚"比画面快很多"的原因。
-      if (loop.tts?.enabled) {
+      // ---- 声音：到点就把这句**交出去**，自己不发声。
+      // **由播放位置触发，不由墙钟**：位置停在 03:12 就一直等着；位置到哪一句的 at，就发哪一句。
+      // 这里不看 speakEvery —— 那是"多久叫一次模型"，和"什么时候该念这句话"是两件事。
+      //
+      // **没有订阅者就完全跳过**（一个引擎模块都不会加载）：到点的词改走下面那条路，
+      // 由模型自己说 —— 也就是把"谁来说"这件事交回给宿主。
+      if (speechSubscribers() > 0) {
         const est = estimate(loop.anchor, tNow);
-        // **两句之间至少隔 6 秒**：位置跳过去之后，欠着的好几句会同时"到点"，
-        // 不拦就会一口气倒出来，听起来像卡带。
-        const gapOk = !loop.lastTtsAt || tNow - loop.lastTtsAt >= TTS_MIN_GAP_MS;
-        if (gapOk && est.why !== 'paused' && Number.isFinite(est.pos)) {
+        if (est.why !== 'paused' && Number.isFinite(est.pos)) {
           const segNow = plan.segmentAt(est.pos);
-          // eslint-disable-next-line no-await-in-loop
           const line = await dueLine(loop.input, est.pos, { size: segNow.size }).catch(() => null);
           if (line) {
-            loop.lastTtsAt = tNow;
-            void speakAloud(line, { voice: loop.tts.voice, rate: loop.tts.rate });
-            loop.spokenAloud += 1;
-            note(`tts ${Math.round(est.pos)}s: ${line.slice(0, 20)}…`);
-            loop.lastReason = 'spoke';
-            return;          // 念了就不叫醒模型
+            const delivered = emitSpeech({
+              at: est.pos, text: line, input: loop.input, segment: segNow.from,
+            });
+            if (delivered > 0) {
+              loop.lastSpeechAt = tNow;
+              note(`speech ${Math.round(est.pos)}s → ${delivered} listener(s): ${line.slice(0, 20)}…`);
+              loop.lastReason = 'spoke';
+              return;        // 交出去了，就不用叫醒模型
+            }
           }
         }
       }
 
       // ---- 高频模式：不受批次边界限制，每 speakEvery 秒叫一次（测试/密集解说用）
-      // TTS 开着的时候不用它：念稿的节奏由每句的 at 决定，不由这个间隔决定。
-      if (loop.speakEvery > 0 && !loop.tts?.enabled) {
+      if (loop.speakEvery > 0) {
         const est = estimate(loop.anchor, tNow);
         const gap = tNow - (loop.lastSpeakAt || 0);
         const within = Number.isFinite(loop.dur) ? est.pos < loop.dur - 1 : true;
@@ -442,8 +447,7 @@ export function startWatchLoop({
             text: `[一起看·高频] 现在 ${mmss(est.pos)}（这一段 ${mmss(seg.from)}–${mmss(seg.to)}）。`
               + '调 video_watch({ speakNow: true }) 拿当前画面，然后说一句。',
           });
-          loop.lastWake = { at: new Date().toTimeString().slice(0, 8), ok: Boolean(w?.ok), reason: w?.reason ?? null, segment: seg.from };
-          if (!w?.ok) { loop.wakeFails += 1; loop.lastReason = 'wake-failed'; }
+          recordWake(loop, w, { segment: seg.from });
           note(`speak-now ${Math.round(est.pos)}s → ${w?.ok ? 'ok' : w?.reason ?? 'failed'}`);
           return;
         }
@@ -487,32 +491,22 @@ export function startWatchLoop({
       if (!r.speak) return;
       const seg = loop.segments.find((x) => x.from === r.segment);
 
-      // TTS 模式：段边界**不叫醒模型**。到点没说，就是没有到点的词 ——
-      // 该不该补词由模型自己那侧（或显式开着的 refillBelow）决定，不是这里替它决定。
-      if (loop.tts?.enabled) {
-        // **wakeOnLinesEmpty**：TTS 模式下念完就不叫醒模型（省 token），代价是
-        // 台词一空就彻底失联，必须等用户开口。开了这个开关，就在"这一段没词了"时醒一次。
-        if (loop.wakeOnLinesEmpty) {
-          const left = await hasLine(loop.input, seg.from).catch(() => true);
-          if (!left) {
-            const w = await wake(loop.ctx, {
-              sessionId: loop.sessionId,
-              text: `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 这一段的词已经念完了，`
-                + '没有新词可念。看一眼画面写下一段的台词，'
-                + '写好后调 video_watch({ lines: [...], tts: true }) 继续念。',
-            });
-            loop.lastWake = {
-              at: new Date().toTimeString().slice(0, 8), ok: Boolean(w?.ok),
-              reason: w?.reason ?? null, segment: seg.from, cause: 'lines-empty',
-            };
-            loop.log(`[watch] wake-on-lines-empty (${mmss(seg.from)}) → ${w.ok ? 'ok' : w.reason}`);
-            loop.lastReason = 'woke-lines-empty';
-            return;
-          }
+      // **wakeOnLinesEmpty**：这一段没有预写台词了 → 醒一次让模型补写。
+      // 以前这个开关只在 TTS 模式下有意义（脚本负责念，词空了就彻底失联）；
+      // 现在核心不发声，模型就是那个"声音"，所以它对普通陪看同样成立。
+      if (loop.wakeOnLinesEmpty) {
+        const left = await hasLine(loop.input, seg.from).catch(() => true);
+        if (!left) {
+          const w = await wake(loop.ctx, {
+            sessionId: loop.sessionId,
+            text: `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 这一段的词已经用完了，`
+              + '没有新词可念。看一眼画面写下一段的台词，写好调 video_watch({ lines: [...] }) 存上。',
+          });
+          recordWake(loop, w, { segment: seg.from, cause: 'lines-empty', countFailure: false });
+          loop.log(`[watch] wake-on-lines-empty (${mmss(seg.from)}) → ${w.ok ? 'ok' : w.reason}`);
+          loop.lastReason = 'woke-lines-empty';
+          return;
         }
-        note(`tts: ${mmss(seg.from)} 到了边界但没有到点的词，保持安静`);
-        loop.lastReason = 'tts-no-due-line';
-        return;
       }
 
       loop.spoken.push(r.segment);
@@ -526,13 +520,7 @@ export function startWatchLoop({
         ? `${head}\n你之前写好的那句：「${line}」\n直接说这句就行；觉得不对就调 video_watch 看一眼再改。`
         : `${head}\n调 video_watch 拿这一段的画面，然后只说一句。`;
       const w = await wake(loop.ctx, { sessionId: loop.sessionId, text });
-      loop.lastWake = { at: new Date().toTimeString().slice(0, 8), ok: Boolean(w?.ok), reason: w?.reason ?? null, segment: r.segment };
-      if (!w?.ok) {
-        loop.wakeFails += 1;
-        // **叫不醒要能看出来**：之前这里只写进 log，而 log 被调用方传成了空函数，
-        // 于是"loop 在跑、位置也对、就是没人说话"完全查不出来。
-        loop.lastReason = 'wake-failed';
-      }
+      recordWake(loop, w, { segment: r.segment });
       note(`wake ${r.segment}s (${r.confidence}) → ${w?.ok ? 'ok' : w?.reason ?? 'failed'}`);
     },
   });
@@ -541,12 +529,8 @@ export function startWatchLoop({
   return { ok: true, ...loopStatus() };
 }
 
-/** 仅测试用：直接注入锚点，跳过 SMTC */
-export function __setAnchorForTest(anchor) {
-  loop.anchor = anchor;
-}
-
 export const LOOP_LIMITS = Object.freeze({
   TICK_MS, PROBE_EVERY_MS, UNKNOWN_GIVE_UP_MS, MAX_EXTRAPOLATE_MS, ASK_AFTER_MS, ASK_COOLDOWN_MS,
   NO_SOURCE_GIVE_UP_MS,
 });
+

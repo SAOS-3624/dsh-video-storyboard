@@ -340,14 +340,84 @@ export function scanShots(opts) {
   });
 }
 
-/** 只在测试/调试用：直接从文件读一帧出来做断言 */
-export async function grabFrameHsv(input, at, opts = {}) {
-  const { ffmpegPath = DEFAULT_FFMPEG, width = SCAN_W, height = SCAN_H } = opts;
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const { stdout } = await promisify(execFile)(ffmpegPath, [
-    '-v', 'error', '-nostdin', '-ss', String(at), '-i', input, '-frames:v', '1',
-    '-vf', `scale=${width}:${height},format=rgb24`, '-f', 'rawvideo', '-',
-  ], { encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 });
-  return frameToHsv(Buffer.from(stdout));
+const MIN_REFINE_SCORE = 25;
+// 整窗平均分高于这个值 → 认为"几乎每帧都在大改"（每帧一剪）。
+// 实测：真每帧一剪 44.5，概念 PV 的快剪窗口 12–18，所以 30 能把两者分开。
+const PER_FRAME_MEAN = 30;
+/**
+ * 逐窗口重判：**先算画面差异，再按窗口决定用多细的间隔去数刀。**
+ *
+ * 早先的版本靠 `findBursts` 找爆点再细判，那有个死穴：整片都快时，"到处一样快"就没有爆点，
+ * 于是全片都被 0.35s 的间隔压扁（实测 3 秒 18 镜的素材只数出 4 刀）。
+ *
+ * 改成逐个 2 秒窗口判断，问的问题变成"**这个窗口的刀，粗间隔看得见吗**"，是局部且绝对的，
+ * 跟全片平均无关。采纳条件三条：
+ *   1) 细判（一帧间隔）确实数出更多刀
+ *   2) 没被判成 motion（连续运镜每帧都在变，但幅度小）
+ *   3) 这些刀的分数均值 ≥ 25（真剪辑一次性换画面，运镜每帧只挪一点）
+ *
+ * 细判不需要重新读盘：两套判定都跑在同一份逐帧分数上。
+ *
+ * @returns {{cuts:Array, refined:Array<{from:number,to:number,coarse:number,fine:number}>}}
+ */
+export function refineCutsByWindow({
+  stats, fps, coarseCuts, winStart = 0, winDur, winSec = 2, minScore = MIN_REFINE_SCORE,
+}) {
+  // 间隔要按内容选：
+  //   - 普通快闪：间隔略大于一帧（1.02/fps），避免同一个镜头的相邻帧被判成两刀；
+  //   - **每帧一剪**：整窗平均分很高（实测 44，普通快闪只有 12–18），这时才把间隔压到一帧以下，
+  //     否则 23 刀只会数出 9 刀。
+  // 用固定的小间隔会把普通动画的快镜放成 19 刀/秒（实测概念 PV 48 → 164），所以必须按窗口内容分流。
+  const out = [];
+  const refined = [];
+  let open = null;
+  let finalGap = Math.max(1.02 / Math.max(1, fps), 0.04);   // 收尾合并用的间隔（遇到每帧一剪会调小）                                          // 正在进行的采纳区间
+
+  // 按下标切窗口：stats 是等间隔的，用 slice 比每窗 filter 全量快几个量级
+  // （60 分钟片子 90k 帧、1800 个窗口，原来每窗都扫全量 = 1.6 亿次比较）
+  const perWin = Math.max(4, Math.round(winSec * Math.max(1, fps)));
+  for (let i0 = 0; i0 < stats.length; i0 += perWin) {
+    const windowStats = stats.slice(i0, i0 + perWin);
+    const from = windowStats[0].t;
+    const to = windowStats[windowStats.length - 1].t + 1 / Math.max(1, fps);
+    const coarse = coarseCuts.filter((c) => c.t >= from && c.t < to);
+    if (windowStats.length < 4) { out.push(...coarse); continue; }
+
+    const meanScoreAll = windowStats.reduce((a, s) => a + s.score, 0) / windowStats.length;
+    const perFrame = meanScoreAll >= PER_FRAME_MEAN;        // 整窗几乎每帧都在大改
+    const gap = perFrame
+      ? Math.max(0.9 / Math.max(1, fps), 0.03)              // 一帧以下：每帧一剪也数得出
+      : Math.max(1.02 / Math.max(1, fps), 0.04);            // 略大于一帧：不把同镜头的相邻帧算两刀
+    if (perFrame) finalGap = Math.min(finalGap, gap);
+    const fine = decideCuts(windowStats, { threshold: 'auto-low', minGap: gap, duration: to - from });
+    const mean = fine.cuts.reduce((a, c) => a + (c.score ?? 0), 0) / Math.max(1, fine.cuts.length);
+    const adopt = fine.cuts.length > coarse.length
+      && fine.degraded !== 'motion'
+      && mean >= minScore;
+
+    if (adopt) {
+      out.push(...fine.cuts);
+      const n = out.length;
+      if (open && Math.abs(open.to - from) < 1e-6) { open.to = to; open.fine = n; }
+      else {
+        if (open) refined.push({ from: open.from, to: open.to, coarse: open.coarse, fine: open.count });
+        open = { from, to, coarse: coarse.length, count: 0, fine: 0 };
+      }
+      open.count += fine.cuts.length;
+    } else {
+      out.push(...coarse);
+      if (open) { refined.push({ from: open.from, to: open.to, coarse: open.coarse, fine: open.count }); open = null; }
+    }
+  }
+  if (open) refined.push({ from: open.from, to: open.to, coarse: open.coarse, fine: open.count });
+
+  return {
+    // 收尾再并一次：跨窗口边界可能留下贴得很近的两刀。
+    // 间隔取"所有窗口用过的最小值"，否则每帧一剪的结果会在这一步被并回去（实测 21 → 9）。
+    cuts: suppressClose(out.sort((a, b) => a.t - b.t), finalGap),
+    refined: refined.map((r) => ({
+      from: +r.from.toFixed(2), to: +r.to.toFixed(2), coarse: r.coarse, fine: r.fine,
+    })),
+  };
 }
+

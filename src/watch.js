@@ -380,6 +380,17 @@ export async function hasLine(input, from, { env = process.env } = {}) {
   return slotItems(st[sessionKey(input)]?.lines?.[Number(from)]).length > 0;
 }
 
+/**
+ * 某一段**还挂着**的台词（`[{ text, at }]`）。
+ *
+ * 给 `video_watch` 返回值的 `speech` 事件用：核心不发声，但只要把这份带 `at` 的稿子交出去，
+ * 谁想接声音都能接（见 voice.js）。和 `loadLine` 的区别是它给整段，不是第一句。
+ */
+export async function readSlot(input, from, { env = process.env } = {}) {
+  const st = await loadWatch(env);
+  return slotItems(st[sessionKey(input)]?.lines?.[Number(from)]);
+}
+
 /** 库存概览：已经写好台词的段有哪些（诊断用） */
 export async function linesOverview(input, { env = process.env } = {}) {
   const st = await loadWatch(env);
