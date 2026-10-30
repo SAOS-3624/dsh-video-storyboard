@@ -32,6 +32,18 @@ export const DETAIL_CHARS = Object.freeze({ low: 60, med: 120, high: 400 });
 export const charsForDetail = (detail) => DETAIL_CHARS[detail] ?? DETAIL_CHARS.med;
 
 const DEFAULT_SCAN_HEIGHT = 360;
+
+/**
+ * `<quality>` → 下载清晰度。**这是给"看不清"准备的**。
+ *
+ * 为什么需要它：URL 模式下宫格图是用**下载的那份文件**拼的，不是原片。
+ * 原来写死 360p，4K 源缩到 360 再摊成 2×2（123×68），字和细节全糊 —— 这是真实反馈。
+ * 本地文件不走这条路（直接读原片），所以只有链接会受影响。
+ *
+ * 默认 medium：low 太快糊、high 下载翻三倍，medium 是"看得清 + 还能接受"的那一档。
+ */
+export const QUALITY_HEIGHTS = Object.freeze({ low: 360, medium: 720, high: 1080 });
+const DEFAULT_QUALITY = 'medium';
 const DEFAULT_ZOOM_HEIGHT = 1080;
 
 /**
@@ -49,8 +61,15 @@ function fetchOptionsFor(args = {}, kind = 'board') {
     cookies: args.cookies,
     allowAnonymous: args.allowAnonymous === true,
     // 扫描用低清落盘、zoom 回原始流取高清：这是两级取流的分工，三个入口一致
-    scanHeight: args.scanHeight ?? DEFAULT_SCAN_HEIGHT,
-    ...(kind === 'zoom' ? { zoomHeight: args.zoomHeight ?? DEFAULT_ZOOM_HEIGHT } : {}),
+    // quality 只对 board 生效：zoom 有 1080 的高清直链，它的 scanHeight 只是**本地兜底**，
+    // 抬高它只会让每次 zoom 多下一份没人用的 720p。watch 同理（分段取图，用的是缓存副本）。
+    scanHeight: kind === 'board'
+      ? (args.scanHeight ?? QUALITY_HEIGHTS[args.quality ?? DEFAULT_QUALITY] ?? DEFAULT_SCAN_HEIGHT)
+      : (args.scanHeight ?? DEFAULT_SCAN_HEIGHT),
+    // zoom 的清晰度走 zoomHeight：quality 是给人的旋钮，zoomHeight 是给"我要正好多少像素"的
+    ...(kind === 'zoom'
+      ? { zoomHeight: args.zoomHeight ?? QUALITY_HEIGHTS[args.quality] ?? DEFAULT_ZOOM_HEIGHT }
+      : {}),
   };
 }
 

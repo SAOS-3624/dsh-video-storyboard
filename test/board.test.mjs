@@ -20,7 +20,7 @@ test('board: 全片概览的默认值', () => {
   assert.equal(o.adaptive, true);
   assert.equal(o.detail, 'med');
   assert.equal(o.ocr, false);
-  assert.equal(o.fetchOptions.scanHeight, 360);
+  assert.equal(o.fetchOptions.scanHeight, 720, '默认 medium：360p 出图会糊（用户反馈）');
   assert.equal(o.fetchOptions.zoomHeight, undefined, 'board 不需要高清直链');
 });
 

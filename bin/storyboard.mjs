@@ -18,6 +18,7 @@ import { resolveInput } from '../src/storyboard/fetch.js';
 import {
   DETAIL_CHARS, formatManifest, formatTimeline, runStoryboard, saveStoryboards,
 } from '../src/storyboard/pipeline.js';
+import { QUALITY_HEIGHTS } from '../src/storyboard/board.js';
 
 const opt = parse(process.argv.slice(2), {
   cells: 0, sheets: 0, from: 0, to: 0, threshold: 'auto', 'min-gap': 1.2,
@@ -25,7 +26,7 @@ const opt = parse(process.argv.slice(2), {
   out: 'storyboard.png', manifest: null, plan: 0, 'text-only': false, 'cell-range': null,
   batch: 0, detail: 'med',
   cookies: null, 'allow-anonymous': false, 'scan-height': 360, 'zoom-height': 1080,
-  'transcript-file': null, 'source-hash': false,
+  'transcript-file': null, 'source-hash': false, quality: 'medium',
 });
 const input = opt._[0];
 if (!input) {
@@ -37,7 +38,8 @@ if (!input) {
 const fetchOptions = {
   cookies: opt.cookies ?? undefined,
   allowAnonymous: opt['allow-anonymous'] === true,
-  scanHeight: Number(opt['scan-height']) || 360,
+  // quality 是给人的旋钮；--scan-height 精确覆盖它
+  scanHeight: Number(opt['scan-height']) || QUALITY_HEIGHTS[opt.quality] || 360,
   zoomHeight: Number(opt['zoom-height']) || 1080,
 };
 let localPath = input;

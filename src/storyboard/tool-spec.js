@@ -143,11 +143,22 @@ export function storyboardToolSpec() {
           'Overrides asr.json for this call only. Use it when the subject has its own vocabulary — a global ' +
           'list from another subject is a negative bias, not a neutral default.',
       },
+      quality: {
+        type: 'string',
+        enum: ['low', 'medium', 'high'],
+        description: 'Sharpness of the returned storyboard, **http(s) links only** — a local file is ' +
+          'always read at its own resolution, so this does nothing for it. ' +
+          'low = 360p (fast, on-screen text unreadable), medium = 720p (default), high = 1080p ' +
+          '(slowest download, biggest image budget). ' +
+          '**Raise it to high when the user says the image is blurry, or when the cell has to show ' +
+          'readable text / small detail.** A link is downloaded once at this tier and every cell is ' +
+          'cut from that file, so this is the only knob that changes how sharp the grid is.',
+      },
       scanHeight: {
         type: 'integer',
-        description: 'For http(s) links: which resolution to download for scanning (default 360). ' +
-          'Scanning only needs structure — it gets downscaled to 64x36 — so a low tier is both ' +
-          'faster and 15x smaller. Close-ups go through video_zoom instead.',
+        description: 'Advanced override: exact download height for http(s) links (120-2160). Prefer ' +
+          '`quality` — this one exists for cases where you know the exact pixel budget you want. ' +
+          'Takes precedence over `quality` when both are given.',
       },
       cookies: {
         type: 'string',
@@ -279,6 +290,13 @@ export function zoomToolSpec() {
         type: 'number',
         description: 'Minimum spacing between cells in seconds (default 1.2). Lower it to 0.3-0.5 ' +
           'when re-reading a fast-cut montage so short shots get their own cell instead of being merged.',
+      },
+      quality: {
+        type: 'string',
+        enum: ['low', 'medium', 'high'],
+        description: 'Sharpness of the close-up frames, for http(s) links. low = 480p, medium = 720p, ' +
+          'high = 1080p (default). Raise it when the fine detail is not readable; lower it when the ' +
+          'download is too slow. Ignored for local files, which are always read at native resolution.',
       },
       zoomHeight: {
         type: 'integer',
@@ -530,6 +548,9 @@ export function validateToolArgs(args) {
   if (args.scanHeight !== undefined
     && (!Number.isInteger(args.scanHeight) || args.scanHeight < 120 || args.scanHeight > 2160)) {
     problems.push('scanHeight must be an integer 120..2160');
+  }
+  if (args.quality !== undefined && !['low', 'medium', 'high'].includes(args.quality)) {
+    problems.push('quality must be one of low / medium / high');
   }
   if (args.cookies !== undefined && (typeof args.cookies !== 'string' || args.cookies.trim() === '')) {
     problems.push('cookies must be a non-empty path');
