@@ -85,9 +85,25 @@ test('contract: video_zoom 的 schema 同样过宿主 defineTool', async (t) => 
   const spec = zoomToolSpec();
   const tool = host.defineTool({ ...spec, execute: async () => ({ images: [], text: '' }) });
   assert.equal(tool.name, 'video_zoom');
-  assert.deepEqual(tool.parameters.required.sort(), ['from', 'input', 'to']);
+  // from/to 只有在没有 cellId 时才必需：schema 必须放行 { input, cellId }，
+  // 否则视频格寻址在宿主参数校验阶段就死了（issue #22）。
+  assert.deepEqual(tool.parameters.required.sort(), ['input']);
+  assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a.mp4', cellId: 8 }), []);
   assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a.mp4', from: 10, to: 20 }), []);
-  assert.ok(host.validateArgs(spec.parameters, { input: 'a.mp4' }).length > 0, '缺 from/to 应报错');
+  assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a.mp4' }), [],
+    'schema 层放行；缺窗口由 validateZoomArgs 报更明确的错');
+  assert.ok(validateZoomArgs({ input: 'a.mp4' }).length > 0, '缺 from/to 且无 cellId，本地必须挡住');
+  // 这两个参数以前只在 handler 里被读取、没有进 schema，宿主传不进来（issue #23）。
+  assert.equal(spec.parameters.transcriptFile.type, 'string');
+  assert.deepEqual(spec.parameters.detail.enum, ['low', 'med', 'high']);
+  assert.deepEqual(host.validateArgs(spec.parameters, {
+    input: 'a.mp4', cellId: 1, transcriptFile: 'subs.srt', detail: 'high',
+  }), []);
+  assert.deepEqual(validateZoomArgs({
+    input: 'a.mp4', cellId: 1, transcriptFile: 'subs.srt', detail: 'high',
+  }), []);
+  assert.ok(validateZoomArgs({ input: 'a.mp4', cellId: 1, transcriptFile: '' }).length > 0);
+  assert.ok(validateZoomArgs({ input: 'a.mp4', cellId: 1, detail: 'ultra' }).length > 0);
   // 宿主 schema 没有数值上限，cells:20 会被放行 —— 这正是本地校验必须存在的理由
   assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a', from: 1, to: 2, cells: 20 }), []);
   assert.ok(validateZoomArgs({ input: 'a', from: 1, to: 2, cells: 20 }).length > 0, '本地必须挡住');

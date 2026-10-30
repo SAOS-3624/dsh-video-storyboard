@@ -205,8 +205,8 @@ export function zoomToolSpec() {
           'A link is re-read from the original stream at high resolution, so cells here can be ' +
           'sharper than the storyboard even when the scan itself used a low tier.',
       },
-      from: { type: 'number', required: true, description: 'Window start in seconds.' },
-      to: { type: 'number', required: true, description: 'Window end in seconds.' },
+      from: { type: 'number', description: 'Window start in seconds. Required unless cellId is given.' },
+      to: { type: 'number', description: 'Window end in seconds. Required unless cellId is given.' },
       cells: {
         type: 'integer',
         description: 'Cells for this window, 1-9 (default 6). Fewer cells = bigger each.',
@@ -225,6 +225,16 @@ export function zoomToolSpec() {
         type: 'string',
         enum: ['auto', 'off'],
         description: 'Include subtitle/ASR text for this window. Default "auto".',
+      },
+      transcriptFile: {
+        type: 'string',
+        description: 'Path to an existing transcript (SRT, or JSON with [{start,end,text}] / ' +
+          '[{from,to,text}] / Bilibili {body:[{from,to,content}]}). Skips the subtitle track and ASR.',
+      },
+      detail: {
+        type: 'string',
+        enum: ['low', 'med', 'high'],
+        description: 'Characters of transcript per cell: low=60, med=120 (default), high=400.',
       },
       cellId: {
         type: 'integer',
@@ -406,6 +416,16 @@ export function validateZoomArgs(args) {
   }
   if (args.allowAnonymous !== undefined && typeof args.allowAnonymous !== 'boolean') {
     problems.push('allowAnonymous must be a boolean');
+  }
+  if (args.transcript !== undefined && !['auto', 'off'].includes(args.transcript)) {
+    problems.push("transcript must be 'auto' or 'off'");
+  }
+  if (args.transcriptFile !== undefined
+    && (typeof args.transcriptFile !== 'string' || args.transcriptFile.trim() === '')) {
+    problems.push('transcriptFile must be a non-empty path');
+  }
+  if (args.detail !== undefined && !['low', 'med', 'high'].includes(args.detail)) {
+    problems.push("detail must be 'low', 'med' or 'high'");
   }
   if (args.sourceHash !== undefined && typeof args.sourceHash !== 'boolean') {
     problems.push('sourceHash must be a boolean');
