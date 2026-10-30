@@ -540,15 +540,19 @@ export async function runStoryboard(opts) {
   const relCuts = cuts.map((c) => c.t - winStart);
   // **积分采样点（假切点）**：扫描之后立刻算好，交给下面"格内取几帧 / 取在哪"用。
   // 它不进 `cuts` —— 清单里"切点 N 个"必须还是真切点，否则模型会以为那些地方有硬切。
-  // 阈值就是 equivSeconds（每条采样点代表多少秒的平均变化量），音频驱动只改这一个数：
-  // 音乐片信息全在画面上，所以每 4 秒等效变化就采一个点（默认 6 秒）。
+  // 阈值就是 equivSeconds（每条采样点代表多少秒的平均变化量）。
+  //
+  // **音乐驱动原本设 4（比默认 6 更密），2026-10-30 反过来了**：实测正式 PV 第 2 格
+  // 只有 3.0 秒却塞了 7 个真切点 + 2 个采样点 → k=3 → 9 帧，平均 **0.3 秒一张**。
+  // 3 秒里 8 个镜头本来就长得像，多采出来的点全变成"相似帧"，把预算从别处抢走。
+  // 采样点只在**真切点之间**补洞，不该在已经切得很碎的地方再加密度。
   const sampleMarks = scan.stats?.length
     ? integralMarks({
       duration: winDur,
       series: scan.stats,
       cuts: cuts.map((c) => c.t),
       start: winStart,
-      equivSeconds: musicDriven ? 4 : 6,
+      equivSeconds: musicDriven ? 8 : 6,
     })
     : [];
   planInfo.sampleMarks = sampleMarks.length;

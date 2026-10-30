@@ -73,7 +73,7 @@ export function chooseSubGrid({
   // 而它比"10 秒 4 镜（0.4 刀/秒）"密 7 倍 —— 真正该摊的是前者。
   // 密度判据（minRate）已经能拦住"镜头少但时长长的正常叙事"，minShots 只防"1 镜没东西可摊"。
   minShots = 3, minRate = 0.4, minSubScore = 30, minSubW = 200, minSubH = 112,
-  minMotion = 1.5,
+  minMotion = 1.5, maxK = 4,
 }) {
   // **一个镜头、但画面一直在动**（摇镜、推拉、转场）：整段只取 1 帧会把运动过程全丢掉。
   // meanMotion 是段内逐帧分数的均值 —— 静止画面约 0.2，匀速摇镜约 1.5~3。
@@ -93,10 +93,18 @@ export function chooseSubGrid({
   // 结果完全一样，所以 0.4 是拐点，不是越松越好。
   // 防"摊出来 9 张一模一样"的任务交给上面那两条
   // （cutScore + minShots）。
-  if (dur > 0 && shots / dur < minRate) return 1;
-  // k 上限从 4 降到 3：4×4 时子帧只有约 130×73，人脸都糊了。
-  // 3×3 是 173×97，同样的镜头数宁可少看几个也要看得清。
-  let k = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(shots))));
+  //
+  // **长格子不受这条管**（2026-10-30 补）：24 秒 8 个镜头算出来是 0.33 刀/秒，
+  // 被当成"镜头稀"而整格只给 1 帧 —— 可它一秒都没浪费，只是镜头长。
+  // 12 秒以上一律放行，由后面的像素下限决定能摊几×几。
+  if (dur > 0 && dur < 12 && shots / dur < minRate) return 1;
+  // k 上限默认 4（3×3 是"变化快"的地方的主力档位，别动它）。
+  let k = Math.min(maxK, Math.max(2, Math.ceil(Math.sqrt(shots))));
+  // **格子数不该明显多过镜头数**：9 个位置去覆盖 5 个镜头，必然有 4 个位置是同一镜头的
+  // 不同时刻 —— 看着就是"重复帧"。宁可 2×2 少看一个，也别在 3×3 里塞四张一样的。
+  // 1.5 是实测取的：6 个镜头（9 帧）仍然留 3×3，5 个镜头 → 2×2（不然 4 张是同一镜头）。
+  // 快的地方镜头多，自然还是 3×3 —— 这条不影响"变化快就细看"。
+  while (k > 2 && k * k > shots * 1.5) k -= 1;
   while (k > 1 && (cellW / k < minSubW || cellH / k < minSubH)) k -= 1;
   return k > 1 ? k : 1;
 }

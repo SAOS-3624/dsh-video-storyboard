@@ -452,12 +452,14 @@ test('refineCutsByWindow: 分数不够大时不采纳（宁可少报）', async 
 
 /* ---------------------------------------------------------------- 子格摊开 */
 
-test('chooseSubGrid: 按密度决定，不看镜头数', async () => {
+test('chooseSubGrid: 按密度决定 —— 短段看刀/秒，长段只看长度', async () => {
   const { chooseSubGrid } = await import('../src/storyboard/pipeline.js');
-  // 15 秒 5 个镜头（0.33/s）低于 0.4 门槛，不摊
-  assert.equal(chooseSubGrid({ shots: 5, dur: 15, cellW: 499, cellH: 278 }), 1);
-  // 同样 5 个镜头挤在 3 秒里（1.7/s）就是快闪，该摊
-  assert.ok(chooseSubGrid({ shots: 5, dur: 3, cellW: 499, cellH: 278 }) >= 2);
+  // 4 个镜头摊在 11 秒（0.36/s）低于 0.4，且不到 12 秒 → 不摊
+  assert.equal(chooseSubGrid({ shots: 4, dur: 11, cellW: 499, cellH: 278 }), 1);
+  // 同样 4 个镜头挤在 3 秒里（1.3/s）就是快闪，该摊
+  assert.ok(chooseSubGrid({ shots: 4, dur: 3, cellW: 499, cellH: 278 }) >= 2);
+  // 15 秒 4 个镜头：刀/秒 0.27 一样低，但格子长 → 摊（2026-10-30 新行为）
+  assert.equal(chooseSubGrid({ shots: 4, dur: 15, cellW: 499, cellH: 278 }), 2);
 });
 
 test('chooseSubGrid: 子帧小于 200×112 就降档（3×3 / 4×4 都不再摊）', async () => {

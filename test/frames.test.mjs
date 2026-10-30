@@ -86,11 +86,12 @@ test('chooseSubGrid: 10 秒 4 镜会摊成 2×2（门槛从 0.7 降到 0.4 后�
   assert.equal(k, 2);
 });
 
-test('chooseSubGrid: 密度门槛 0.4 仍会挡住慢段（已知取舍）', () => {
-  // 4 镜 / 12 秒 = 0.33 刀/秒 < 0.4 → 不摊，整段只给 1 张。
-  // 这是当前的行为：慢段的代表帧靠"避开黑场"保证不取到黑屏，而不是靠多摊几张。
-  const k = chooseSubGrid({ shots: 4, cellW: 460, cellH: 260, dur: 12, cutScore: 50 });
-  assert.equal(k, 1);
+test('chooseSubGrid: 密度门槛 0.4 挡住"短而稀"的段，但长格子不受这条管', () => {
+  // 3 镜 / 11 秒 = 0.27 刀/秒，且不到 12 秒 → 不摊（整段一张代表帧）。
+  assert.equal(chooseSubGrid({ shots: 3, cellW: 460, cellH: 260, dur: 11, cutScore: 50 }), 1);
+  // 同样 3 镜摊到 15 秒：镜头一样稀，但**格子长**，1 帧代表不了 15 秒 → 摊 2×2。
+  // 2026-10-30 补这条：24 秒 8 个镜头的格子算出来 0.33 刀/秒，曾被误判成"稀"而只给 1 帧。
+  assert.equal(chooseSubGrid({ shots: 3, cellW: 460, cellH: 260, dur: 15, cutScore: 50 }), 2);
 });
 
 test('chooseSubGrid: 只有 1 镜不摊（没东西可摊）', () => {
