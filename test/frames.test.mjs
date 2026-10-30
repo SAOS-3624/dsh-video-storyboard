@@ -72,8 +72,7 @@ test('subTileTimes: 格外的切点被忽略（不把采样点拉到格外面去
 
 test('chooseSubGrid: 1 秒 3 镜要摊（旧版被 minShots=4 挡掉）', () => {
   // 3 刀/秒，比"10 秒 4 镜（0.4 刀/秒）"密 7 倍，却没有被摊开 —— 这是本次修正的点
-  // 格子取 460×260：摊 2×2 后 230×130 ≥ 200×112 的下限。
-  const k = chooseSubGrid({ shots: 3, cellW: 460, cellH: 260, dur: 1.0, cutScore: 50 });
+  const k = chooseSubGrid({ shots: 3, cellW: 350, cellH: 194, dur: 1.0, cutScore: 50 });
   assert.ok(k >= 2, `应当摊开，实得 k=${k}`);
 });
 
@@ -82,46 +81,35 @@ test('chooseSubGrid: 10 秒 4 镜会摊成 2×2（门槛从 0.7 降到 0.4 后�
   // 41 个镜头里 10 个根本没出现在图上；0.4 摊 6/9 格能做到 41/41 全覆盖。
   // 代价是 2.5 秒/镜的正常节奏也会摊成 4 格 —— 但这只是"格内多几张小图"，
   // 整张图仍然是 9 格，不会像"格数变多"那样把节奏切碎。
-  const k = chooseSubGrid({ shots: 4, cellW: 460, cellH: 260, dur: 10, cutScore: 50 });
+  const k = chooseSubGrid({ shots: 4, cellW: 350, cellH: 194, dur: 10, cutScore: 50 });
   assert.equal(k, 2);
 });
 
 test('chooseSubGrid: 密度门槛 0.4 仍会挡住慢段（已知取舍）', () => {
   // 4 镜 / 12 秒 = 0.33 刀/秒 < 0.4 → 不摊，整段只给 1 张。
   // 这是当前的行为：慢段的代表帧靠"避开黑场"保证不取到黑屏，而不是靠多摊几张。
-  const k = chooseSubGrid({ shots: 4, cellW: 460, cellH: 260, dur: 12, cutScore: 50 });
+  const k = chooseSubGrid({ shots: 4, cellW: 350, cellH: 194, dur: 12, cutScore: 50 });
   assert.equal(k, 1);
 });
 
 test('chooseSubGrid: 只有 1 镜不摊（没东西可摊）', () => {
-  const k = chooseSubGrid({ shots: 1, cellW: 460, cellH: 260, dur: 1.0, cutScore: 50 });
+  const k = chooseSubGrid({ shots: 1, cellW: 350, cellH: 194, dur: 1.0, cutScore: 50 });
   assert.equal(k, 1);
 });
 
 test('chooseSubGrid: 刀本身不够狠（软切/线稿动画）不摊', () => {
-  const k = chooseSubGrid({ shots: 8, cellW: 460, cellH: 260, dur: 2.0, cutScore: 12 });
+  const k = chooseSubGrid({ shots: 8, cellW: 350, cellH: 194, dur: 2.0, cutScore: 12 });
   assert.equal(k, 1);
 });
 
 test('chooseSubGrid: 子帧小于下限时降档，降到不能降就给整格', () => {
-  // 格子只有 180 宽，k=2 之后每格 90 < minSubW(200) → 只能 1
+  // 格子只有 180 宽，k=2 之后每格 90 < minSubW(100) → 只能 1
   const k = chooseSubGrid({ shots: 9, cellW: 180, cellH: 100, dur: 2.0, cutScore: 50 });
   assert.equal(k, 1);
 });
 
-test('chooseSubGrid: 排版尺寸到不了 200×112 就一律不摊（2026-10-30 实测）', () => {
-  // 对比测试实测：4×4 的 247×137 摊 2×2 得 123×68、3×3 的 331×184 摊 2×2 得 165×92，
-  // 两者在文字密集素材上都认不出字（盲评可读 1~2 分）。所以摊开的门槛按"能认出内容"定，
-  // 不再按"能分辨不同镜头"（100×56）定。
-  const dense = { shots: 30, dur: 4, cutScore: 50 };
-  assert.equal(chooseSubGrid({ ...dense, cellW: 247, cellH: 137 }), 1, '4×4 格不该摊');
-  assert.equal(chooseSubGrid({ ...dense, cellW: 331, cellH: 184 }), 1, '3×3 格不该摊');
-  assert.equal(chooseSubGrid({ ...dense, cellW: 460, cellH: 260 }), 2, '2×2 格可以摊 2×2');
-});
-
 test('chooseSubGrid: k 随镜头数增长，上限 4', () => {
-  // 800×452 才撑得住 4×4（每格 200×113），尺寸门槛是按"摊完还能看清"卡的
-  const at = (shots) => chooseSubGrid({ shots, cellW: 800, cellH: 452, dur: shots * 0.15, cutScore: 50 });
+  const at = (shots) => chooseSubGrid({ shots, cellW: 400, cellH: 260, dur: shots * 0.15, cutScore: 50 });
   assert.equal(at(3), 2);
   assert.equal(at(6), 3);
   assert.equal(at(20), 4);

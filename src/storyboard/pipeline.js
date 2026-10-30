@@ -500,14 +500,7 @@ export async function runStoryboard(opts) {
     .filter((r) => r.to - r.from >= 2 && r.from < winDur);
   // 按给定总格数排一遍 → 返回 [{from,to,density,dark}]。抽成函数是为了能"补满后重排一次"。
   const planRanges = (total) => {
-    // **近乎静止的素材不吃"变化量"这套**。
-    // rodt / 积分采样点的前提是"变化多的地方更值得看"，可当整片 p90 < 1（讲义、监控、
-    // 固定机位口播）时，切点集中在少数几页翻页动画上，按密度分格就会把格位堆在那几页，
-    // 出来一堆几乎一样的幻灯片（2026-10-30 实测：66 分钟讲座 16 格里有 6 格是同一页的
-    // 不同配色，盲评覆盖/代表各掉 1~2 分）。这种素材没有任何"更值得看"的区域，
-    // 均匀铺开才是对的 —— 退回按时间等分。p90 ≥ 1 的照旧走密度。
-    const nearStatic = (Number(scan.summary?.p90) || 0) < 1;
-    if (adaptive && relCuts.length > 0 && !nearStatic) {
+    if (adaptive && relCuts.length > 0) {
       let segRanges;
       if (darkRuns.length > 0) {
         // **黑场单独成段**：黑屏在分数上几乎是 0（前后都黑，没有"变化"），永远不会被当成切点，
@@ -524,9 +517,8 @@ export async function runStoryboard(opts) {
         if (cursor < winDur - 0.5) parts.push({ from: cursor, to: winDur, dark: false });
 
         // 黑场**额外占格**，不从内容格数里扣 —— 否则 4 段黑场就把 4 格吃光，
-        // 剩下 65 秒的内容挤成一格（实测踩过）。
-        // 但总格数是总格数：内容只能拿 total − 黑场格数，不然总数会超出布局容量。
-        const contentTotal = Math.max(1, total - darkRuns.length);
+        // 剩下 65 秒的内容挤成一格（实测踩过）。多出来的格由下面"补满布局容量"吸收。
+        const contentTotal = Math.max(1, total);
         const countIn = (p2) => relCuts.filter((c) => c >= p2.from && c < p2.to).length;
         const allContentCuts = parts.filter((x) => !x.dark).reduce((n, p2) => n + countIn(p2), 0);
 
@@ -564,6 +556,11 @@ export async function runStoryboard(opts) {
       .map(([a, b]) => ({ from: a, to: b, density: 1 }));
   };
   let cellRanges = planRanges(cells * sheets);
+  // 黑场是"额外占格"，所以 `planRanges(n)` 实际返回 n + 黑场数。
+  // 补满布局容量时必须按**内容格**换算，否则每补一轮又把黑场那几格加回来 —— 越补越多
+  // （实测把中国剑补成 17 格 2 张、PV 补成 16 格）。
+  const extraDark = (adaptive && relCuts.length > 0) ? darkRuns.length : 0;
+  const sheetsAt = (n) => Math.ceil(Math.max(1, n) / 16);
   // ---- 把"因为取整而空出来的格位"填成真帧
   // 总格数不一定落在布局容量上：13 格排 4×4 空 3 个黑位、10 格排 3×4 空 2 个。
   // 空格和真帧占的是同一张画布、同样的 token —— 空着是纯损失（而且黑块会拉低整图的信噪比）。
@@ -575,8 +572,26 @@ export async function runStoryboard(opts) {
   if (!(Number(opts.sheets) > 0) && cellRanges.length > 0) {
     const cap = fillLayout(cellRanges.length, info.aspect).cells;
     if (cap > cellRanges.length) {
-      const retried = planRanges(cap);
-      if (retried.length > cellRanges.length) cellRanges = retried;
+      const retried = planRanges(Math.max(1, cap - extraDark));
+      // 只往上补，且**不越过 sheet 边界**：48 格 3 张补成 49 就要第 4 张，多 384 token。
+      if (retried.length > cellRanges.length && sheetsAt(retried.length) <= sheetsAt(cells * sheets)) {
+        cellRanges = retried;
+      }
+    }
+  }
+  // 素材太碎时 rodt 可能多给一格（讲座 48 → 49），把末尾两格并掉回到容量内。
+  if (!(Number(opts.sheets) > 0)) {
+    let merged = 0;
+    while (cellRanges.length > cells * sheets
+      && sheetsAt(cellRanges.length) > sheetsAt(cells * sheets)
+      && cellRanges.length >= 2) {
+      const a = cellRanges[cellRanges.length - 2];
+      const b = cellRanges[cellRanges.length - 1];
+      cellRanges.splice(-2, 2, {
+        from: a.from, to: b.to, density: (a.density + b.density) / 2,
+        ...(a.dark && b.dark ? { dark: true } : {}),
+      });
+      merged += 1;
     }
   }
   if (cellRanges.length > cells * sheets) cells = Math.ceil(cellRanges.length / sheets);
@@ -606,24 +621,29 @@ export async function runStoryboard(opts) {
     );
   };
   let groups = splitSheets(cellRanges);
-  // ---- 每张图也要**补满布局容量**
-  // 切张是按帧预算均分的，均分出来常是 13 格 → 排 4×4 空 3 个黑位。
-  // 黑位和真帧占同一张画布、扣同一份 token，空着就是白扔（黑块还会拉低整图信噪比）。
-  // 所以按"本组格数补满后的容量"重新排一次总格数，再切一次。最多两轮、只往上补。
-  // 素材太短/镜头太少导致排不出这么多段时保持原样（那是几何上给不出，不是浪费）。
-  if (!(Number(opts.sheets) > 0) && groups.length > 0) {
-    for (let pass = 0; pass < 2; pass += 1) {
-      const short = groups.some((g) => g.length > 0 && g.length < fillLayout(g.length, info.aspect).cells);
-      if (!short) break;
-      const cap = Math.max(...groups.map((g) => fillLayout(Math.max(1, g.length), info.aspect).cells));
-      const total = cap * groups.length;
-      if (total <= cellRanges.length) break;
-      const re = planRanges(total);
-      if (re.length < total) break;
-      const nextGroups = splitSheets(re);
-      if (nextGroups.some((g) => g.length === 0)) break;
-      cellRanges = re;
-      groups = nextGroups;
+  // 注：这里曾经有一段"按每张的布局容量再补满一次"的循环，它会把 13 格补成 16、
+  // 再把 24 格补成 32（因为补齐后又能盛下更多），格数一路长到原来的 1.3~1.5 倍。
+  // 现在只保留**上面那一次**按总容量的补齐（5→6 / 7→9 / 10→12 / 13→16），
+  // 够用且不动张数。
+  // ---- 让每张的格数**刚好填满自己的布局**
+  // 25 格按帧均分成 13 + 12，13 排 4×4 会留 3 个黑位；改成 16 + 9 就都填满，
+  // 张数不变、格数不变、只是把格位在两张之间挪几个；凑不出同样张数的整齐分法就保持原样。
+  // 每张最多 16 格、每格最多 4 帧，所以重新分完也不会超 frameBudget（16×4=64）。
+  if (!(Number(opts.sheets) > 0) && groups.length > 1) {
+    const total = groups.reduce((n, g) => n + g.length, 0);
+    const caps = [16, 12, 9, 6, 4];
+    const sizes = [];
+    let left = total;
+    while (left > 0) {
+      const pick = caps.find((c) => c <= left && (left - c === 0 || left - c >= 4));
+      if (!pick) { sizes.length = 0; break; }
+      sizes.push(pick);
+      left -= pick;
+    }
+    if (sizes.length === groups.length) {
+      const flat = groups.flat();
+      let at = 0;
+      groups = sizes.map((n) => flat.slice(at, (at += n)));
     }
   }
   sheets = groups.length;
