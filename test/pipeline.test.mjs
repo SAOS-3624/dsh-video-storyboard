@@ -518,3 +518,40 @@ test('e2e: 极静素材（PPT 型）也能找到那一刀', async (t) => {
   assert.ok(r.cuts.length >= 1, `极静素材上的小改动应该被抓到，实得 ${r.cuts.length} 刀`);
   assert.ok(r.cuts.some((c) => Math.abs(c.t - 2) < 0.6), `切点应落在 2 秒附近，实得 ${r.cuts.map((c) => c.t.toFixed(2))}`);
 });
+
+test('e2e 不变量: 清单里的画面数 == planner 报的帧数', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeFixture(dir);
+
+  for (const cells of [0, 4, 9, 16]) {
+    const r = await runStoryboard({ input: file, cells, pick: 'sharp' });
+    const drawn = r.sheets.flatMap((s) => s.cells)
+      .reduce((n, c) => n + (c.sub ? c.sub * c.sub : 1), 0);
+    assert.equal(r.plan.frames, drawn,
+      `cells=${cells}: planner 说 ${r.plan.frames} 帧，实际画了 ${drawn} 帧`);
+  }
+});
+
+test('e2e 不变量: 切张后时间覆盖与顺序原样不变', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeFixture(dir);
+
+  const r = await runStoryboard({ input: file, cells: 0, pick: 'sharp' });
+  const cells = r.sheets.flatMap((s) => s.cells);
+  // 顺序：起始时间严格递增
+  for (let i = 1; i < cells.length; i++) {
+    assert.ok(cells[i].t_start >= cells[i - 1].t_start, `第 ${i} 格时间倒退了`);
+  }
+  // 覆盖：首格从窗口起点开始，末格到窗口末尾结束
+  assert.equal(cells[0].t_start, r.window.from);
+  assert.ok(Math.abs(cells[cells.length - 1].t_end - r.window.to) < 0.05,
+    '末尾没覆盖到窗口结束');
+  // 不重叠、不留缝
+  for (let i = 1; i < cells.length; i++) {
+    assert.ok(Math.abs(cells[i].t_start - cells[i - 1].t_end) < 1e-6, `第 ${i} 格与前一格不连续`);
+  }
+});
