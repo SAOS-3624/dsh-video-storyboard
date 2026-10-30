@@ -16,9 +16,18 @@ export const MIN_CELL_H = 135;
 export const MAX_SHEETS = 99;   // 不封顶：片长决定张数（每 5 分钟一张），token 随片长线性增长
 export const DEFAULT_ASPECT = 16 / 9;
 
-/** Content-classification thresholds. Kept in one place so the manifest can report them. */
+/**
+ * Content-classification thresholds. Kept in one place so the manifest can report them.
+ *
+ * `musicLufs` 从 -18 放宽到 -22（2026-10-30 实测打脸）：
+ * 原来的 -18 是从"口播 -23 / 音乐 -14.2"两个极端样本的中点划的，**中间地带从没有样本**。
+ * 《记忆管理局》正式 PV 是纯音乐快剪，母带 -18.4 —— 差 0.4 没过线，于是整片按"有字"处理，
+ * 一格不摊，90 秒只有 9 个画面；同一作者的《概念 PV》(-14.2) 却有 33 个。两支差 3.7 倍。
+ * 响度不是"有没有字"的可靠代理：它反映母带电平，不反映内容。
+ * 口播片普遍在 -23（实测基准），留 1 LU 余量取 -22。
+ */
 export const PLAN_THRESHOLDS = Object.freeze({
-  musicLufs: -18,
+  musicLufs: -22,
   musicSpeechRate: 1,
   speechRateCut: 3,
 });
