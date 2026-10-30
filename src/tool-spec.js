@@ -452,6 +452,8 @@ export function locateToolSpec() {
         type: 'string',
         description: 'Path to an existing SRT/JSON transcript. Skips ASR entirely.',
       },
+      cookies: { type: 'string', description: 'cookies.txt path for login-gated sources.' },
+      allowAnonymous: { type: 'boolean', description: 'Allow anonymous fetches for links.' },
     },
     output: {
       schema: {
