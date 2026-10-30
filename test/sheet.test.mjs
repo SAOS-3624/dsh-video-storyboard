@@ -297,6 +297,28 @@ test('e2e: extractSharpest 会躲开模糊帧（前后各一半模糊的片子�
   assert.ok(sharpPick.sharp >= midSharp, `sharp=${sharpPick.sharp} mid=${midSharp}`);
 });
 
+test('e2e: 视频流比容器短的截断录制也能取到帧', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-truncated-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'truncated.mp4');
+  // video 2.0s，audio/container 2.4s：末尾 seek 会越过视频流最后一帧。
+  await run(DEFAULT_FFMPEG, ['-hide_banner', '-v', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=s=320x180:r=60:d=2',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2.4',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', file]);
+  const info = await probeVideo(file);
+  assert.ok(info.duration > 2.2, `容器时长应比视频流长，实得 ${info.duration}`);
+
+  const sharp = await extractSharpest({ input: file, at: 2.1, dur: 0.3, cellW: 320, cellH: 180 });
+  assert.equal(sharp.buffer.length, 320 * 180 * 3);
+  assert.ok(sharp.t < 2.01, `应回退到视频流内的帧，实得 t=${sharp.t}`);
+
+  const direct = await extractFrameRaw({ input: file, at: 2.35, cellW: 320, cellH: 180 });
+  assert.equal(direct.buffer.length, 320 * 180 * 3);
+  assert.ok(direct.t < 2.01, `直接 seek 也应回退，实得 t=${direct.t}`);
+});
+
 test('e2e: thumb 模式返回段内的真实时刻，而不是段起点', async (t) => {
   if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
   const dir = await mkdtemp(join(tmpdir(), 'dsh-sheet-'));

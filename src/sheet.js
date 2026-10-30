@@ -362,9 +362,18 @@ export async function extractSharpest(opts) {
   } else {
     for (let i = 0; i < candidates; i++) times.push(at + pad + (span * i) / (candidates - 1));
   }
-  const picked = await Promise.all(times.map((t) =>
+  // 截断录制的 video stream 可能比容器短：末尾候选越界时 ffmpeg exit 0、stdout 0 字节。
+  // 不能因为一个候选失败就丢掉另外两个可解候选（一次失败会让整张分镜归零）。
+  const settled = await Promise.allSettled(times.map((t) =>
     extractFrameRaw({ input, at: t, cellW, cellH, ffmpegPath, timeoutMs, http })
       .then((f) => ({ ...f, sharp: sharpness(f.buffer, cellW, cellH) }))));
+  const picked = settled.filter((s) => s.status === 'fulfilled').map((s) => s.value);
+  if (picked.length === 0) {
+    const first = settled.find((s) => s.status === 'rejected');
+    throw first?.reason instanceof Error
+      ? first.reason
+      : new Error(`no readable frame around ${at.toFixed(2)}s`);
+  }
   return picked.reduce((best, cur) => (cur.sharp > best.sharp ? cur : best));
 }
 
@@ -419,32 +428,37 @@ export async function extractFrameRaw(opts) {
   } = opts;
   const filter = coverFilter(cellW, cellH);
   const netArgs = httpInputArgs(input, http);
-  let args;
-  let seek;
-  if (mode === 'thumb' && dur > 0) {
-    // 段内取"直方图最接近该段均值"的帧：对溶解/过曝/空镜比硬取中点稳
-    seek = at;
-    const n = Math.max(2, Math.min(300, Math.round(dur * 25)));
-    args = ['-hide_banner', '-v', 'info', '-nostdin', '-ss', String(at), '-t', String(dur), ...netArgs, '-i', input,
-      '-an', '-sn', '-vf', `thumbnail=n=${n},showinfo,${filter}`, '-frames:v', '1',
-      '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'];
-  } else {
-    seek = dur > 0 ? at + dur / 2 : at;
-    args = ['-hide_banner', '-v', 'error', '-nostdin', '-ss', String(seek), ...netArgs, '-i', input,
-      '-an', '-sn', '-vf', filter, '-frames:v', '1',
-      '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'];
-  }
-  const { stdout, stderr } = await exec([ffmpegPath, ...args], { timeoutMs });
   const need = cellW * cellH * 3;
-  if (stdout.length < need) {
-    throw new Error(`frame @${seek.toFixed(2)}s too small: ${stdout.length} < ${need}`);
+  const baseSeek = mode === 'thumb' && dur > 0 ? at : (dur > 0 ? at + dur / 2 : at);
+  // 截断录制/容器比视频流长时，末尾 seek 可能越过最后一帧：ffmpeg 仍 exit 0、
+  // stdout 为空。向段起点方向退几步再试，别让一格取不到帧拖垮整张图。
+  let last = { seek: baseSeek, length: 0 };
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    const seek = Math.max(0, baseSeek - attempt * 0.5);
+    if (attempt > 0 && seek === last.seek) break;
+    let args;
+    if (mode === 'thumb' && dur > 0) {
+      // 段内取"直方图最接近该段均值"的帧：对溶解/过曝/空镜比硬取中点稳
+      const n = Math.max(2, Math.min(300, Math.round(dur * 25)));
+      args = ['-hide_banner', '-v', 'info', '-nostdin', '-ss', String(seek), '-t', String(dur), ...netArgs, '-i', input,
+        '-an', '-sn', '-vf', `thumbnail=n=${n},showinfo,${filter}`, '-frames:v', '1',
+        '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'];
+    } else {
+      args = ['-hide_banner', '-v', 'error', '-nostdin', '-ss', String(seek), ...netArgs, '-i', input,
+        '-an', '-sn', '-vf', filter, '-frames:v', '1',
+        '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'];
+    }
+    const { stdout, stderr } = await exec([ffmpegPath, ...args], { timeoutMs });
+    last = { seek, length: stdout.length, stderr };
+    if (stdout.length < need) continue;
+    let actual = seek;
+    if (mode === 'thumb') {
+      const hits = [...stderr.matchAll(PTS_RE)].map((m) => Number(m[1]));
+      if (hits.length > 0) actual = seek + hits[hits.length - 1];
+    }
+    return { buffer: Buffer.from(stdout.subarray(0, need)), t: actual };
   }
-  let actual = seek;
-  if (mode === 'thumb') {
-    const hits = [...stderr.matchAll(PTS_RE)].map((m) => Number(m[1]));
-    if (hits.length > 0) actual = at + hits[hits.length - 1];
-  }
-  return { buffer: Buffer.from(stdout.subarray(0, need)), t: actual };
+  throw new Error(`frame @${last.seek.toFixed(2)}s too small: ${last.length} < ${need}`);
 }
 
 /**
