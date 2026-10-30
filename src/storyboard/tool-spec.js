@@ -381,6 +381,101 @@ export function probeToolSpec() {
   };
 }
 
+/**
+ * 把整片里的**硬字幕**一条条裁下来、纵向拼成一张长图。
+ *
+ * 补的是原来四个工具都不覆盖的一块：它们全是"按**时间**取帧"，
+ * 没有"跨时间裁同一区域再拼接"。真实场景是那种**没有字幕轨、ASR 也转不出来**的片子
+ * （PV / 唱歌 / 多语言艺术字）：92 秒只转出 35 个字，剩下全靠眼睛看画面。
+ * 裁成字幕带之后，一张图就能读完所有台词，比在 9 宫格里找那 144 像素高的字幕强得多。
+ */
+export function subtitlesToolSpec() {
+  return {
+    name: 'video_subtitles',
+    description: [
+      'Clip the burned-in subtitle band out of a video and stack all the strips into ONE tall image,',
+      'in time order — so you can read every on-screen line without asking for a dozen zoom calls.',
+      '',
+      'Use this when the video has **hard-coded** subtitles on screen but no subtitle track and no',
+      'usable transcript (PV / music videos / lyrics / bilingual art titles). If ASR works on the file,',
+      'video_locate is cheaper and gives text directly — try that first.',
+      '',
+      'Each strip is one moment ~stepSec apart, top to bottom. Blank strips mean "no subtitle at that',
+      'moment", which is also information. The returned text lists the timestamp of every strip.',
+      '',
+      'Cost: one image. Strips are cut **sequentially** (one ffmpeg at a time) — deliberately, because',
+      'parallel cropping on a memory-tight machine dies with 0xC000012D.',
+    ].join('\n'),
+    parameters: {
+      input: {
+        type: 'string',
+        required: true,
+        description: 'Local absolute path, or any http(s) link yt-dlp can resolve (you are responsible ' +
+          'for having the right to download it).',
+      },
+      from: {
+        type: 'number',
+        description: 'Window start in seconds (default 0).',
+      },
+      to: {
+        type: 'number',
+        description: 'Window end in seconds. Omit for the whole file.',
+      },
+      maxStrips: {
+        type: 'integer',
+        description: 'Upper bound on strips, 1-40 (default 24). More strips = taller image = more ' +
+          'subtitles caught, but a long window gets coarser sampling.',
+      },
+      stepSec: {
+        type: 'number',
+        description: 'Target spacing in seconds (default 3). Actual spacing widens when the window is ' +
+          'long enough that `maxStrips` would be exceeded.',
+      },
+      band: {
+        type: 'array',
+        items: { type: 'number' },
+        description: 'Subtitle band as [y0, y1], fractions of frame height. Default 0.82-0.98 ' +
+          '(bottom 16%). **Tune it from what you actually SEE in the returned image**: if text is ' +
+          'clipped at the top of a strip, lower y0; if most of a strip is empty background, raise y0. ' +
+          'Reference values: single-line bottom 0.86-0.98, bilingual bottom 0.82-0.98, top caption bar ' +
+          '0.02-0.14, centered lyric 0.40-0.60.',
+      },
+      cookies: {
+        type: 'string',
+        description: 'Path to a Netscape cookies.txt. Falls back to DSH_VIDEO_COOKIES.',
+      },
+      allowAnonymous: {
+        type: 'boolean',
+        description: 'Anonymous access is always allowed; set true to suppress the warning note.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: {
+            type: 'string',
+            required: true,
+            description: 'Strip count, spacing, band source, and the timestamp of every strip.',
+          },
+          images: { type: 'array', required: true, items: { type: 'json' } },
+        },
+      },
+      render(args, value) {
+        return [
+          ...value.images.map((attachment) => ({ type: 'image', attachment })),
+          { type: 'text', text: value.text },
+        ];
+      },
+    },
+    timeoutMs: 180_000,
+    isConcurrencySafe() {
+      return true;
+    },
+  };
+}
+
 /** execute 内部兜底校验（schema 子集不支持 minimum/maximum，只能在这里挡） */
 export function validateToolArgs(args) {
   const problems = [];
@@ -392,6 +487,18 @@ export function validateToolArgs(args) {
     problems.push('sheets must be an integer 1..16');
   }
   if (args.from !== undefined && args.from < 0) problems.push('from must be >= 0');
+  if (args.maxStrips !== undefined && (!Number.isInteger(args.maxStrips) || args.maxStrips < 1 || args.maxStrips > 40)) {
+    problems.push('maxStrips must be an integer 1..40');
+  }
+  if (args.times !== undefined
+    && (!Array.isArray(args.times) || !args.times.every((v) => Number.isFinite(v) && v >= 0))) {
+    problems.push('times must be an array of non-negative seconds');
+  }
+  if (args.band !== undefined
+    && (!Array.isArray(args.band) || args.band.length !== 2
+      || !args.band.every((v) => Number.isFinite(v) && v >= 0 && v <= 1))) {
+    problems.push('band must be [y0, y1] as fractions 0..1');
+  }
   if (args.to !== undefined && args.from !== undefined && args.to <= args.from) {
     problems.push('to must be greater than from');
   }
