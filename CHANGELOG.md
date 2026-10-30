@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.1] - 2026-10-30
+
+### Fixed
+
+- **Windows 上 pip 装的 yt-dlp 一律找不到。** `findPipScript()` 里用了 `readdir()`，但文件顶部
+  只 import 了 `readFile` —— `readdir` 是 `undefined`，抛 ReferenceError 后被
+  `catch { continue }` 吞掉，函数**静默返回 null**。于是 `discoverYtdlp()` 的三个候选
+  （`DSH_YTDLP_PATH` / PATH / pip Scripts）里第三条永远失效，报 `yt-dlp not found`。
+  PATH 和 `DSH_YTDLP_PATH` 两条路都能用，所以这个 bug 一直没被认成"代码问题"，
+  而被当成"用户没配环境变量"。修好之后实测能扫到
+  `%APPDATA%\Python\Python313\Scripts\yt-dlp.exe`。
+- 补 `test/ytdlp-discovery.test.mjs`：目录不存在时返回 null、能扫到 `Python3xx/Scripts`、
+  有目录无程序时返回 null —— 锁住"找不到"必须是返回值而不是静默崩掉。
+
 ## [0.5.0] - 2026-10-30
 
 ### License

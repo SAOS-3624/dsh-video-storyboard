@@ -9,7 +9,11 @@
  */
 
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+// `readdir` 必须在这里导入：findPipScript() 用它扫 `%APPDATA%\Python\Python3xx\Scripts`，
+// 少了它 `readdir` 是 undefined → 抛 ReferenceError → 被 `catch { continue }` 吞掉 →
+// 整个函数**静默返回 null**。症状是 Windows 上 pip 装的 yt-dlp 一律"找不到"，
+// 而 PATH 和 DSH_YTDLP_PATH 两条路都能用，所以很难往"代码少了 import"上想（2026-10-30 踩到）。
+import { readFile, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { fileExists } from './media-store.js';
 import { delimiter, join } from 'node:path';
@@ -46,7 +50,7 @@ async function findOnPath(name, env = process.env) {
 }
 
 /** pip 在 Windows 上把脚本放在 %APPDATA%\Python\Python3xx\Scripts，通常不在 PATH 上 */
-async function findPipScript(env = process.env) {
+export async function findPipScript(env = process.env) {
   const roots = [];
   if (process.platform === 'win32' && env.APPDATA) {
     roots.push(join(env.APPDATA, 'Python'));
