@@ -67,13 +67,19 @@ export async function mapPool(items, limit, fn) {
  *    用的是"能分辨不同镜头"的标准，在文字密集的素材上等于把 16 格里 12 格换成噪点。
  */
 
+/** "够热闹"：≥ 它才升到 3×3（9 个小图）。段内逐帧分数均值，快剪 8~15、摇镜 2~4、静止 <1。 */
+export const BUSY_MOTION = 8;
+
+/** "看得出来在动"：≥ 它就允许二重细分（子帧可以压到 110×56）。低于它的格子只给整帧。 */
+export const TILE_MOTION = 3;
+
 export function chooseSubGrid({
   shots, cellW, cellH, dur, cutScore = Infinity, meanMotion = 0,
   // minShots 从 4 降到 3：这个门槛以前会把"1 秒 3 镜（3 刀/秒）"挡掉，
   // 而它比"10 秒 4 镜（0.4 刀/秒）"密 7 倍 —— 真正该摊的是前者。
   // 密度判据（minRate）已经能拦住"镜头少但时长长的正常叙事"，minShots 只防"1 镜没东西可摊"。
   minShots = 3, minRate = 0.4, minSubScore = 30, minSubW = 200, minSubH = 112,
-  minMotion = 1.5, maxK = 4, busyMotion = 8,
+  minMotion = 1.5, maxK = 4, busyMotion = BUSY_MOTION,
 }) {
   // **一个镜头、但画面一直在动**（摇镜、推拉、转场）：整段只取 1 帧会把运动过程全丢掉。
   // meanMotion 是段内逐帧分数的均值 —— 静止画面约 0.2，匀速摇镜约 1.5~3。

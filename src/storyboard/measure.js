@@ -20,7 +20,7 @@
 
 import { bestLayout } from './plan.js';
 import { layoutCanvas } from './sheet.js';
-import { chooseSubGrid } from './frames.js';
+import { BUSY_MOTION, TILE_MOTION, chooseSubGrid } from './frames.js';
 
 /**
  * 一格里"有几个分段"和"刀够不够狠"—— 决定 k 的内容侧输入。
@@ -109,13 +109,13 @@ export function measureGroup(ranges, {
       shots, cellW, cellH, dur: range.to - range.from, cutScore, meanMotion,
       // 音乐驱动：单镜头但有动静就摊（门槛 1.5 → 0.7）
       minMotion: musicDriven ? 0.7 : 1.5,
-      // **子帧下限按内容分流**。200×112 是为"看重字"定的（口播、字幕、讲义），
-      // 但它一刀切也把快剪素材的二重细分全关了：PV 9 格从 41 个画面塌到 9 个，
-      // 盲评"覆盖"直接掉分 —— 快剪片的信息量恰恰在画面上，不是字上。
-      // 所以音乐驱动（响度高 + 几乎不说话）单独放到 160×90：3×3 的 331×184 摊 2×2
-      // 得 165×92，刚好过线，而 4×4 的 247×137 仍然摊不动（123×68 太小）。
-      // 不全局降回 100×56：那会让沧野/木头那种字幕素材重新变糊。
-      ...subFloorFor(musicDriven),
+      // **子帧下限逐格判，不看整片类型**。
+      // 200×112 是为"看重字"定的（口播、字幕、讲义）；110×56 是"能分辨不同镜头"。
+      // 该用哪条，取决于**这一格的画面动得多不多**，而不是整部片子被判成什么：
+      // 记管 MAD02 被节奏判据判成"说话型"（包络主导 2 Hz），于是整片走 200×112，
+      // 4×4 的 247×137 摊 2×2 得 123×68 一格都摊不动 —— 可它单格运动值最高 22.79，
+      // 165 个镜头只看到 32 个。整片一个标签定死全部格子，这种错一定会再犯。
+      ...(meanMotion >= TILE_MOTION ? { minSubW: 110, minSubH: 56 } : subFloorFor(musicDriven)),
     });
     return {
       ...range,
