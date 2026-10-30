@@ -386,3 +386,35 @@ test('清单：格数一致时不加括号噪音', () => {
   assert.match(text, /16 cells/);
   assert.doesNotMatch(text, /minGap-limited/);
 });
+
+/** 带类型标签的切点：帮 makeResult 补一个可用的 cuts 数组 */
+function withTypedCuts(result, types) {
+  return {
+    ...result,
+    cuts: types.map((type, i) => ({
+      t: 10 + i * 5,
+      score: 40,
+      type,
+      evidence: { pulse: 30, nv: type === 'flash' ? 1 : 60, corr: type === 'flash' ? 0.99 : 0.1 },
+    })),
+  };
+}
+
+test('清单：闪光点标成 fl，并说明"不是新镜头"', () => {
+  const text = formatManifest(withTypedCuts(makeResult(), ['hardcut', 'flash', 'hardcut']), { maxChars: 200_000 });
+  assert.match(text, /non-hard cuts \(1 of 3\)/, '要有一行汇总，说明几刀不是硬切');
+  assert.match(text, /brightness pulse, the shot continues/, '要说清楚闪光是画面继续，不是换镜头');
+  assert.match(text, /\(fl\)/, '逐点列表里要就地标 fl');
+});
+
+test('清单：全是硬切时不写这行（省 token）', () => {
+  const text = formatManifest(withTypedCuts(makeResult(), ['hardcut', 'hardcut']), { maxChars: 200_000 });
+  assert.doesNotMatch(text, /non-hard cuts/, '没有非硬切就不该有这行');
+  assert.doesNotMatch(text, /\(fl\)/, '也不该有缩写标记');
+});
+
+test('清单：没有类型标签的老数据（复用缓存）不崩，也不乱写', () => {
+  const result = { ...makeResult(), cuts: [{ t: 10, score: 40 }, { t: 20, score: 30 }] };
+  const text = formatManifest(result, { maxChars: 200_000 });
+  assert.doesNotMatch(text, /non-hard cuts/, '没有标签时整段跳过');
+});

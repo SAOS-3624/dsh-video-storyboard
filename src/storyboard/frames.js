@@ -62,7 +62,10 @@ export async function mapPool(items, limit, fn) {
  */
 export function chooseSubGrid({
   shots, cellW, cellH, dur, cutScore = Infinity,
-  minShots = 4, minRate = 0.7, minSubScore = 30, minSubW = 100, minSubH = 56,
+  // minShots 从 4 降到 3：这个门槛以前会把"1 秒 3 镜（3 刀/秒）"挡掉，
+  // 而它比"10 秒 4 镜（0.4 刀/秒）"密 7 倍 —— 真正该摊的是前者。
+  // 密度判据（minRate）已经能拦住"镜头少但时长长的正常叙事"，minShots 只防"1 镜没东西可摊"。
+  minShots = 3, minRate = 0.7, minSubScore = 30, minSubW = 100, minSubH = 56,
 }) {
   // 那些"刀"本身要有分量。2D 线稿动画、游戏 UI 这类内容每帧都在变一点，
   // 刀数能到 0.7/s，但摊出来的 9 张几乎一模一样（实测 RETAS 演示片就是这样）——
@@ -79,17 +82,59 @@ export function chooseSubGrid({
 }
 
 /**
- * 把一格摊成 k×k：取 k² 个等距子帧，拼回一张 cellW×cellH 的图。
+ * 把一格摊成 k×k：取 k² 个子帧，拼回一张 cellW×cellH 的图。
  * 子帧用 `mode:'mid'`（不做 3 候选锐度挑选）—— 一格里要取 9~16 张，再挑三倍会让这一步变成瓶颈。
+ *
+ * **采样点优先按镜头取，不再等距**。等距的老问题是"同一镜头被采两次、另一个镜头一次没采到"：
+ * 一格 7 个镜头摊成 3×3 时，9 个等距点经常正好跨过某一刀的两侧，于是相邻两格是同一个画面，
+ * 而真正的那个镜头一帧都没有。按镜头分段取中点之后，每个子帧至少代表一个不同的镜头。
+ *
+ * @param {{shots?:number[]}} opts
+ *   shots: 本格内的切点时刻（升序，都在 a..b 之间）。不传就退回等距采样。
  */
-export async function extractSubTile({ input, remote, a, b, k, cellW, cellH, ffmpegPath }) {
+/**
+ * 一格里 k² 个子帧各取哪个时刻。
+ *
+ * 有切点信息时**按镜头分段取中点**：段数可能少于子帧数（重复采样同一个镜头，等于强调它），
+ * 也可能多于子帧数（只能跳过一些镜头）—— 用 round 保证首尾都覆盖到：
+ * i=0 一定落第一段，i=n-1 一定落最后一段。
+ *
+ * 没有切点信息（比如一镜到底、或者整格只有一个镜头）时退回等距采样。
+ *
+ * 抽成纯函数是为了能直接单测 —— 这段逻辑原来只能靠跑 ffmpeg 才验得到。
+ *
+ * @param {number} a 格起点（秒）
+ * @param {number} b 格终点（秒）
+ * @param {number} n 子帧数（= k×k）
+ * @param {number[]} [shots] 本格内的切点时刻
+ * @returns {number[]} 长度 n 的时刻数组
+ */
+export function subTileTimes(a, b, n, shots = []) {
+  const marks = Array.isArray(shots) && shots.length > 0
+    ? [a, ...shots.filter((t) => t > a && t < b).sort((x, y) => x - y), b]
+    : null;
+  const segs = marks ? marks.length - 1 : 0;
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    if (!marks || segs < 1) {
+      out[i] = a + (b - a) * ((i + 0.5) / n);
+    } else {
+      const seg = Math.min(segs - 1, Math.round((i * (segs - 1)) / Math.max(1, n - 1)));
+      out[i] = (marks[seg] + marks[seg + 1]) / 2;
+    }
+  }
+  return out;
+}
+
+export async function extractSubTile({ input, remote, a, b, k, cellW, cellH, ffmpegPath, shots = [] }) {
   const tileW = Math.floor(cellW / k);
   const tileH = Math.floor(cellH / k);
   const n = k * k;
+  const times = subTileTimes(a, b, n, shots);
   const tiles = [];
   let fellBack = 0;
   for (let i = 0; i < n; i++) {
-    const at = a + (b - a) * ((i + 0.5) / n);
+    const at = times[i];
     // `remoteFrame` 的字段是 {uri, http:{userAgent, referer}} —— 之前这里读的是 url/headers，
     // 两个都不存在，于是子帧静默退回本地低清副本、HTTP 头也丢了（issue #9）。
     let tile = null;

@@ -18,7 +18,9 @@ import { join } from 'node:path';
 // 缓存版本：**切点判定逻辑一变就要加 1** —— 版本进了 key，旧条目自动失效，不需要用户手清。
 // 1 → 2：0.4.3 改了极静素材的相对基线判定（spikeCuts）、平铺格与 suppressClose 的用法，
 // 旧缓存里的 cuts 与现在的算法不是一回事，留着会让"改了却看不出变化"。
-export const CACHE_VERSION = 2;
+// 2 → 3：扫描结果里新增了逐帧指纹（Uint8Array），而这里是 JSON.stringify —— 一旦被写进
+// 条目就是几十 MB 的 {"0":12,…} 且类型全丢。现在指纹已改为不进缓存，升版本把可能写坏的条目作废。
+export const CACHE_VERSION = 3;
 /** 单独用（没有统一预算时）的默认上限；正常路径走 storage.js 的 300MB 总预算。 */
 export const MAX_CACHE_BYTES = 50 * 1024 * 1024;
 

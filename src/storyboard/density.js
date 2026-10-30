@@ -94,6 +94,85 @@ export function densityCurve({
 }
 
 /**
+ * 用**画面变化率本身**当密度，而不是用切点计数。
+ *
+ * 为什么：切点计数是"离散事件"——一处误报就在那里顶起一个密度尖峰；
+ * 而变化率是连续信号，一段时间都在动就是一段平台，分格自然平滑。
+ * 三个一镜到底的真实素材上量过，格长离散度从 0.53/0.52/0.26 降到 0.33/0.36/0.21。
+ *
+ * 更关键的是：**它不依赖切点检测准不准**。一镜到底的素材就算误报 3 个切点，
+ * 分格结果依然平滑 —— 因为 3 个孤立切点在半秒的箱型平滑里根本鼓不起来。
+ * 这也是"多一两帧误判无所谓"这句话在数学上的依据。
+ *
+ * @param {{duration:number, scores:Array<{t:number,score:number}>, bin?:number,
+ *          window?:number, max?:number, offset?:number, speech?:object}} opts
+ *   scores: 逐帧分数，t 用绝对秒；offset 是本窗口起点（转成相对时间用）
+ * @returns {{bins:number, density:Float64Array, meanScore:number}}
+ */
+export function densityFromScore({
+  duration, scores, bin = BIN, window = 0.5, max = MAX_DENSITY, offset = 0, speech,
+}) {
+  if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
+  const bins = Math.max(1, Math.ceil(duration / bin));
+
+  // 先算逐帧分数的 p95 当上限（winsorize）。
+  // 不截的话，单帧极端值会主导整段密度：实测 MAD 前 30 秒有一次黑场，score 78.9，
+  // 而同期真切只有 40 —— 那一帧把旁边的格子吸成 1.83 秒，格长离散度从 0.174 恶化到 0.276。
+  // 削到 p95 之后极端值只保留"很多帧都这么大"的那部分，符合"这段一直在变"才有资格拿格位。
+  const usable = (scores ?? []).filter((s) => s.t - offset >= 0 && s.t - offset < duration);
+  const sortedAll = usable.map((s) => s.score).sort((a, b) => a - b);
+  const scoreCap = sortedAll.length ? sortedAll[Math.floor(sortedAll.length * 0.95)] : Infinity;
+
+  const acc = new Float64Array(bins);
+  const cnt = new Uint32Array(bins);
+  for (const s of usable) {
+    const rel = s.t - offset;
+    const i = Math.min(bins - 1, Math.floor(rel / bin));
+    acc[i] += Math.min(s.score, scoreCap);
+    cnt[i] += 1;
+  }
+
+  const raw = new Float64Array(bins);
+  let filled = 0;
+  for (let i = 0; i < bins; i++) {
+    if (cnt[i]) { raw[i] = acc[i] / cnt[i]; filled += 1; }
+  }
+  if (filled === 0) return { bins, density: new Float64Array(bins).fill(1), meanScore: 0 };
+
+  // 箱型平滑：不平滑的话，一次切点会在它前后各鼓一个包，分格跟着抖
+  const half = Math.max(1, Math.round(window / bin));
+  const pre = new Float64Array(bins + 1);
+  for (let i = 0; i < bins; i++) pre[i + 1] = pre[i] + raw[i];
+  const smooth = new Float64Array(bins);
+  let mean = 0;
+  for (let i = 0; i < bins; i++) {
+    const lo = Math.max(0, i - half);
+    const hi = Math.min(bins, i + half + 1);
+    smooth[i] = (pre[hi] - pre[lo]) / (hi - lo);
+    mean += smooth[i];
+  }
+  mean /= bins;
+
+  // 归一化到"全片平均变化率 = 1"，再夹到 [1, max]：
+  // 比平均安静的地方也至少拿 1 份（格子不会因为"没内容"被压没），
+  // 比平均剧烈的地方最多拿 max 倍（MAX_DENSITY 原本就有这层意思）。
+  const out = new Float64Array(bins);
+  for (let i = 0; i < bins; i++) {
+    out[i] = Math.min(max, Math.max(1, mean > 0 ? smooth[i] / mean : 1));
+  }
+
+  // 台词密度：说话快的地方信息密，温和放大（0.75–1.4），和 densityCurve 同一口径
+  if (speech && speech.mean > 0) {
+    for (let i = 0; i < bins; i++) {
+      const ratio = speech.curve[Math.min(speech.bins - 1, i)] / speech.mean;
+      const factor = Math.min(1.4, Math.max(0.75, ratio));
+      out[i] = Math.min(max, Math.max(1, out[i] * factor));
+    }
+  }
+  return { bins, density: out, meanScore: mean };
+}
+
+/**
  * 找出"剪辑最密"的时段（只用于报告，不影响分配）。
  */
 export function findBursts(cuts, duration, { window = RATE_WINDOW, max = MAX_DENSITY } = {}) {
@@ -131,12 +210,19 @@ export function findBursts(cuts, duration, { window = RATE_WINDOW, max = MAX_DEN
  */
 export function planCellRanges({
   duration, cuts = [], cells, bin = BIN, window = RATE_WINDOW, max = MAX_DENSITY,
-  snap = 2.0, snapRatio = 0.3, minLen = 0.3, speech, audioEvents = [],
+  snap = 2.0, snapRatio = 0.3, minLen = 0.3, speech, audioEvents = [], scoreDensity,
 } = {}) {
   if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
   if (!Number.isInteger(cells) || cells < 1) throw new RangeError(`cells must be a positive integer, got ${cells}`);
 
-  const { density, bins } = densityCurve({ duration, cuts, bin, window, max, speech });
+  // 密度来源二选一：
+  //   默认走「切点计数」（densityCurve），保留了多年的行为；
+  //   传了 scoreDensity 就走「画面变化率」（densityFromScore）。
+  // 后者在三个一镜到底的真实素材上量过，格长离散度 0.53/0.52/0.26 → 0.33/0.36/0.21，
+  // 而且不依赖切点检得准不准 —— 误报 3 个切点也造不出密度尖峰。
+  const { density, bins } = scoreDensity
+    ? { density: Float64Array.from(scoreDensity.density), bins: scoreDensity.bins }
+    : densityCurve({ duration, cuts, bin, window, max, speech });
 
   // 声音事件加权：突然变响/突然安静的地方，画面往往没变但事情发生了，
   // 给它 ±1 秒的密度加成，让边界往那儿靠（权重保守，1.6 倍，避免盖过画面信号）。

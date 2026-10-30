@@ -15,6 +15,9 @@ import { describeMediaSearch } from './binaries.js';
 
 export const SCAN_W = 64;
 export const SCAN_H = 36;
+/** 指纹尺寸（供 flash.js 判闪光）：16×9 = 144 字节/帧，60 分钟片子约 13 MB */
+export const FP_W = 16;
+export const FP_H = 9;
 export const DEFAULT_THRESHOLD = 15;
 export const HUE_WEIGHT = 1;
 export const SAT_WEIGHT = 1;
@@ -298,6 +301,12 @@ export function scanShots(opts) {
     let hasPrev = false;
     let frame = 0;
     const stats = [];
+    // 顺便采集两个几乎免费的量，供 flash.js 判断「亮度闪一下又回来」：
+    //   means[i]  整帧 V 均值（平移/摇镜不改变它）
+    //   prints[i] 16×9 的 V 指纹（比 means 多一点点空间信息，用来确认"结构没变"）
+    // 实测代价：解码占 95–98%，这两样只占 1–2%。
+    const means = [];
+    const prints = [];
     let stderr = '';
 
     child.stdout.on('data', (chunk) => {
@@ -308,6 +317,26 @@ export function scanShots(opts) {
         frameToHsv(slice, cur);
         if (hasPrev) {
           stats.push({ t: start + frame / fps, score: scorePair(prev, cur) });
+        }
+        {
+          let sum = 0;
+          const acc = new Float64Array(FP_W * FP_H);
+          const cnt = new Uint16Array(FP_W * FP_H);
+          for (let y = 0; y < height; y++) {
+            const by = Math.min(FP_H - 1, Math.floor((y * FP_H) / height));
+            for (let x = 0; x < width; x++) {
+              const i = (y * width + x) * 3;
+              const v = Math.max(slice[i], slice[i + 1], slice[i + 2]);
+              sum += v;
+              const bi = by * FP_W + Math.min(FP_W - 1, Math.floor((x * FP_W) / width));
+              acc[bi] += v;
+              cnt[bi] += 1;
+            }
+          }
+          const fp = new Uint8Array(FP_W * FP_H);
+          for (let i = 0; i < FP_W * FP_H; i++) fp[i] = Math.round(acc[i] / (cnt[i] || 1));
+          means.push(sum / n);
+          prints.push(fp);
         }
         // 交换缓冲，避免每帧分配
         const tmp = prev;
@@ -335,6 +364,9 @@ export function scanShots(opts) {
       resolve({
         cuts, stats, frames: frame, threshold: decided.threshold, degraded: decided.degraded,
         summary: scanSummary(stats.map((s) => s.score)),
+        // 逐帧的亮度均值与 16×9 指纹（供 flash.js / 转场分类用）。
+        // 老调用方不读它们也不会受影响。
+        means, prints,
       });
     });
   });

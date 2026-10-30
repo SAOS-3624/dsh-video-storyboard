@@ -414,6 +414,27 @@ export function formatManifest(result, {
       'this is likely continuous camera motion being cut into pieces. Read the pictures; do not quote cuts=N as pacing.');
   }
 
+  // 切点类型：告诉模型"这一刀是不是新镜头"。
+  // 一个切点都没删，但 flash / dissolve / black / white 这些不是"换了镜头"，
+  // 模型要是把它们当成剪辑点，就会把一段连续画面读成好几个镜头。
+  // 没有标签时（复用缓存的老数据）整段跳过，不写空话。
+  {
+    const CUT_TYPE_DESC = {
+      flash: 'brightness pulse, the shot continues',
+      white: 'flash transition, the picture DOES change',
+      black: 'fade through black',
+      dissolve: 'gradual blend, not a hard cut',
+      motion: 'possibly camera motion rather than a cut',
+    };
+    const typed = (result.cuts ?? []).filter((c) => c.type && c.type !== 'hardcut');
+    if (typed.length > 0) {
+      const byType = {};
+      for (const c of typed) byType[c.type] = (byType[c.type] ?? 0) + 1;
+      const parts = Object.entries(byType).map(([k, v]) => `${v}× ${CUT_TYPE_DESC[k] ?? k}`);
+      lines.push(`non-hard cuts (${typed.length} of ${(result.cuts ?? []).length}): ${parts.join('; ')}.`);
+    }
+  }
+
   // 细扫过的窗口：镜头数才是可信的，必须说出来（粗扫看不见 0.35s 以下的刀）
   if (result.refinedBursts?.length) {
     const r = result.refinedBursts
@@ -434,7 +455,10 @@ export function formatManifest(result, {
   // 多于 24 个就不列（总览只需要知道"多密"，精确值留给 zoom）。
   const inWin = (result.cuts ?? []).filter((c) => c.t >= win.from && c.t <= win.to);
   if (inWin.length > 0 && inWin.length <= 24) {
-    lines.push(`cut points (${inWin.length}): ${inWin.map((c) => tc(c.t)).join(', ')}`);
+    // 非硬切的点就地打标：fl(flash) / wh(white) / bl(black) / ds(dissolve) / mo(motion)
+    const ABBR = { flash: 'fl', white: 'wh', black: 'bl', dissolve: 'ds', motion: 'mo' };
+    const fmtCut = (c) => (c.type && ABBR[c.type] ? `${tc(c.t)}(${ABBR[c.type]})` : tc(c.t));
+    lines.push(`cut points (${inWin.length}): ${inWin.map(fmtCut).join(', ')}`);
   }
   // 声音事件只写"稀疏"的片子：口播片几十次起伏会把真正重要的信息淹掉
   if (result.audio?.events?.length && result.audio.events.length <= 20) {

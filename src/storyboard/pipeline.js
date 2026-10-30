@@ -17,11 +17,12 @@ import { probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
 import { resolveInput } from './fetch.js';
 import { loadTranscriptFile } from './transcript-file.js';
 import { refineCutsByWindow, scanShots, spikeCuts, suppressClose } from './scan.js';
+import { tagCuts } from './flash.js';
 import { rememberSegments } from './locate.js';
 import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import { fitSegments, segmentsFromCuts } from './segments.js';
 import { bestLayout, fillLayout, suggest, PLAN_THRESHOLDS } from './plan.js';
-import { findBursts, planCellRanges } from './density.js';
+import { densityFromScore, findBursts, planCellRanges } from './density.js';
 import { remember } from './memory.js';
 import { analyzeAudio, describeAudio, detectOnsets } from './audio.js';
 import {
@@ -284,6 +285,10 @@ export async function runStoryboard(opts) {
   const key = cache ? await cacheKey({ input, start: winStart, end: winStart + winDur, threshold }) : null;
   // precomputed：批量模式下全片已经扫过一次，窗口直接复用那份切点与摘要，
   // 不再为每个窗口重新解码一遍（2 小时的片子能省掉 24 次重复扫描）。
+  // 逐帧指纹只在"真的扫了"的那一次里拿得到（缓存存不下 Uint8Array），
+  // 所以缓存命中 / precomputed 时它们是 null，tagCuts 会退化成不打标签。
+  let scanMeans = null;
+  let scanPrints = null;
   const scan = precomputed
     ? {
       cuts: (precomputed.cuts ?? []).filter((c) => c.t >= winStart && c.t < winStart + winDur),
@@ -292,12 +297,24 @@ export async function runStoryboard(opts) {
       cached: false,
       reused: true,
     }
-    : await withCache(key, () => scanShots({
-      input, fps: info.fps, threshold, start: winStart, end: winStart + winDur,
-      // 默认 0.35s：两刀之间短于它的合并成一刀。快闪素材（<0.35s 一个镜头）要显式调小，
-      // 否则 3 秒 18 个镜头会被压成 4 刀 —— 实测过，这是"数不出快闪"的主因。
-      minGap: scanGap, ffmpegPath, onProgress,
-    }), { enabled: cache });
+    : await withCache(key, async () => {
+      const s = await scanShots({
+        input, fps: info.fps, threshold, start: winStart, end: winStart + winDur,
+        // 默认 0.35s：两刀之间短于它的合并成一刀。快闪素材（<0.35s 一个镜头）要显式调小，
+        // 否则 3 秒 18 个镜头会被压成 4 刀 —— 实测过，这是"数不出快闪"的主因。
+        minGap: scanGap, ffmpegPath, onProgress,
+      });
+      // **逐帧的 means / prints 不进缓存**：级联缓存走的是 JSON.stringify，
+      // 而 prints 是 7500 个 Uint8Array —— 序列化后会变成 {"0":12,"1":34,…}，
+      // 60 分钟片子直接几十 MB，而且读回来类型也丢了（判据会拿到坏数据）。
+      // 它们只在本次调用里给 tagCuts 用，缓存命中时没有就算了（退化成不打标签）。
+      scanMeans = s.means;
+      scanPrints = s.prints;
+      return {
+        cuts: s.cuts, stats: s.stats, frames: s.frames,
+        threshold: s.threshold, degraded: s.degraded, summary: s.summary,
+      };
+    }, { enabled: cache });
   if (cache && !scan.cached && !precomputed) await pruneStorage();
   mark('scan');
 
@@ -329,6 +346,18 @@ export async function runStoryboard(opts) {
     const r = refineCutsByWindow({ stats: scan.stats, coarseCuts: cuts, fps: info.fps, winStart, winDur });
     cuts = r.cuts;
     refinedBursts = r.refined;
+  }
+
+  // ---- 给每个切点打类型标签（flash / white / black / hardcut / dissolve / motion）。
+  // **一个都不删**：删掉误检会让这段在插件眼里变成"完全静止"，反而丢了"这里一直在动"。
+  // 标签只用于清单表述和下游降权，格位分配靠的是变化率积分（见 densityFromScore）。
+  if (!precomputed && !textOnly && Array.isArray(scanPrints) && scanPrints.length) {
+    cuts = tagCuts(cuts, {
+      prints: scanPrints,
+      means: scanMeans,
+      fps: info.fps,
+      scores: scan.stats?.map((s) => s.score),
+    });
   }
 
 
@@ -439,8 +468,13 @@ export async function runStoryboard(opts) {
   if (transcriptInfo?.segments?.length) rememberSegments(input, transcriptInfo.segments);
   let cellRanges;
   if (adaptive && relCuts.length > 0) {
+    // 密度来源：用**画面变化率**而不是切点计数（见 densityFromScore 的注释）。
+    // 复用缓存时没有逐帧 stats，退回切点计数，行为和以前一致。
+    const scoreDensity = scan.stats?.length
+      ? densityFromScore({ duration: winDur, scores: scan.stats, offset: winStart, speech })
+      : null;
     cellRanges = planCellRanges({
-      duration: winDur, cuts: relCuts, cells: cells * sheets, speech, audioEvents,
+      duration: winDur, cuts: relCuts, cells: cells * sheets, speech, audioEvents, scoreDensity,
     })
       .map((r) => ({ from: r.from + winStart, to: r.to + winStart, density: r.density }));
   } else {
@@ -511,7 +545,7 @@ export async function runStoryboard(opts) {
     const cellMeta = [];
     // 摊格子要额外取 k²−1 帧（4×4 就是 15 次 ffmpeg）。整张图最多多取 32 帧，
     // 否则一支全是快闪的片子会变成"每格取 16 张"，渲染时间翻十几倍。
-    let subBudget = 32;
+    const subBudget = 32;
     // ---- 取帧：先算完所有格子的参数，再并发取帧，最后按顺序组装。
     // 原来是一格一格 await（9 格串行，短视频里占 60% 的时间）。ffmpeg 每次只解一帧，
     // 彼此没有依赖，并发 3 路就能把这部分压掉一半以上。
@@ -522,18 +556,32 @@ export async function runStoryboard(opts) {
       const cutScore = cellCuts > 0
         ? cellCutList.reduce((n, c) => n + (c.score ?? 0), 0) / cellCuts
         : Infinity;
-      let sub = chooseSubGrid({ shots: cellCuts + 1, cellW, cellH, dur: b - a, cutScore });
-      while (sub > 1 && sub * sub - 1 > subBudget) sub -= 1;   // 预算不够就降档，降不下去就整格
-      if (sub > 1) subBudget -= sub * sub - 1;
-      plan.push({ gi, a, b, cellCuts, sub });
+      const want = chooseSubGrid({ shots: cellCuts + 1, cellW, cellH, dur: b - a, cutScore });
+      plan.push({
+        gi, a, b, cellCuts,
+        // 本格的切点时刻，摊开时用它决定每个子帧落在哪个镜头里（而不是等距采样）
+        cutTimes: cellCutList.map((c) => c.t),
+        sub: want, want, rate: (cellCuts + 1) / Math.max(0.1, b - a),
+      });
+    }
+    // 预算按「刀/秒」从高到低分配，**不按格序**。
+    // 原来按序发，密集的那格要是排在后面就拿不到预算 —— 实测 MAD 9 格里最密的第 8 格
+    // （1.51 刀/秒）正好排最后，能摊开纯属前面几格没抢。
+    let budgetLeft = subBudget;
+    for (const p of [...plan].sort((x, y) => y.rate - x.rate)) {
+      let s = p.want;
+      while (s > 1 && s * s - 1 > budgetLeft) s -= 1;   // 预算不够就降档，降不下去就整格
+      if (s > 1) budgetLeft -= s * s - 1;
+      p.sub = s;
     }
 
     const _ex0 = Date.now();
-    const shots = await mapPool(plan, frameConcurrency, async ({ a, b, sub }) => {
+    const shots = await mapPool(plan, frameConcurrency, async ({ a, b, sub, cutTimes }) => {
       if (sub > 1) {
         // 快闪格：摊成 k×k，一张图交代 k² 个瞬间（token 不变）
         return extractSubTile({
           input, remote: remoteFrame, a, b, k: sub, cellW, cellH, ffmpegPath,
+          shots: cutTimes,
         });
       }
       return extractFrameWithFallback({

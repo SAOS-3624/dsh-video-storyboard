@@ -35,7 +35,8 @@
     "./frames": "./src/storyboard/frames.js",
     "./format": "./src/storyboard/format.js",
     "./pipeline": "./src/storyboard/pipeline.js",
-    "./tool-spec": "./src/tool-spec.js"
+    "./tool-spec": "./src/tool-spec.js",
+    "./storyboard": "./src/storyboard/index.js"
   },
   "bin": {
     "dsh-video-scan": "./bin/scan-video.mjs",
