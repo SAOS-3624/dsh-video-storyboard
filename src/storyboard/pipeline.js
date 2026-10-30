@@ -21,14 +21,14 @@ import { tagCuts } from './flash.js';
 import { rememberSegments } from './locate.js';
 import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import { fitSegments, segmentsFromCuts } from './segments.js';
-import { allocateIntegerBudget, fillLayout, isMusicDriven, suggest, PLAN_THRESHOLDS } from './plan.js';
+import { allocateIntegerBudget, fillLayout, musicDrivenVerdict, suggest, PLAN_THRESHOLDS } from './plan.js';
 import {
   densityFromScore, findBursts, integralMarks, planByRodt, planByShotCount, planCellRanges, planSheetsByFrames,
 } from './density.js';
 // 一张图会产生多少帧，切张与渲染共用同一个答案（见 measure.js 顶部说明）
 import { measureGroup } from './measure.js';
 import { remember } from './memory.js';
-import { analyzeAudio, describeAudio, detectOnsets } from './audio.js';
+import { analyzeAudio, analyzeRhythm, describeAudio, detectOnsets } from './audio.js';
 import {
   ASR_DEFAULTS, alignCells, applyTermMap, canTranscribe, describeAsrTarget, explainFetchError,
   extractSubtitleTrack, filterSuspectSegments, resolveAsrConfig, speechCurve, transcribeLong,
@@ -438,6 +438,18 @@ export async function runStoryboard(opts) {
   const autoPlan = cells === 0;
   // 和 suggest() 用同一个口径；下面写进 plan.inputs，方便复现判定。
   const speechRate = winDur > 0 ? transcriptChars / winDur : 0;
+  // 「有没有台词」是**有没有拿到转写结果**，不是"转出来几个字"：
+  // 跑了 ASR 但一个字没转出来，那是"这片子确实没台词"，结论有效；
+  // 没跑 ASR（--transcript off）才是"不知道"，才需要去听音频。
+  const hasSpeech = transcriptInfo != null;
+  // 没有台词数据时才去听节奏（多一次音频解码，只在需要时付这个成本）。
+  const rhythm = !hasSpeech && info.hasAudio && !textOnly
+    ? await analyzeRhythm({ input, ffmpegPath, start: winStart, end: winStart + winDur })
+    : null;
+  // 判定结果连**依据**一起带出来：清单要写清"因为什么这么判"，模型才可能推翻它。
+  const verdict = musicDrivenVerdict({
+    meanLufs: audio?.mean, speechRate, hasSpeech, rhythm, thresholds: planThresholds ?? {},
+  });
   let suggestion;
   if (cells === 0) {
     suggestion = suggest({
@@ -447,6 +459,8 @@ export async function runStoryboard(opts) {
       aspect: info.aspect,
       speechRate,
       hasSubtitle: info.hasSubtitle,
+      hasSpeech,
+      rhythm,
       meanLufs: audio?.mean,
       ...(planThresholds ? { thresholds: planThresholds } : {}),
     });
@@ -455,10 +469,9 @@ export async function runStoryboard(opts) {
   }
   // 音乐驱动**只影响取帧**，不影响格数（格数走 rodt）。音乐片的信息全在画面上，
   // 所以把"摊开"的触发门槛压低：同样的段更容易摊、摊得更细。
-  // 用 isMusicDriven 单独判一次，而不是只读 suggestion —— 显式指定 cells 时 suggestion 是空的，
+  // 用 verdict 而不是只读 suggestion —— 显式指定 cells 时 suggestion 是空的，
   // 但"音乐片取帧更密"跟格数从哪来无关。
-  const musicDriven = suggestion?.musicDriven === true
-    || isMusicDriven({ meanLufs: audio?.mean, speechRate, thresholds: planThresholds ?? {} });
+  const musicDriven = suggestion?.musicDriven === true || verdict.musicDriven;
   sheets = sheets || 1;
   // ---- 格数**往上补满**
   // 5 格会排成 2×3（容量 6），右下留一个空格。空格和画面占的是同一张画布、同样的 token，
@@ -479,11 +492,20 @@ export async function runStoryboard(opts) {
     ...(filledFrom ? { filledFrom } : {}),
     reason: suggestion?.reason ?? 'explicit',
     auto: autoPlan,
+    // **判定的依据也交出去**。只给一个 musicDriven:true/false，模型没法判断该不该信；
+    // 给到"因为包络主导 4 Hz"或"因为 0.12 字/秒"，它就能自己复核。
+    musicDriven,
+    musicBasis: verdict.basis,
+    musicDetail: verdict.detail,
     inputs: {
       duration: +winDur.toFixed(2),
       scanThreshold: scan.threshold,
       meanLufs: Number.isFinite(audio?.mean) ? +audio.mean.toFixed(1) : null,
       speechRate: +speechRate.toFixed(2),
+      hasSpeech,
+      rhythm: rhythm && Number.isFinite(rhythm.peakHz)
+        ? { peakHz: rhythm.peakHz, rhythmRatio: rhythm.rhythmRatio, windows: rhythm.windows }
+        : null,
       motion: +(Number(scan.summary?.p90) || 0).toFixed(1),
       cuts: cuts.length,
       hasSubtitle: Boolean(info.hasSubtitle),

@@ -16,11 +16,23 @@ export const MIN_CELL_H = 135;
 export const MAX_SHEETS = 99;   // 不封顶：片长决定张数（每 5 分钟一张），token 随片长线性增长
 export const DEFAULT_ASPECT = 16 / 9;
 
-/** Content-classification thresholds. Kept in one place so the manifest can report them. */
+/**
+ * Content-classification thresholds. Kept in one place so the manifest can report them.
+ *
+ * `musicLufs` 只在**既没有台词、也没有音频包络**时兜底（见 isMusicDriven 第 3 条）。
+ * 它单独用不成立：母带电平反映响度，不反映内容 ——《记忆管理局》正式 PV（纯音乐快剪）
+ * −18.4、概念 PV −14.2，同一类东西差 4 LU，拿固定响度去切，切的是母带处理，不是内容。
+ */
 export const PLAN_THRESHOLDS = Object.freeze({
   musicLufs: -18,
   musicSpeechRate: 1,
   speechRateCut: 3,
+  // 能量包络的主导调制频率：≥2.5 Hz 是节拍型（配乐），1–2 Hz 是短语型（说话）。
+  musicPeakHz: 2.5,
+  // 3–6 Hz 能量 ÷ 0.5–2 Hz 能量：音乐有持续节拍，这个比值明显更高。
+  // 1.15 不是 1.1：实测沧野（口播 vlog）全天算出来 1.077，离 1.1 只差 0.02，
+  // 换个母带就可能翻过去；两支 PV 是 1.24 / 1.48，留到 1.15 两边都有余量。
+  musicRhythmRatio: 1.15,
 });
 
 /** 画布比例 = (cols / rows) × 源比例。方形宫格才会还原源比例。 */
@@ -89,9 +101,51 @@ export const COVERAGE = {
  * 它**只表示"这片子的信息全在画面上"**，因此只该影响"取帧密不密"（摊开门槛 / 积分触发值），
  * 不该影响格数 —— 格数走 rodt，由切点密度决定。
  */
-export function isMusicDriven({ meanLufs, speechRate = 0, thresholds } = {}) {
+/**
+ * 「这部片子的信息是不是主要在画面上」—— 分三档取证，**优先级从硬到软**。
+ *
+ * 1. **有台词**（字幕轨 / 转写文件 / ASR 结果）：台词的密度就是直接答案。
+ *    响度和节奏都不参与 —— 说了多少话，数一下就知道，不需要再猜。
+ * 2. **没台词但有音频**：听能量包络的节奏（`audio.rhythmProfile()`）。
+ *    说话的包络主导在 1–2 Hz（短语、重音），配乐在 3–4 Hz（节拍）。
+ *    这一条**跟母带电平无关**：整段响度调大调小，包络形状不变。
+ * 3. **连音频都没有**：退回响度。这是最弱的证据，只保证"总比瞎猜强"。
+ *
+ * 为什么不再用「响度 > -18 且 话少」这个与关系：两者量的是不同的东西，与在一起会让
+ * 母带电平低一点的纯音乐片被当成"有字"（正式 PV 就是这样被挡在门外的，−18.4 差 0.4）。
+ *
+ * @returns {{musicDriven:boolean, basis:'speech'|'rhythm'|'loudness', detail:string}}
+ *   basis 要写进清单：模型看到"因为什么判的"，才有可能推翻它。
+ */
+export function musicDrivenVerdict({
+  meanLufs, speechRate = 0, hasSpeech = false, rhythm = null, thresholds,
+} = {}) {
   const T = { ...PLAN_THRESHOLDS, ...(thresholds ?? {}) };
-  return Number.isFinite(meanLufs) && meanLufs > T.musicLufs && speechRate < T.musicSpeechRate;
+  if (hasSpeech) {
+    return {
+      musicDriven: speechRate < T.musicSpeechRate,
+      basis: 'speech',
+      detail: `${speechRate.toFixed(2)} 字/秒（阈值 <${T.musicSpeechRate}）`,
+    };
+  }
+  if (rhythm && Number.isFinite(rhythm.peakHz) && rhythm.windows >= 2) {
+    return {
+      musicDriven: rhythm.peakHz >= T.musicPeakHz && rhythm.rhythmRatio >= T.musicRhythmRatio,
+      basis: 'rhythm',
+      detail: `包络主导 ${rhythm.peakHz} Hz、3-6Hz/0.5-2Hz=${rhythm.rhythmRatio}` +
+        `（阈值 ≥${T.musicPeakHz} Hz 且 ≥${T.musicRhythmRatio}）`,
+    };
+  }
+  return {
+    musicDriven: Number.isFinite(meanLufs) && meanLufs > T.musicLufs,
+    basis: 'loudness',
+    detail: `${meanLufs} LUFS（无台词数据、无音频包络，只能用响度兜底；阈值 >${T.musicLufs}）`,
+  };
+}
+
+/** 同上的布尔版（老调用方的签名没变）。 */
+export function isMusicDriven(opts = {}) {
+  return musicDrivenVerdict(opts).musicDriven;
 }
 
 /**
@@ -142,8 +196,14 @@ export function suggest(meta) {
   const perCell = typeof motion === 'number'
     ? Math.max(8, Math.min(45, 40 - motion))
     : (avgShot < 4 ? 15 : 40);
-  // 内容类型分流（判据见 isMusicDriven）：只影响取帧密度，不影响下面算出的格数。
-  const musicDriven = isMusicDriven({ meanLufs, speechRate, thresholds: meta.thresholds });
+  // 内容类型分流（判据见 musicDrivenVerdict）：只影响取帧密度，不影响下面算出的格数。
+  const musicDriven = isMusicDriven({
+    meanLufs,
+    speechRate,
+    hasSpeech: meta.hasSpeech === true,
+    rhythm: meta.rhythm ?? null,
+    thresholds: meta.thresholds,
+  });
 
   // **总格数直接由「切点总数」决定 —— 这就是对整片密度做积分。**
   //

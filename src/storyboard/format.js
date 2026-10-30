@@ -262,13 +262,19 @@ function formatPlanLine(plan) {
       // 补满了就说清补过：否则"我要了 5 格，怎么给了 6 格"会像 bug
       ? `${plan.cells} cells (filled from ${plan.filledFrom} — a blank slot costs the same tokens)`
       : `${plan.cells} cells`;
+  // **判定的依据写进清单**：只给结论（摊得密/不密），模型没法判断该不该信；
+  // 给到"因为包络主导 4 Hz"或"因为 0.12 字/秒"，它就能自己复核并推翻。
+  const audioClass = plan.musicDriven === undefined ? '' : ' · ' + (plan.musicDriven
+    ? `audioClass=music-driven (basis=${plan.musicBasis ?? '?'}: ${plan.musicDetail ?? ''}) — ` +
+      'sub-frames packed denser on purpose; if this reading is wrong, pin cells/sheets explicitly'
+    : `audioClass=speech-led (basis=${plan.musicBasis ?? '?'}: ${plan.musicDetail ?? ''})`);
   return `plan: ${mode} ${cellsText} — ${plan.reason ?? 'auto'} · ` +
     `meanLufs=${fmt(plan.inputs.meanLufs)} LUFS · ` +
     `speechRate=${fmt(plan.inputs.speechRate)} chars/s · ` +
     `motion=${fmt(plan.inputs.motion)} · cuts=${fmt(plan.inputs.cuts)} · ` +
     `cutThreshold=${fmt(plan.inputs.scanThreshold)} · ` +
     `thresholds musicLufs>${fmt(t.musicLufs)}, musicSpeechRate<${fmt(t.musicSpeechRate)}, ` +
-    `speechRateCut>${fmt(t.speechRateCut)}`;
+    `speechRateCut>${fmt(t.speechRateCut)}` + audioClass;
 }
 
 /**

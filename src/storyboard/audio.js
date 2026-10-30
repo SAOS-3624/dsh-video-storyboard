@@ -166,3 +166,128 @@ export function describeAudio(audio, window) {
   return `mean ${audio.mean} LUFS, peak ${audio.peak} LUFS, ` +
     `${audio.dynamic} dB dynamic range, ${quiet} silence gaps (${quietTime.toFixed(1)}s of ${window.toFixed(0)}s)`;
 }
+
+/* ---------------------------------------------------- 语音 / 音乐判别（节奏） */
+
+export const MOD_FPS = 25;          // 调制分析的帧率（Hz）
+export const MOD_FRAME = 320;       // 每帧采样数：8000 / 25 = 320 → 40ms 一帧
+export const MOD_BAND = [3, 6];     // 音节/节拍带（Hz）
+export const MOD_SLOW = [0.5, 2];   // 短语级的慢起伏（Hz）
+
+const RMS_RE = /lavfi\.astats\.Overall\.RMS_level=(-?[0-9.]+|-inf)/g;
+
+/**
+ * 取一条**够细**的能量包络（dB），供节奏分析用。
+ *
+ * 不能用 `measureLoudness()` 的 ebur128：它的 momentary 是 100ms 窗、约 10Hz 采样，
+ * 测 3–6 Hz 正好卡在奈奎斯特边缘（要 ≥12Hz 才不失真），算出来的数没有意义。
+ * 这里把音频重采样到 8k、每 320 采样切一帧（40ms）→ **25 Hz 序列**，4 Hz 有 6 倍余量。
+ */
+export async function measureEnvelope({ input, ffmpegPath = DEFAULT_FFMPEG, start = 0, end } = {}) {
+  const stderr = await runAudioFilter({
+    input, ffmpegPath, start, end,
+    filter: `aresample=8000,asetnsamples=n=${MOD_FRAME},astats=metadata=1:reset=1,` +
+      'ametadata=mode=print:key=lavfi.astats.Overall.RMS_level',
+  });
+  const db = [];
+  for (const m of stderr.matchAll(RMS_RE)) {
+    db.push(m[1] === '-inf' ? -120 : Number(m[1]));
+  }
+  return { db, step: 1 / MOD_FPS };
+}
+
+/**
+ * 一段 1 秒包络的调制谱（只算 0.5–12 Hz，够我们用了）。
+ * @returns {Array<{hz:number, e:number}>}
+ */
+function modulationSpectrum(winDb, step) {
+  const n = winDb.length;
+  const mean = winDb.reduce((a, b) => a + b, 0) / n;
+  const d = winDb.map((v) => v - mean);
+  const out = [];
+  for (let k = 1; k <= Math.floor(n / 2); k += 1) {
+    const hz = k / (n * step);
+    if (hz < 0.5 || hz > 12) continue;
+    let re = 0;
+    let im = 0;
+    for (let i = 0; i < n; i += 1) {
+      const ang = (-2 * Math.PI * k * i) / n;
+      re += d[i] * Math.cos(ang);
+      im += d[i] * Math.sin(ang);
+    }
+    out.push({ hz, e: re * re + im * im });
+  }
+  return out;
+}
+
+const bandEnergy = (sp, [lo, hi]) => sp
+  .filter((p) => p.hz >= lo && p.hz <= hi)
+  .reduce((a, p) => a + p.e, 0);
+
+/**
+ * **节奏画像**：这段声音"更像有人在说话"，还是"更像一段配乐"？
+ *
+ * 判据来自语音/音乐判别那一路文献（Scheirer & Slaney, ICASSP'97 起）：
+ * 语音的能量包络有音节级的调制峰，音乐的能量被节拍和段落结构主导。区别不在**响度**，
+ * 在**能量包络怎么起伏**。所以整段把音量调大调小，下面的数都不变 —— 这正是
+ * 原来那条「mean LUFS > -18」缺的性质：它量的是母带电平，不是内容。
+ *
+ * 落到我们的素材上（10 支实测，见 test/audio-rhythm.test.mjs）：
+ *   - 口播/讲座/实况/vlog：主导调制频率 **1–2 Hz**（短语和重音），3–6Hz 能量不高于慢起伏
+ *   - 纯音乐 PV：主导频率 **3–4 Hz**（节拍），3–6Hz 能量明显高于慢起伏
+ * 这跟"语音在 4 Hz"的字面说法相反，但那是**音节率**；能量包络的主导频率在中文口播里
+ * 落在短语层面（1–2 Hz）。所以这里量的是峰值位置，不是 4 Hz 处的绝对能量。
+ *
+ * 1 秒窗是实测选的：窗再长（1.5s / 2s）低频漂移会抢走峰值，两类反而分开不了。
+ * 半窗以上是静音的窗直接跳过 —— 否则长停顿会把"说话片"算成"没有节奏"。
+ *
+ * @returns {{peakHz:number, rhythmRatio:number, windows:number}}
+ *   peakHz      主导调制频率的中位数
+ *   rhythmRatio 3–6Hz 能量 ÷ 0.5–2Hz 能量 的中位数
+ */
+export function rhythmProfile(envelope, { band = MOD_BAND, slow = MOD_SLOW } = {}) {
+  const db = envelope?.db ?? [];
+  const step = envelope?.step ?? 1 / MOD_FPS;
+  const n = Math.max(8, Math.round(1 / step));
+  if (db.length < n * 2) return { peakHz: NaN, rhythmRatio: NaN, windows: 0 };
+
+  const peaks = [];
+  const ratios = [];
+  for (let s = 0; s + n <= db.length; s += n) {
+    const w = db.slice(s, s + n);
+    if (w.filter((v) => v > -55).length < n * 0.5) continue;   // 大半是静音，不算
+    const sp = modulationSpectrum(w, step);
+    if (sp.length === 0) continue;
+    let best = sp[0];
+    for (const p of sp) if (p.e > best.e) best = p;
+    // 分母不能直接取 0.5–2Hz 的能量：**纯节拍的段落这一段几乎是 0**（没有慢起伏），
+    // 除下去要么是 Infinity 要么被判成"没有节奏"丢掉 —— 而它恰恰是最典型的配乐。
+    // 用一个极小的地板兜住，等于"慢起伏为零时，节拍比记为很大"。
+    const totalE = sp.reduce((a, p) => a + p.e, 0);
+    const slowE = Math.max(bandEnergy(sp, slow), totalE * 0.01);
+    if (!(slowE > 1e-9)) continue;
+    peaks.push(best.hz);
+    ratios.push(bandEnergy(sp, band) / slowE);
+  }
+  if (peaks.length < 2) return { peakHz: NaN, rhythmRatio: NaN, windows: peaks.length };
+
+  const median = (arr) => {
+    const v = [...arr].sort((a, b) => a - b);
+    return v[Math.floor(v.length / 2)];
+  };
+  return {
+    peakHz: +median(peaks).toFixed(2),
+    rhythmRatio: +median(ratios).toFixed(3),
+    windows: peaks.length,
+  };
+}
+
+/** 一次拿齐：细包络 + 节奏画像。失败返回 null（音频分析永远是增量信息）。 */
+export async function analyzeRhythm({ input, ffmpegPath, start = 0, end } = {}) {
+  try {
+    const envelope = await measureEnvelope({ input, ffmpegPath, start, end });
+    return { ...rhythmProfile(envelope), step: envelope.step };
+  } catch {
+    return null;
+  }
+}
