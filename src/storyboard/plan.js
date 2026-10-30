@@ -398,3 +398,37 @@ export function validatePlan(plan, aspect = DEFAULT_ASPECT) {
   if (sheets < 1 || sheets > MAX_SHEETS) errors.push(`sheets must be 1..${MAX_SHEETS}`);
   return { ok: errors.length === 0, errors, warnings };
 }
+
+/**
+ * 把 `total` 个整数配额按 `weights` 分给 n 份，**总和精确等于 total**，且每份 ≥ min。
+ *
+ * 为什么需要它：原来分给"黑场之间的内容区"时，每段各自 `Math.max(1, Math.round(份额))`，
+ * 一段一段往上报，总和可以超过 total（实测 24 格算出 25 段，多出来那一格只能靠下游"补满"
+ * 或者"按容量砍"去兜）。偏差一旦进了调用方，后面所有"格数/张数/token"都对不上账。
+ *
+ * 最大余额法：先按权重取整，余数按小数部分从大到小补。加权为零时退化成均分。
+ */
+export function allocateIntegerBudget(total, weights, { min = 0 } = {}) {
+  const n = weights.length;
+  if (n === 0) return [];
+  const t = Math.max(0, Math.round(Number(total) || 0));
+  const floor = Math.max(0, Math.round(Number(min) || 0));
+  // 连保底都给不出：按顺序发到没有为止（总和仍然精确）
+  if (t < floor * n) {
+    let rest = t;
+    return weights.map(() => {
+      const v = Math.min(floor, rest);
+      rest -= v;
+      return v;
+    });
+  }
+  const left = t - floor * n;
+  const w = weights.map((x) => (Number.isFinite(x) && x > 0 ? x : 0));
+  const sumW = w.reduce((a, b) => a + b, 0);
+  const raw = sumW > 0 ? w.map((x) => (x / sumW) * left) : w.map(() => left / n);
+  const out = raw.map((x) => Math.floor(x));
+  let rest = left - out.reduce((a, b) => a + b, 0);
+  const order = raw.map((x, i) => ({ i, frac: x - Math.floor(x) })).sort((a, b) => b.frac - a.frac);
+  for (let k = 0; k < rest; k += 1) out[order[k % n].i] += 1;
+  return out.map((x) => x + floor);
+}
