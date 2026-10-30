@@ -334,12 +334,22 @@ export function formatManifest(result, {
   const tokensAttr = hasSheets
     ? ` tokens="${result.sheets.length * 384} (est@384/img, DSH host billing; an API host bills by pixels)"`
     : '';
+  // 头一行必须写**实际出了多少格**。原来写的是 `plan.cells`，多张时那只是"每张多少格"
+  // （64 格 4 张会写成 "16 cells x 4 image(s)"），单张时又可能在 minGap 卡住后虚报
+  // （用户实测：要 16 格只出 8 格，头一行仍写 16）—— 模型据此以为自己看了 16 个瞬间。
+  const producedCells = hasSheets
+    ? result.sheets.reduce((n, s) => n + (s.cells?.length ?? 0), 0)
+    : (plan.produced ?? plan.cells);
+  const askedCells = (plan.cells ?? producedCells) * Math.max(1, plan.sheets ?? 1);
+  const gridsText = producedCells === askedCells
+    ? `grid="${producedCells} cells x ${plan.sheets} image(s)"`
+    : `grid="${producedCells} cells x ${plan.sheets} image(s) (asked ${askedCells})"`;
   const lines = [
     ...(subtitleNote ? [subtitleNote] : []),
     `<storyboard path="${info.path ?? 'video'}" duration="${info.duration.toFixed(2)}" ` +
       `window="${win.from.toFixed(2)}-${win.to.toFixed(2)}" ` +
       `image="${hasSheets ? `${sheet0.width}x${sheet0.height}` : 'none (text only)'}" ` +
-      `grid="${plan.cells} cells x ${plan.sheets} image(s)" burn="${plan.burn}"` +
+      `${gridsText} burn="${plan.burn}"` +
       `${cellAttr}${tokensAttr}` +
       `${result.provenance?.ffmpeg ? ` ffmpeg="${result.provenance.ffmpeg}"` : ''}` +
       `${result.provenance?.sha256 ? ` sha256="${result.provenance.sha256}"` : ''}` +

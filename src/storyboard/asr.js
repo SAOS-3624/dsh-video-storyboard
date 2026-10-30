@@ -10,7 +10,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -106,13 +106,19 @@ export function canTranscribe(cfg = ASR_DEFAULTS, apiKey) {
 }
 
 export function resolveAsrConfig(env = process.env) {
+  // **按文件 mtime 记忆**：asr.json 是"跟模型聊天时顺手改、想立刻生效"的文件。
+  // 原来 ASR_DEFAULTS 是模块加载时的一次快照，改完必须重启整个宿主才认 ——
+  // 实测有用户被这个坑到（"asr.json 改完得完整重启才生效"，2026-10-30 反馈）。
+  // 现在：文件没动就复用上次结果（省掉每次读盘），动了立刻重读。
+  const stamp = asrConfigStamp(env);
+  if (asrMemo && stamp === asrMemoStamp) return asrMemo;
   const file = readConfigFile(env);
   const envBaseUrl = cleanEnvValue(env.DSH_ASR_BASE_URL);
   const envModel = cleanEnvValue(env.DSH_ASR_MODEL);
   const envLanguage = cleanEnvValue(env.DSH_ASR_LANG);
   const keyEnv = cleanEnvValue(env.DSH_ASR_KEY_ENV) || 'DSH_ASR_KEY';
   const fromEnv = Boolean(envBaseUrl || env[keyEnv]);
-  return {
+  const resolved = {
     baseUrl: envBaseUrl || file.baseUrl || 'https://api.siliconflow.cn/v1',
     model: envModel || file.model || 'FunAudioLLM/SenseVoiceSmall',
     keyEnv,
@@ -123,14 +129,46 @@ export function resolveAsrConfig(env = process.env) {
     terms: file.terms && typeof file.terms === 'object' ? file.terms : undefined,
     // 热词：空格分隔的一串词，交给 seaco_paraformer 解码时偏置
     hotwords: typeof file.hotwords === 'string' && file.hotwords.trim() ? file.hotwords.trim() : '',
-    terms: file.terms && typeof file.terms === 'object' ? file.terms : undefined,
     // 生命周期托管：{ start, stop?, idleMs?, waitMs? } —— 见 asr-lifecycle.js
     manage: file.manage && typeof file.manage === 'object' ? file.manage : undefined,
     ...(file.path ? { configPath: file.path } : {}),
   };
+  asrMemo = resolved;
+  asrMemoStamp = stamp;
+  return resolved;
 }
 
-export const ASR_DEFAULTS = resolveAsrConfig();
+let asrMemo = null;
+let asrMemoStamp = '';
+
+/** 配置"指纹"：文件 mtime/size + 关键环境变量。变了就重读。 */
+function asrConfigStamp(env) {
+  const paths = env.DSH_HOME
+    ? [join(env.DSH_HOME, 'asr.json')]
+    : [join(homedir(), '.dsh', 'asr.json')];
+  const files = paths.map((p) => {
+    try {
+      const s = statSync(p);
+      return `${p}:${s.mtimeMs}:${s.size}`;
+    } catch {
+      return `${p}:-`;
+    }
+  });
+  const envBits = ['DSH_ASR_BASE_URL', 'DSH_ASR_MODEL', 'DSH_ASR_LANG', 'DSH_ASR_KEY_ENV', 'DSH_ASR_KEY']
+    .map((k) => `${k}=${env[k] ?? ''}`);
+  return [...files, ...envBits].join('|');
+}
+
+/**
+ * 默认配置。**故意做成 Proxy**：每次读属性都重新解析（内部有 mtime 记忆，不贵），
+ * 这样 `ASR_DEFAULTS.baseUrl` 在 asr.json 改完之后立刻是新值，不用重启宿主。
+ */
+export const ASR_DEFAULTS = new Proxy({}, {
+  get: (_t, k) => resolveAsrConfig()[k],
+  has: (_t, k) => k in resolveAsrConfig(),
+  ownKeys: () => Reflect.ownKeys(resolveAsrConfig()),
+  getOwnPropertyDescriptor: (_t, k) => ({ configurable: true, enumerable: true, value: resolveAsrConfig()[k] }),
+});
 
 /** 一句话说明"我们在往哪儿发请求"，用于把错误信息变得可定位（永远不含 key） */
 export function describeAsrTarget(cfg = ASR_DEFAULTS) {

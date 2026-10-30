@@ -10,6 +10,10 @@
 
 ## 它解决什么问题
 
+> **装完不能跑？先执行 `node bin/doctor.mjs`** —— 它会检查 ffmpeg / yt-dlp / ASR / 缓存目录，
+> 每条都跟一句"缺什么、怎么补"。用户反馈里过半不是 bug，是没配 ASR 或装完 ffmpeg 没重启 DSH。
+> 新手步骤：[docs/入门-五分钟.zh.md](docs/入门-五分钟.zh.md) · 报错对照：[docs/FAQ.zh.md](docs/FAQ.zh.md)
+
 多模态模型看视频有两种笨办法：
 
 - **逐帧抽图** —— 10 分钟片子按 1 fps 抽就是 600 张图，token 直接爆。

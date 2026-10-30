@@ -494,78 +494,105 @@ export async function runStoryboard(opts) {
   planInfo.sampleMarks = sampleMarks.length;
   // 让 video_locate 能直接复用这次的转写，省掉一次 ASR
   if (transcriptInfo?.segments?.length) rememberSegments(input, transcriptInfo.segments);
-  let cellRanges;
-  if (adaptive && relCuts.length > 0) {
-    // 密度来源：用**画面变化率**而不是切点计数（见 densityFromScore 的注释）。
-    // 复用缓存时逐帧 stats 还在（它跟着扫描结果一起存），所以这条不会退化。
-    // **黑场单独成段**：黑屏在分数上几乎是 0（前后都黑，没有"变化"），永远不会被当成切点，
-    // 于是它和后面的 logo/正片挤在同一格里，而那一格取中点数 —— 正好落在黑里，整格纯黑。
-    // 实测概念PV：片头 0–5.7s 全黑（亮度 1），0–37.6s 那一格的中点 18.8s 亮度是 0。
-    // 现在把 ≥2 秒的黑场各切出来独占一格，片头/片尾的黑屏不再吞掉内容。
-    // 黑场段是扫描时算好存进缓存的（见上面 darkRuns），不依赖本次有没有 means。
-    const darkRuns = (Array.isArray(scan.darkRuns) ? scan.darkRuns : [])
-      .filter((r) => r.to - r.from >= 2 && r.from < winDur);
-    let segRanges;
-    if (darkRuns.length > 0) {
-      const parts = [];
-      let cursor = 0;
-      for (const d of darkRuns) {
-        if (d.from > cursor + 0.5) parts.push({ from: cursor, to: d.from, dark: false });
-        parts.push({ from: d.from, to: Math.min(d.to, winDur), dark: true });
-        cursor = Math.min(d.to, winDur);
-      }
-      if (cursor < winDur - 0.5) parts.push({ from: cursor, to: winDur, dark: false });
-
-      // 黑场**额外占格**，不从内容格数里扣 —— 否则 4 段黑场就把 4 格吃光，
-      // 剩下 65 秒的内容挤成一格（实测踩过）。
-      const contentTotal = cells * sheets;
-      const countIn = (p2) => relCuts.filter((c) => c >= p2.from && c < p2.to).length;
-      const allContentCuts = parts.filter((x) => !x.dark).reduce((n, p2) => n + countIn(p2), 0);
-
-      segRanges = [];
-      for (const p2 of parts) {
-        if (p2.dark) {
-          segRanges.push({ from: p2.from, to: p2.to, density: 0, dark: true });
-          continue;
+  // 黑场段（≥2s）在预算里**额外占格**，所以要先数清楚：算"内容格数"时必须把它扣掉，
+  // 否则 12 内容 + 1 黑场 = 13 格 → 排成 4×4 会空 3 个黑位（实测「中国剑」就是这样）。
+  const darkRuns = (Array.isArray(scan.darkRuns) ? scan.darkRuns : [])
+    .filter((r) => r.to - r.from >= 2 && r.from < winDur);
+  // 按给定总格数排一遍 → 返回 [{from,to,density,dark}]。抽成函数是为了能"补满后重排一次"。
+  const planRanges = (total) => {
+    // **近乎静止的素材不吃"变化量"这套**。
+    // rodt / 积分采样点的前提是"变化多的地方更值得看"，可当整片 p90 < 1（讲义、监控、
+    // 固定机位口播）时，切点集中在少数几页翻页动画上，按密度分格就会把格位堆在那几页，
+    // 出来一堆几乎一样的幻灯片（2026-10-30 实测：66 分钟讲座 16 格里有 6 格是同一页的
+    // 不同配色，盲评覆盖/代表各掉 1~2 分）。这种素材没有任何"更值得看"的区域，
+    // 均匀铺开才是对的 —— 退回按时间等分。p90 ≥ 1 的照旧走密度。
+    const nearStatic = (Number(scan.summary?.p90) || 0) < 1;
+    if (adaptive && relCuts.length > 0 && !nearStatic) {
+      let segRanges;
+      if (darkRuns.length > 0) {
+        // **黑场单独成段**：黑屏在分数上几乎是 0（前后都黑，没有"变化"），永远不会被当成切点，
+        // 于是它和后面的 logo/正片挤在同一格里，而那一格取中点数 —— 正好落在黑里，整格纯黑。
+        // 实测概念PV：片头 0–5.7s 全黑（亮度 1），0–37.6s 那一格的中点 18.8s 亮度是 0。
+        // 黑场段是扫描时算好存进缓存的（见上面 darkRuns），不依赖本次有没有 means。
+        const parts = [];
+        let cursor = 0;
+        for (const d of darkRuns) {
+          if (d.from > cursor + 0.5) parts.push({ from: cursor, to: d.from, dark: false });
+          parts.push({ from: d.from, to: Math.min(d.to, winDur), dark: true });
+          cursor = Math.min(d.to, winDur);
         }
-        // 内容区按各自占的刀数比例分格，内部仍用 rodt
-        const share = allContentCuts > 0
-          ? Math.max(1, Math.round((contentTotal * countIn(p2)) / allContentCuts))
-          : 1;
-        const rs = planByRodt({
-          duration: p2.to - p2.from,
-          cuts: relCuts.filter((c) => c >= p2.from && c < p2.to).map((c) => c - p2.from),
-          cells: share,
-        });
-        segRanges.push(...rs.map((r) => ({ from: r.from + p2.from, to: r.to + p2.from, density: r.density })));
+        if (cursor < winDur - 0.5) parts.push({ from: cursor, to: winDur, dark: false });
+
+        // 黑场**额外占格**，不从内容格数里扣 —— 否则 4 段黑场就把 4 格吃光，
+        // 剩下 65 秒的内容挤成一格（实测踩过）。
+        // 但总格数是总格数：内容只能拿 total − 黑场格数，不然总数会超出布局容量。
+        const contentTotal = Math.max(1, total - darkRuns.length);
+        const countIn = (p2) => relCuts.filter((c) => c >= p2.from && c < p2.to).length;
+        const allContentCuts = parts.filter((x) => !x.dark).reduce((n, p2) => n + countIn(p2), 0);
+
+        segRanges = [];
+        for (const p2 of parts) {
+          if (p2.dark) {
+            segRanges.push({ from: p2.from, to: p2.to, density: 0, dark: true });
+            continue;
+          }
+          // 内容区按各自占的刀数比例分格，内部仍用 rodt
+          const share = allContentCuts > 0
+            ? Math.max(1, Math.round((contentTotal * countIn(p2)) / allContentCuts))
+            : 1;
+          const rs = planByRodt({
+            duration: p2.to - p2.from,
+            cuts: relCuts.filter((c) => c >= p2.from && c < p2.to).map((c) => c - p2.from),
+            cells: share,
+          });
+          segRanges.push(...rs.map((r) => ({ from: r.from + p2.from, to: r.to + p2.from, density: r.density })));
+        }
+        segRanges.sort((a, b) => a.from - b.from);
+      } else {
+        // **rodt**：每格长度 = 常数 ÷ 该处的切点密度（B = K/A）。
+        // 一分钟切 70 刀的地方一格 5 秒，一分钟才 18 刀的地方一格 24 秒 —— 实测相差 4.6~5.5 倍。
+        // 而且因为用"累积切点等分"实现，每格的镜头数也顺带均匀（6~10 个），不用再单独约束。
+        segRanges = planByRodt({ duration: winDur, cuts: relCuts, cells: total });
       }
-      segRanges.sort((a, b) => a.from - b.from);
-    } else {
-      // **rodt**：每格长度 = 常数 ÷ 该处的切点密度（B = K/A）。
-      // 一分钟切 70 刀的地方一格 5 秒，一分钟才 18 刀的地方一格 24 秒 —— 实测相差 4.6~5.5 倍。
-      // 而且因为用"累积切点等分"实现，每格的镜头数也顺带均匀（6~10 个），不用再单独约束。
-      segRanges = planByRodt({ duration: winDur, cuts: relCuts, cells: cells * sheets });
+      // 黑场是从"内容格数"里抠出来的（每段独占一格），所以总段数会比原计划多。
+      // 布局按格数分组，容量不够就会丢格 —— 这里把 cells 抬到实际段数。
+      return segRanges
+        .map((r) => ({ from: r.from + winStart, to: r.to + winStart, density: r.density, dark: r.dark === true }));
     }
-    cellRanges = segRanges
-      .map((r) => ({ from: r.from + winStart, to: r.to + winStart, density: r.density, dark: r.dark === true }));
-    // 黑场是从"内容格数"里抠出来的（每段独占一格），所以总段数会比原计划多。
-    // 布局按 cells 分组，容量不够就会丢格 —— 这里把 cells 抬到实际段数。
-    if (cellRanges.length > cells * sheets) {
-      cells = Math.ceil(cellRanges.length / sheets);
-    }
-  } else {
     const segs = segmentsFromCuts(winDur, relCuts, 0.4, winStart);
-    cellRanges = fitSegments(segs, cells * sheets, { minGap })
+    return fitSegments(segs, total, { minGap })
       .map(([a, b]) => ({ from: a, to: b, density: 1 }));
+  };
+  let cellRanges = planRanges(cells * sheets);
+  // ---- 把"因为取整而空出来的格位"填成真帧
+  // 总格数不一定落在布局容量上：13 格排 4×4 空 3 个黑位、10 格排 3×4 空 2 个。
+  // 空格和真帧占的是同一张画布、同样的 token —— 空着是纯损失（而且黑块会拉低整图的信噪比）。
+  // 所以按实际段数**往上补满容量**再重排一次：13 → 16、10 → 12、25 → 25。
+  // ---- 把"因为取整而空出来的格位"填成真帧（真正的补齐在下面按"每张"做一次，
+  // 因为一张图能盛多少格由它自己的布局决定，不是整段的总数）。
+  // 这里只做一次粗补：总段数连一张的容量都没占满时先补，省掉后面一轮重排。
+  // 只对自动张数生效：显式 `--sheets` 的调用方要的是精确张数，不能偷偷改。
+  if (!(Number(opts.sheets) > 0) && cellRanges.length > 0) {
+    const cap = fillLayout(cellRanges.length, info.aspect).cells;
+    if (cap > cellRanges.length) {
+      const retried = planRanges(cap);
+      if (retried.length > cellRanges.length) cellRanges = retried;
+    }
   }
-  const groups = [];
+  if (cellRanges.length > cells * sheets) cells = Math.ceil(cellRanges.length / sheets);
   // **先排好画面，再按累计帧数切 sheet**（流程的最后一步）。
   // 一格不摊是 1 帧、摊 3×3 是 9 帧，格数一样但信息量差 9 倍，
   // 所以只能按"这一格贡献多少帧"来切，不能按格数均分。
   // 切的是格点边界（= 切点），上一张末尾切点就是下一张起点，天然衔接不断裂。
-  if (!(Number(opts.sheets) > 0)) {
+  const splitSheets = (ranges) => {
+    if (Number(opts.sheets) > 0) {
+      // 调用方显式指定了张数（测试、批量脚本）就尊重它，仍按格数均分
+      const out = [];
+      for (let i = 0; i < sheets; i++) out.push(ranges.slice(i * cells, (i + 1) * cells));
+      return out;
+    }
     // 调用方没指定张数 → 按累计帧数切（自适应）
-    const kEst = cellRanges.map((r) => {
+    const kEst = ranges.map((r) => {
       const cs = cuts.filter((c) => c.t >= r.from && c.t < r.to);
       const marks = sampleMarks.filter((t) => t >= r.from && t < r.to);
       const cutScore = cs.length ? cs.reduce((a, c) => a + (c.score ?? 0), 0) / cs.length : Infinity;
@@ -573,15 +600,42 @@ export async function runStoryboard(opts) {
         shots: cs.length + 1 + marks.length, cellW: 250, cellH: 140, dur: r.to - r.from, cutScore,
       });
     });
-    groups.push(...planSheetsByFrames(
-      cellRanges.map((r, i) => ({ ...r, k: kEst[i] })),
+    return planSheetsByFrames(
+      ranges.map((r, i) => ({ ...r, k: kEst[i] })),
       { frameBudget: 64, maxCellsPerSheet: 16 },
-    ));
-    sheets = groups.length;
-  } else {
-    // 调用方显式指定了张数（测试、批量脚本）就尊重它，仍按格数均分
-    for (let i = 0; i < sheets; i++) groups.push(cellRanges.slice(i * cells, (i + 1) * cells));
+    );
+  };
+  let groups = splitSheets(cellRanges);
+  // ---- 每张图也要**补满布局容量**
+  // 切张是按帧预算均分的，均分出来常是 13 格 → 排 4×4 空 3 个黑位。
+  // 黑位和真帧占同一张画布、扣同一份 token，空着就是白扔（黑块还会拉低整图信噪比）。
+  // 所以按"本组格数补满后的容量"重新排一次总格数，再切一次。最多两轮、只往上补。
+  // 素材太短/镜头太少导致排不出这么多段时保持原样（那是几何上给不出，不是浪费）。
+  if (!(Number(opts.sheets) > 0) && groups.length > 0) {
+    for (let pass = 0; pass < 2; pass += 1) {
+      const short = groups.some((g) => g.length > 0 && g.length < fillLayout(g.length, info.aspect).cells);
+      if (!short) break;
+      const cap = Math.max(...groups.map((g) => fillLayout(Math.max(1, g.length), info.aspect).cells));
+      const total = cap * groups.length;
+      if (total <= cellRanges.length) break;
+      const re = planRanges(total);
+      if (re.length < total) break;
+      const nextGroups = splitSheets(re);
+      if (nextGroups.some((g) => g.length === 0)) break;
+      cellRanges = re;
+      groups = nextGroups;
+    }
   }
+  sheets = groups.length;
+  if (cellRanges.length > cells * sheets) cells = Math.ceil(cellRanges.length / sheets);
+  // planInfo 是在分格之前建的，那时还不知道"黑场占格 / 补满布局 / 按帧切张"会把它改成什么样。
+  // 这里的两个数是**最终生效值**，清单和 manifest 读的是它们 —— 不刷就会报 12 格 1 张、
+  // 而实际出了 25 格 2 张（2026-10-30 对比测试踩到，报告里对不上账）。
+  // 多张时取"最多那张的格数"（真正的每张格数在 sheets[].cells 里，这里只给个量级）。
+  planInfo.cells = groups.length > 1
+    ? Math.max(...groups.map((g) => g.length))
+    : cellRanges.length;
+  planInfo.sheets = groups.length;
 
   // textOnly：只重算"格 → 时间段 → 台词"，一帧都不解、一张图都不拼。
   // 用途：总览文本被宿主截断后，按 cellRange 分批把剩下的台词取回来（第二次调用命中缓存，几乎瞬时）。

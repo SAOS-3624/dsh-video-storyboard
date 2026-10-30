@@ -48,7 +48,8 @@
   },
   "bin": {
     "dsh-video-scan": "./bin/scan-video.mjs",
-    "dsh-video-storyboard": "./bin/storyboard.mjs"
+    "dsh-video-storyboard": "./bin/storyboard.mjs",
+    "dsh-video-doctor": "./bin/doctor.mjs"
   },
   "files": [
     "src",
@@ -70,7 +71,9 @@
   "scripts": {
     "test": "node --test",
     "prepublishOnly": "npm test",
-    "check": "node scripts/check-syntax.mjs"
+    "check": "node scripts/check-syntax.mjs",
+    "doctor": "node bin/doctor.mjs",
+    "asrcheck": "node bin/asr-check.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.7"

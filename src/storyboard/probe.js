@@ -8,11 +8,28 @@
  */
 
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 
 import { DEFAULT_FFMPEG, DEFAULT_FFPROBE, describeMediaSearch } from './binaries.js';
 
-const run = promisify(execFile);
+/**
+ * 回调式 execFile，**不用 promisify**。
+ *
+ * 有宿主的 `promisify` 实现会丢掉 execFile 的 custom symbol，只把 stdout 字符串当结果交回来
+ * （用户实测：probe 的 catch 里读 `stderr.length` 直接 TypeError，报出来像是 ffprobe 坏了，
+ * 其实是 promisify 坏了）。回调式的三个参数不会丢，而且这里本来就要 stdout + stderr 两样。
+ */
+function run(bin, args, opts) {
+  return new Promise((resolve, reject) => {
+    execFile(bin, args, opts, (error, stdout, stderr) => {
+      if (error) {
+        // 把 stdout/stderr 挂在 error 上：调用方要能拿到 ffprobe 的原话去解释失败原因
+        reject(Object.assign(error, { stdout, stderr }));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
 
 export { DEFAULT_FFMPEG, DEFAULT_FFPROBE };
 

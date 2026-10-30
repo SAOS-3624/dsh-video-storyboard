@@ -460,12 +460,12 @@ test('chooseSubGrid: 按密度决定，不看镜头数', async () => {
   assert.ok(chooseSubGrid({ shots: 5, dur: 3, cellW: 499, cellH: 278 }) >= 2);
 });
 
-test('chooseSubGrid: 子帧小于 100×56 就降档，3×3 布局不切 4×4', async () => {
+test('chooseSubGrid: 子帧小于 200×112 就降档（3×3 / 4×4 都不再摊）', async () => {
   const { chooseSubGrid } = await import('../src/storyboard/pipeline.js');
-  // 331/4 = 82 < 100 → 最多 3×3
-  assert.equal(chooseSubGrid({ shots: 20, dur: 5, cellW: 331, cellH: 184 }), 3);
-  // 499/4 = 124 ≥ 100 → 允许 4×4
-  assert.equal(chooseSubGrid({ shots: 20, dur: 5, cellW: 499, cellH: 278 }), 4);
+  // 331/2 = 165 < 200 → 3×3 的格子一点都不摊（实测 165×92 认不出字）
+  assert.equal(chooseSubGrid({ shots: 20, dur: 5, cellW: 331, cellH: 184 }), 1);
+  // 499/2 = 249 ≥ 200、139 ≥ 112 → 2×2 成立，但 499/3 = 166 < 200 → 封在 2
+  assert.equal(chooseSubGrid({ shots: 20, dur: 5, cellW: 499, cellH: 278 }), 2);
   // 太小的格子完全不摊
   assert.equal(chooseSubGrid({ shots: 20, dur: 5, cellW: 180, cellH: 100 }), 1);
 });

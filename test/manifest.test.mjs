@@ -418,3 +418,22 @@ test('清单：没有类型标签的老数据（复用缓存）不崩，也不�
   const text = formatManifest(result, { maxChars: 200_000 });
   assert.doesNotMatch(text, /non-hard cuts/, '没有标签时整段跳过');
 });
+
+test('头一行写实际格数，不写"每张多少格"（64 格 4 张不能说成 16 cells）', () => {
+  const text = formatManifest(makeResult(), { maxChars: 200_000 });
+  assert.match(text, /grid="64 cells x 4 image\(s\)"/, '头一行必须报总格数');
+  assert.doesNotMatch(text, /grid="16 cells/);
+});
+
+test('minGap 卡住时说清"要了多少、出了多少"（不虚报）', () => {
+  const r = makeResult({ cells: 8 });
+  r.plan = { ...r.plan, cells: 16, sheets: 1, produced: 8 };
+  r.sheets = [{
+    sheet: 1, cols: 4, rows: 2, width: 1064, height: 300, stripH: 56,
+    cells: Array.from({ length: 8 }, (_, k) => ({
+      i: k + 1, sheet: 1, t_start: k * 2, t_end: k * 2 + 1.5, text: '台词',
+    })),
+  }];
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /grid="8 cells x 1 image\(s\) \(asked 16\)"/);
+});

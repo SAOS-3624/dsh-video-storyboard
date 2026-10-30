@@ -16,8 +16,8 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import {
-  applyTermMap, canTranscribe, chunkWindows, describeAsrTarget, filterSuspectSegments, mergeSegments,
-  needsCloudKey, resolveAsrConfig, transcribe, transcribeLong,
+  ASR_DEFAULTS, applyTermMap, canTranscribe, chunkWindows, describeAsrTarget, filterSuspectSegments,
+  mergeSegments, needsCloudKey, resolveAsrConfig, transcribe, transcribeLong,
 } from '../src/storyboard/asr.js';
 import { DEFAULT_FFMPEG } from '../src/storyboard/probe.js';
 
@@ -405,6 +405,45 @@ test('resolveAsrConfig: 读取 asr.json 里的 terms', async () => {
     const cfg = resolveAsrConfig({ DSH_HOME: dir });
     assert.deepEqual(cfg.terms, { 苍野: '沧野' });
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolveAsrConfig: 改完 asr.json 立刻生效（不用重启宿主）', async () => {
+  // 用户实测的坑：ASR_DEFAULTS 是模块加载时的快照，改了 asr.json 必须重启整个 DSH。
+  // 现在按 mtime 记忆 —— 文件一改就重读。
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-cfg-'));
+  const cfgPath = join(dir, 'asr.json');
+  try {
+    await writeFile(cfgPath, JSON.stringify({ baseUrl: 'http://127.0.0.1:8001/v1', key: 'k1' }));
+    assert.equal(resolveAsrConfig({ DSH_HOME: dir }).baseUrl, 'http://127.0.0.1:8001/v1');
+    // 睡 10ms 保证 mtime 一定变（同毫秒覆盖会命中记忆）
+    await new Promise((r) => setTimeout(r, 10));
+    await writeFile(cfgPath, JSON.stringify({ baseUrl: 'http://127.0.0.1:8002/v1', key: 'k2' }));
+    assert.equal(resolveAsrConfig({ DSH_HOME: dir }).baseUrl, 'http://127.0.0.1:8002/v1');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('ASR_DEFAULTS: 是活视图，不是快照', async () => {
+  // 用 DSH_HOME 指到临时目录，绝不碰用户真实 ~/.dsh/asr.json
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-cfg-'));
+  const prevHome = process.env.DSH_HOME;
+  const prevBase = process.env.DSH_ASR_BASE_URL;
+  process.env.DSH_HOME = dir;
+  // 环境变量优先级高于文件：不清掉的话这条断言测的是环境，不是文件
+  delete process.env.DSH_ASR_BASE_URL;
+  try {
+    await writeFile(join(dir, 'asr.json'), JSON.stringify({ baseUrl: 'http://127.0.0.1:8123/v1', key: 'k' }));
+    assert.equal(ASR_DEFAULTS.baseUrl, 'http://127.0.0.1:8123/v1');
+    await new Promise((r) => setTimeout(r, 10));
+    await writeFile(join(dir, 'asr.json'), JSON.stringify({ baseUrl: 'http://127.0.0.1:8124/v1', key: 'k' }));
+    assert.equal(ASR_DEFAULTS.baseUrl, 'http://127.0.0.1:8124/v1');
+  } finally {
+    if (prevHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevHome;
+    if (prevBase !== undefined) process.env.DSH_ASR_BASE_URL = prevBase;
     await rm(dir, { recursive: true, force: true });
   }
 });
