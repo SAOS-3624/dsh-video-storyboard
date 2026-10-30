@@ -2,7 +2,8 @@
  * storyboard/tool-spec.js — 视频识别那四个工具的 schema 与兜底校验。
  *
  * `video_storyboard` / `video_zoom` / `video_probe` / `video_locate` 的契约都在这里。
- * 陪看那份在 `../watch/tool-spec.js` —— 两边各自持有自己的契约，谁也别去对方目录里改。
+ * 陪看那份不在这里 —— `watch_together` 属于另一个包 `dsh-watch-together`，
+ * 契约在它的 `src/tool-spec.js`。两边各自持有自己的契约，谁也别去对方目录里改。
  *
  * ## 为什么这份文件值得单独存在
  *

@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  locateToolSpec, probeToolSpec, storyboardToolSpec, watchToolSpec, zoomToolSpec,
+  locateToolSpec, probeToolSpec, storyboardToolSpec, zoomToolSpec,
 } from '../src/tool-spec.js';
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -35,17 +35,14 @@ const src = (name) => read(join(ROOT, 'src', name));
  * **必须精确到工具**：一个模块里塞两个 handler，扫出来的就是并集，
  * 审计立刻失效。`storyboard/board.js` 是 storyboard / zoom 共用的参数归一化层，所以两边都算。
  *
- * 路径相对 `src/`；`src/storyboard/` 与 `src/watch/` 的划分见 README 的模块表。
+ * 路径相对 `src/`；`src/storyboard/` 的划分见 README 的模块表。
+ * 陪看的 handler 不在这里 —— 它随 `dsh-watch-together` 走了，那边有同样的审计。
  */
 const HANDLER_MODULES = {
   video_storyboard: ['tools/storyboard.js', 'tools/shared.js', 'storyboard/board.js'],
   video_zoom: ['tools/zoom.js', 'tools/shared.js', 'storyboard/board.js'],
   video_probe: ['tools/probe.js'],
   video_locate: ['tools/locate.js'],
-  watch_together: [
-    'watch/handler.js', 'watch/watch-actions.js', 'watch/watch-run.js',
-    'watch/watch-modes.js', 'watch/watch-source.js',
-  ],
 };
 
 /**
@@ -74,7 +71,6 @@ const SPECS = {
   video_zoom: zoomToolSpec,
   video_probe: probeToolSpec,
   video_locate: locateToolSpec,
-  watch_together: watchToolSpec,
 };
 
 test('schema 审计：每个工具 handler 读的 args 都在它的 schema 里', () => {
@@ -101,14 +97,12 @@ test('schema 审计：parameters 里没有重复键（后者会静默覆盖前�
   // 从 `parameters:` 到 `output:` 之间的 `^      name: ` 就是参数表的直接子键
   const regions = {
     video_storyboard: storyboardToolSpec, video_zoom: zoomToolSpec, video_probe: probeToolSpec,
-    video_locate: locateToolSpec, watch_together: watchToolSpec,
+    video_locate: locateToolSpec,
   };
-  // spec 不再都在一个文件里：watch_together 已经搬到 src/watch/tool-spec.js。
-  // 每个工具读**它自己那个文件**，否则切片会切到空字符串、测试假通过。
+  // 每个工具读它那个 spec 文件；切片口径对不上时会切到空字符串，所以下面断言 keys 非空。
   const FILES = {
     video_storyboard: 'src/storyboard/tool-spec.js', video_zoom: 'src/storyboard/tool-spec.js',
     video_probe: 'src/storyboard/tool-spec.js', video_locate: 'src/storyboard/tool-spec.js',
-    watch_together: 'src/watch/tool-spec.js',
   };
   const problems = [];
   for (const tool of Object.keys(regions)) {
@@ -121,6 +115,7 @@ test('schema 审计：parameters 里没有重复键（后者会静默覆盖前�
     const to = body.indexOf('\n    output: {');
     assert.ok(from > 0 && to > from, `${tool}: 找不到 parameters → output 区间`);
     const keys = [...body.slice(from, to).matchAll(/\n {6}([A-Za-z_$][\w$]*): /g)].map((m) => m[1]);
+    assert.ok(keys.length > 0, `${tool}: parameters 一个键都没切到 —— 切片口径已经和代码对不上了`);
     const seen = new Set();
     for (const k of keys) {
       if (seen.has(k)) problems.push(`${tool}: 参数 ${k} 定义了两次`);
@@ -137,18 +132,13 @@ test('schema 审计：dsh.plugin.json 的版本和 package.json 一致', () => {
     'dsh.plugin.json 的 version 落后会让人装到"看起来是旧版"的插件');
 });
 
-test('schema 审计：五个工具的 name 和注册入口的一致', () => {
-  // 注册已经拆到两个 register.js 里，index.js 只做编排 —— 所以看的地方也跟着变。
+test('schema 审计：四个工具的 name 和注册入口的一致', () => {
+  // storyboard 的注册在 storyboard/register.js，index.js 只做编排 —— 所以看那个文件。
   const sb = src('storyboard/register.js');
-  const wt = src('watch/register.js');
   for (const [tool, makeSpec] of Object.entries(SPECS)) {
     assert.equal(makeSpec().name, tool);
-    const home = tool === 'watch_together' ? wt : sb;
-    const specFn = makeSpec().name === 'watch_together' ? 'watchToolSpec' : null;
-    assert.ok(home.includes('ToolSpec()'),
+    assert.ok(sb.includes('ToolSpec()'),
       `${tool} 的注册应该在自己的 register.js 里（用 ...xxxToolSpec() 展开）`);
-    assert.ok(!specFn || home.includes('watchToolSpec'),
-      'watch_together 的 spec 必须由 watch/register.js 引入');
   }
 });
 

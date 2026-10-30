@@ -1,84 +1,62 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0] — 2026-10-30
 
-### BREAKING — the TTS engine is out of core
+### BREAKING — co-watching is now a separate package
 
-`watch_together` no longer speaks. The plugin ships **no engine, no default adapter, and no voice
-parameters**; it only emits timed speech events (issue #27, decided with @ggfgfgf-on). Keeping a
-Windows SAPI + `ffplay` + registry implementation inside a general video plugin made the core
-platform-specific, raced any speech plugin the host already had, and put an engine choice in the
-model-visible schema where it did not belong.
+`video_watch` / `watch_together` **is no longer in this plugin**. It is its own package,
+**`dsh-watch-together`**, starting at `0.1.0`:
 
-Removed from `watch_together.parameters`: `tts`, `voice`, `rate`, `listVoices`, `speakAloud`, `text`
-(`text` existed only for `speakAloud`).
+```bash
+npm i dsh-watch-together        # this also installs dsh-video-storyboard
+```
+
+Why: the two are different products. One turns a video into a citable grid; the other follows the
+user's playback position and keeps talking. Bundling them meant `dsh-video-storyboard` carried a
+Windows SMTC probe, a chat server, an HTTP page and a speech seam that had nothing to do with
+video recognition — and anyone who only wanted a storyboard got all of it.
+
+This package now ships **four** tools: `video_storyboard`, `video_zoom`, `video_probe`,
+`video_locate`. It has **zero** imports from co-watching, and never will — the dependency is
+one-way (`watch → storyboard`).
 
 Migration:
 
-- **Nothing attached to speech** → nothing to do. Lines that come due still wake the model, which
-  says them itself. Unchanged, and still the default.
-- **Something attached** → subscribe with `onSpeech()`. While a subscriber is attached the loop
-  hands each due line over instead of waking you; with none it wakes you.
-- **You were passing `tts: true`** → drop it and attach a consumer. `examples/voice-edge-tts/` is a
-  worked example (edge-tts → `ffplay` → system-voice fallback); it was `src/tts.js` until now.
+- **You used `video_watch` / `watch_together`** → `npm i dsh-watch-together`, then keep calling the
+  same tool. The parameters are unchanged; only the package that provides it moved.
+- **You only used the storyboard tools** → nothing to do. `dsh-video-storyboard@0.5.0` drops code
+  you were not calling, and its four tools are untouched.
+
+Everything that was in the `[Unreleased]` section before this release — the speech seam, the
+path-loaded voice adapters, `examples/voice-edge-tts`, `examples/floating-chat`, the single text
+stream, the `video_watch → watch_together` rename — moved with the feature and is documented in
+`dsh-watch-together`'s CHANGELOG under `0.1.0`.
 
 ### Added
 
-- **`src/voice.js` — the speech seam.** `onSpeech(handler, { voice })` returns an unsubscribe
-  function; events are `{ seq, at, text, state, input?, segment?, origin? }` and are frozen.
-  `emitSpeech()` returns the number of **successful** deliveries and does nothing when nobody is
-  subscribed — that is what keeps the zero-engine promise. `speechEvents(lines, …)` turns stored
-  line slots into that shape, and `watch_together` results now carry `speech: [{ at, text, state }]`.
-- **Plug-in adapters, loaded by path.** `~/.dsh/voice.json` `{ "adapter": "<path or module>" }` (or
-  `DSH_VOICE_ADAPTER`) is `import()`ed at startup; the module exports `attach(api)` and returns a
-  detach. Nothing is bundled and a failure only logs a warning.
-- **`examples/voice-edge-tts/`** — a working adapter. It prints `[voice 03:11.4] <line>` to stderr
-  for every line that comes due; that log is the point when you are checking *when* text fires.
-- **`test/schema-audit.test.mjs`** — the host filters tool arguments by the declared schema, so a
-  parameter the handler reads but the schema omits is silently dropped. That class of bug produced
-  four PRs in one day. The audit scrapes `args.X` per tool, asserts every name is declared, rejects
-  duplicate keys and keeps `dsh.plugin.json` in step with `package.json`.
-- **One text stream for the chat box.** `chat.jsonl` now carries `line` (scripted), `assistant`
-  (interjection) and `user`; `say: true` marks the speakable ones. `watch_together({ say: "…" })` is how
-  the model gets its interjection in — the plugin cannot read a normal reply. `attachSpeechToChat()`
-  subscribes with `voice: false`, so a display-only consumer can never silence the loop.
-- **`examples/floating-chat/window.py`** — a real floating window, no browser: frameless, always on
-  top, semi-transparent, drag by the header, Esc to close. Standard-library tkinter only.
+- **Seven more public subpaths**, because `dsh-watch-together` needs them to build a segment:
+  `./board`, `./cache`, `./storage`, `./locate`, `./subtitles`, `./ytdlp`, `./python`,
+  `./browser-time`. They were always there as files; now they are a stated contract.
+- **`test/schema-audit.test.mjs` now audits this package only.** The same audit exists in
+  `dsh-watch-together` for `watch_together`, including a check that the entry point never
+  registers a `video_*` tool.
 
-### Changed
+### Kept on purpose
 
-- **Each area owns its contract, handler and registration.** `watch_together`'s schema moved out of
-  the shared `src/tool-spec.js` into `src/watch/tool-spec.js`, its handler out of `src/tools/` into
-  `src/watch/handler.js`, and registration into `src/watch/register.js` — mirrored by
-  `src/storyboard/{tool-spec,register}.js` for the other four. `src/index.js` is now orchestration
-  only (149 → 126 lines) and `src/tool-spec.js` is a facade that re-exports both sides, so the
-  public `./tool-spec` subpath keeps working.
-  Extracting co-watching into its own plugin is now a directory move plus two deleted imports.
-- `pipeline.js` 1502 → 689 lines (`format.js`, `frames.js`, `ocr-subs.js` split out);
-  `fetch.js` 913 → 373 (`ytdlp.js`, `media-store.js`, `direct-url.js`, `url.js`);
-  `watch-run.js` 844 → 534 (`watch-source.js`, `watch-modes.js`, `watch-browser.js`).
-  All pure moves — the storyboard PNG is byte-identical afterwards.
-- **Each tool's `execute` lives in `src/tools/<name>.js`**; `index.js` is registration only. The
-  split is what lets the audit above know which args belong to which tool.
-- `wakeOnLinesEmpty` no longer implies `tts: true` — it wakes whenever the current segment runs out
-  of pre-written lines, which is exactly what a voice consumer cannot report.
-- Starting the loop without a session id is allowed when a speech subscriber is attached.
-- `scripts/check-syntax.mjs` walks subdirectories; `src/tools/` was previously unchecked.
-- Fixed schema gaps found by the audit: `watch_together.loop` (the background loop could not be turned
-  off at all), `video_zoom.ocr` / `scanHeight`, `video_storyboard.adaptive`.
-- `video_zoom` accepts `cellId` alone (`from`/`to` are optional in the schema now);
-  `transcriptFile` / `detail` / `cookies` / `allowAnonymous` / `browserPort` are declared where their
-  handlers already read them.
-- Truncated recordings no longer lose the whole sheet: `extractSharpest` keeps whatever settled and
-  `extractFrameRaw` retries earlier seeks (issue #30).
+- `boardOptions()` still accepts `kind: 'watch'` (5 cells, `minGap: 0.5`, `adaptive: false`) —
+  `dsh-watch-together` calls it for those numbers instead of keeping a second copy.
+  `test/board.test.mjs` pins the values.
+- `cache.js` `PROTECTED_FILES` still protects `watch.json` / `latency.json` / `seen.jsonl` /
+  `cells.json`. Both packages share one cache directory, so pruning from this side must not delete
+  the other side's data.
 
-### Renamed
+### Removed
 
-- **`video_watch` → `watch_together`.** The tool id now matches the name of the plugin it is going
-  to become (`dsh-watch-together`). The other four tools keep their `video_*` ids — only the
-  co-watching tool moved. Callers must update the name; the parameters are unchanged.
-- The co-watching side is documented as **`dsh-watch-together`** (hyphenated, same style as
-  `dsh-video-storyboard`). It still lives in this package until the split is decided.
+- `src/watch/` (27 modules), `src/watch_smtc.py`, `test/layering.test.mjs` (the import rule it
+  enforced is now a package boundary), 22 test files, `examples/`, `scripts/watch-sim.mjs`,
+  `scripts/watch-e2e.mjs`, `docs/WATCH.zh.md`.
+- `scripts/start-edge-debug.cmd` moved to `dsh-watch-together/scripts/` — it exists to read
+  `video.currentTime`, which only co-watching needs.
 
 ## [0.4.5] - 2026-10-30
 

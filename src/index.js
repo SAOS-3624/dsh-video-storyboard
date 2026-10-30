@@ -1,11 +1,13 @@
 /**
- * index.js — DSH 插件入口。**只做注册**：
+ * index.js — DSH 插件入口。**只做注册**，四个工具：
  *
  *   video_storyboard  全片（或一段）的概览宫格
  *   video_zoom        某一段的近距离重看（格少、每格大）
  *   video_probe       只读容器头，不花图片 token
  *   video_locate      纯文本定位：那句话在第几分钟
- *   watch_together       陪看：按真实播放进度一段段往下看
+ *
+ * 陪看（`watch_together`）不在这个包里 —— 它是 **`dsh-watch-together`**，一个单独的插件，
+ * 单向依赖本包。本包不 import 它任何一行，所以这里也不注册它的工具。
  *
  * 每个工具的 execute 在 `src/tools/<name>.js` —— 拆开是有原因的：
  * 宿主管参数走的是 schema，**schema 没声明的参数会被直接丢掉**。
@@ -21,14 +23,8 @@
  *  - saveImage 要的是**真正编码后的字节**（PNG/JPEG），不是裸 RGB —— 它会解码校验
  */
 
-// 两组工具各自的注册入口。**拆陪看插件时只需要删掉 watch 那两行** ——
-// 契约、handler、注册都在 src/watch/ 里，不用去别人家目录捡文件。
+// 四个视频识别工具各自的注册入口：契约、handler、注册都在 src/storyboard/ 里。
 import { storyboardTools } from './storyboard/register.js';
-import { watchTools } from './watch/register.js';
-
-// 声音与聊天框都跟着陪看走（拆走时一并搬）
-import { attachSpeechToChat } from './watch/chat.js';
-import { attachConfiguredVoice } from './watch/voice.js';
 
 export const name = 'dsh-video-storyboard';
 export const inject = ['tools', 'attachments'];
@@ -73,52 +69,12 @@ export async function apply(ctx) {
 async function registerAll(ctx) {
   const defineTool = await loadDefineTool();
 
-  // 当前会话：从 session/event 里拿（`session.header.id`）。这是 dsh-fish 的做法，
-  // 比反射 ctx 安全得多 —— 反射会把整个应用搞崩（见 apply 的注释）。
-  let lastSessionId = null;
+  const tools = storyboardTools(defineTool, ctx);
 
-  // 陪看跨调用复用同一批已建好的段（一部电影几十段，只留最近 8 段）
-  const watchCache = new Map();
-
-  const tools = [
-    ...storyboardTools(defineTool, ctx),
-    ...watchTools(defineTool, ctx, { getSessionId: () => lastSessionId, cache: watchCache }),
-  ];
-
-  // **disposers 必须在最前面声明**：它以前声明在 ctx.on 之后，于是 `disposers.push(off)`
+  // **disposers 必须在最前面声明**：它曾经声明在别的钩子之后，于是 `disposers.push(off)`
   // 撞上 const 的暂时性死区，抛 ReferenceError，又被下面的 catch 静默吞掉 ——
-  // 监听器注册成功了，解绑函数却从来没登记过（插件卸载时不会解绑，而且没人知道出过错）。
+  // 工具注册成功了，解绑函数却从来没登记过（插件卸载时不会解绑，而且没人知道出过错）。
   const disposers = [];
-  if (typeof ctx.on === 'function') {
-    try {
-      const off = ctx.on('session/event', (session) => {
-        const id = session?.header?.id ?? session?.id;
-        if (id) lastSessionId = id;
-      });
-      if (typeof off === 'function') disposers.push(off);
-    } catch (e) {
-      // 拿不到就退化成"只能手动触发"，但要说出来 —— 静默失败是这类 bug 的温床
-      try {
-        ctx?.logger?.warn?.(`[dsh-video-storyboard] session/event hook failed: ${e?.message ?? e}`);
-      } catch { /* 日志都没有就只能算了 */ }
-    }
-  }
-
-  // 声音适配器（可选）。核心**不内置任何引擎**：只按 `~/.dsh/voice.json` 里写的那个路径
-  // 去 dynamic import，挂不上就算了 —— 声音是加分项，装坏了不能让插件起不来。
-  try {
-    const v = await attachConfiguredVoice({ log: (m) => ctx?.logger?.info?.(m) });
-    if (!v.ok && v.reason !== 'not-configured') {
-      ctx?.logger?.warn?.(`[dsh-video-storyboard] voice adapter not loaded: ${v.reason}`);
-    }
-  } catch (e) {
-    ctx?.logger?.warn?.(`[dsh-video-storyboard] voice adapter crashed: ${e?.message ?? e}`);
-  }
-
-  // 到点的台词写进**统一文本流**（聊天框 / 悬浮窗读同一份，声音也从这里取）。
-  // 订阅时带 `voice: false` —— 只做展示，不该让循环以为"有人会念"而不再叫醒模型。
-  disposers.push(attachSpeechToChat());
-
   disposers.push(...tools.map((tool) => ctx.tools.register(tool)));
   return () => {
     for (const dispose of disposers.reverse()) dispose?.();

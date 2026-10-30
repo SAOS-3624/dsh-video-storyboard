@@ -1,7 +1,8 @@
 /**
  * storyboard/register.js — 视频识别那四个工具的注册入口（storyboard / zoom / probe / locate）。
  *
- * 和 `watch/register.js` 对称：schema 在 `./tool-spec.js`，handler 在 `../tools/`，注册在这里。
+ * 四件套都在这一个目录里：schema 在 `./tool-spec.js`，handler 在 `../tools/`，注册在这里。
+ * 陪看（`watch_together`）曾经和这里对称，现在是另一个包 `dsh-watch-together`。
  *
  * 为什么 handler 没跟着搬进 `storyboard/`：那四个 handler 加起来 154 行，且都被
  * `test/schema-audit.test.mjs` 按 `src/tools/*.js` 扫；搬家的收益只是好看，

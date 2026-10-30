@@ -19,7 +19,7 @@
 
 模型得到的是"这 90 秒里发生了什么、大概在第几秒"，需要细节时再用 `video_zoom` 放大某一段。
 
-## 五个工具
+## 四个工具
 
 | 工具 | 干什么 | 何时用 |
 |---|---|---|
@@ -27,7 +27,8 @@
 | `video_storyboard` | 出宫格图 + 文本清单 | 主体功能 |
 | `video_zoom` | 只看某一段（更小的时间窗、更密的格） | 清单看完觉得某段重要，再放大 |
 | `video_locate` | **纯文本**：一句话 → 时间码 | 知道说了什么、不知道在第几分钟 |
-| `watch_together` | 陪看：按你的真实播放进度一段段往下看（见下文） | 用户说"陪我看" |
+
+> 陪看（`watch_together`）是另一个插件 **`dsh-watch-together`**，见下文「陪看：另一个包」。
 
 ## 安装
 
@@ -178,308 +179,27 @@ video_storyboard({ input: "D:/video/xxx.mp4" })
 
 > 完整步骤（含格式示例、验证顺序、故障对照）见 **[docs/SETUP.zh.md §3](docs/SETUP.zh.md)**。
 
-## 一起看电影 · `dsh-watch-together`（`watch_together`）
+## 陪看：另一个包，不在本包
 
-> 这一块将来会单独成一个插件，名字定的是 **`dsh-watch-together`**（小写）。
-> 现在还在同一个包里，代码已经按 `src/watch/` 分好层了 —— 见下面的「代码结构」。
-
-> **想让它准到毫秒、并且自动认出你在看什么？** 先配一次调试端口，见 [docs/WATCH.zh.md](docs/WATCH.zh.md)。
-
-按你的**播放进度**一段段把片看下去，而不是一次性出一张全片分镜。
-
-```js
-watch_together({ input: "D:/Movie/xxx.mp4" })   // 每 20 秒左右调一次
-```
-
-### 它怎么工作
-
-```
-用户看到 05:12  →  插件算下一段（05:12–07:12）   ← 这 8 秒用户还在看，等得起
-用户看到 07:00  →  这一段早算好了，直接把图递出来  ← 感知延迟 0
-```
-
-**AI 先看完，卡着用户的进度说话。** 计算发生在用户在看的当口，所以感觉像一起看。
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `ramp` | `[60,120,180,240]` | **变速启动**：开头短、逐段加长，第一次说话不用等 5 分钟 |
-| `segment` | 300 秒 | 稳定后的批次长度（阶梯走完后固定在这一档） |
-| `depth` | 2 | 保留几个批次（当前 + 下一个）。前面的用完，后面的顶上，同时算再下一个 |
-| `lead` | 15 秒 | **段末前多少秒交付**。不是段末——两格交界处插话最突兀 |
-| `cells` | 5 | 每段一张图 |
-| `cursor` | 自动 | 用户看到第几秒；不给就从系统读 |
-
-### 进度从哪来（不需要装播放器插件）
-
-读 Windows 的**系统媒体控件**（SMTC）。任何接了它的播放器都行：
-
-- **本地文件**：VLC / PotPlayer / 电影和电视
-- **网页**：Edge / Chrome 播 B 站
-
-实测输出：
-
-```
-MSEdge | playing | pos=5.9s | dur=68.0s | 鲸鱼陪看：让 DSH 里的她看得见你的屏幕
-```
-
-读不到时它会**明说读不到**并要你自报（`cursor: 750` 或 `"12:30"`），**不会猜**——
-猜错一次，后面每一段都是错的。
-
-#### 想要毫秒级准？开浏览器的调试端口
-
-SMTC 的刷新是稀疏的。浏览器里那个 `<video>.currentTime` 才是**真值**，只要求浏览器带调试端口启动：
+`watch_together`（"陪我看视频"）**不在这个插件里**，它是独立发布的
+**[`dsh-watch-together`](https://github.com/SAOS-3624/dsh-watch-together)**，版本从 `0.1.0` 起。
 
 ```bash
-# 用一个独立 profile，这样不会影响你正在开的 Edge
-"C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" ^
-  --remote-debugging-port=9333 --user-data-dir="%USERPROFILE%/.dsh/edge-watch"
+npm i dsh-watch-together        # 会连带装上本包（陪看建立在视频识别之上）
 ```
 
-然后告诉插件端口 —— 三种写法任选（**桌面版读不到 `setx` 的环境变量，所以推荐写文件**）：
-
-```jsonc
-// ~/.dsh/video.json
-{ "browserPort": 9333 }
-```
-
-```bash
-DSH_BROWSER_DEBUG_PORT=9333      # 或者环境变量
-```
-```js
-watch_together({ browserPort: 9333 })   // 或者单次传参
-```
-
-> 端口别用 9222：那是 Chrome DevTools 的惯例端口，**WorkBuddy 自己就占着**（实测读到的会是它的界面）。
-
-开了之后：**位置毫秒级准**（实测 `pos=8.374`），而且**当前页面地址就是源**：
-B 站页面直接拿到 BV 链接；`file:///D:/x.mp4` 直接还原成本地路径。**不用搜索、不用下载、不用问用户。**
-
-##### 本地视频：用浏览器打开就行
-
-把本地文件拖进那个开了调试端口的 Edge，插件会拿到：
-
-```
-source: browser-file → 记忆管理局 概念PV.mp4
-watch 00:28 (browser, playing)
-```
-
-**位置准、路径直接有**——比 SMTC 靠播放器上报可靠得多。
-
-> 为什么不默认开：这台机器上 **WorkBuddy 自己就占着 9222**，页面里还有个 5 秒的 `<video>`。
-> 盲读会读到宿主的界面元素。所以默认关、显式开，并且会跳过 `app.asar` / devtools 这类页面。
-
-#### 为什么进度会"读不到"（重要）
-
-Edge 播网页视频时，Windows 媒体控件的 `Position` **只在事件发生时刷新**：起播、暂停、拖动、切集。
-连续播放期间它可能几分钟不动（实测两次刷新隔过 143 秒、216 秒）。
-
-所以插件区分三种可信度：
-
-| 可信度 | 判断依据 | 行为 |
+| | 本包 | `dsh-watch-together` |
 |---|---|---|
-| `fresh` | 10 秒内刷新过 | 直接信 |
-| `extrapolated` | 刷新旧了但在播 | 按墙钟往前推，**说话前要多越过 15 秒**才开口 |
-| `unknown` | 超过 45 秒没刷新 | **不推、不说**，明确要你给 `cursor` |
+| 工具 | `video_storyboard` / `video_zoom` / `video_probe` / `video_locate` | `watch_together` |
+| 干什么 | 一次性出一张可引用的宫格 | 跟着播放进度一段一段看下去 |
+| 依赖 | **不依赖陪看**，一个 import 都没有 | 单向依赖本包 |
 
-位置刷新下来的那个值本身是准的（真机对表 3 次，误差都 ≤1 秒）——
-**错的是"刷新时刻到此刻"这一段**，所以不能把冻结值当实时值。
+本包**不 import 陪看的任何一行**，所以只要视频识别就装本包，不必带上陪看。
 
-`watch_together({ statusOnly: true })` 可以随时看钟的状态：读到第几秒、可不可信、为什么没说话。
-
-需要一台装了 `winrt` 的 Python：
-
-```bash
-pip install winrt-runtime winrt-Windows.Media.Control winrt-Windows.Foundation
-```
-
-插件按这个顺序找解释器：`DSH_PYTHON` 环境变量 → `~/.dsh/asr.json` 里 `manage.start` 用的那个
-（你为 ASR 配的 venv 很可能也装在这里）→ PATH 上的 `python` / `python3`。
-找到后会真的 `import` 一次验证，验证不过就当作没有，**不会因为路径对就当成能用**。
-
-### 变速启动：先短后长
-
-```
-1 分钟 → 2 分钟 → 3 分钟 → 4 分钟 → 5 分钟 → 5 分钟 → …
- └─ 45 秒就说第一句           └─ 之后稳定，不再加长
-```
-
-固定 5 分钟一档意味着**第一次开口要等将近 5 分钟**。刚点开视频时最需要的是"它已经跟上了"，
-所以开头几批短一些，代价只是那几分钟多跑几次分镜。
-
-```js
-watch_together({ ramp: [30, 60, 120] })   // 更激进的起步
-watch_together({ ramp: [] })              // 全程等长，不要阶梯
-```
-
-### 双缓冲：永远留一个批次在后面
-
-```
-批次 1 正在看  ┃  批次 2 已建好  ┃  （空闲时开始建批次 3）
-批次 1 用完    →  批次 2 顶上，同时开始建批次 3
-```
-
-建一个批次要 2–10 秒，而看一个批次要 `segment` 秒，所以**总有时间在空闲里把它建完**。
-实测 4 次交付全部 **0.0 秒**（命中预取），批次之间无缝。
-
-### 双缓冲：永远留一个批次在后面
-
-```
-批次 1 正在看  ┃  批次 2 已建好  ┃  （空闲时开始建批次 3）
-批次 1 用完    →  批次 2 顶上，同时开始建批次 3
-```
-
-建一个批次要 2–10 秒，而看一个批次要 `segment` 秒，所以**总有时间在空闲里把它建完**。
-实测 4 次交付全部 **0.0 秒**（命中预取），批次之间无缝。
-
-### 代码结构：两个库层 + 一个入口层
-
-```
-src/
-  storyboard/   视频识别策略 —— 取流、扫描、转写、出图、清单
-    tool-spec.js   四个工具的 schema ＋ 兜底校验
-    register.js    四个工具的注册入口
-  watch/        陪看 dsh-watch-together —— 位置、节奏、台词、聊天、声音接口
-    tool-spec.js   watch_together 的 schema ＋ 兜底校验
-    handler.js     watch_together 的 execute
-    register.js    watch_together 的注册入口
-  tools/        四个视频识别 handler ＋ shared（陪看的 handler 在 watch/ 里）
-  index.js      只做编排：拿 defineTool → 调两个 register → 挂声音和聊天框
-  tool-spec.js  **门面**：把两边再导出成一份（`./tool-spec` 是公开子路径，不能断）
-```
-
-**每个领域自带"契约 + handler + 注册"三件套**，所以把陪看拆成独立插件就是
-**搬 `src/watch/` 这一个目录 + 删 `index.js` 里的两行 import**，不用去别人家目录里捡文件。
-
-**依赖是单向的**：`watch/` 可以 import `storyboard/`，反过来不行。
-`test/layering.test.mjs` 五个用例把这条钉住 —— 只要 `storyboard/` 里出现一个 `watch/` 的 import，
-构建就红。
-
-几条容易看错的分界：
-
-几条容易看错的分界：
-
-| 模块 | 在哪 | 为什么 |
-|---|---|---|
-| `browser-time.js` | storyboard | 它给 `subtitles.js` 从浏览器取 cookies（登录态字幕要用），所以没法算陪看专属 |
-| `resolve-playing.js` | watch | "系统媒体控件在放什么"只有陪看需要 |
-| `voice.js` | watch | 声音接口跟着陪看走；核心不 import 任何引擎 |
-| `cells.js` / `locate.js` | storyboard | cell 映射和台词定位是分镜自己的记忆 |
-
-### 接声音（核心不发声，声音你自己接）
-
-插件**不带任何 TTS 引擎**，也不读 `~/.dsh/tts.json`。它只做两件事：
-
-1. 在**正确的播放时刻**把台词交出去；
-2. 每次结果里带上 `speech` 事件，`at` 是这句话在时间轴上的位置。
-
-念不念、用什么念、念多快，全由你（或宿主）决定。
-
-#### 事件长什么样
-
-`watch_together` 交付一段时，返回值里有：
-
-```json
-"speech": [
-  { "at": 191, "text": "钓上来了，池子里那条比他想的配合。", "state": "scheduled", "segment": 180 }
-]
-```
-
-后台循环里某句到点时，会把同一条推给你，`state` 变成 `"due"`。
-
-#### 同进程：订阅
-
-```js
-import { onSpeech } from 'dsh-video-storyboard/src/watch/voice.js';
-
-const off = onSpeech(async ({ state, text }) => {
-  if (state !== 'due') return;      // scheduled 只是清单，不是"现在念"
-  await mySpeak(text);              // ← 你自己的引擎
-});
-```
-
-**有人订阅时**：到点的台词直接交给订阅者，循环**不会**再叫醒模型（省 token，也避免同一句被说两遍）。
-**没人订阅时**：台词照旧走"叫醒模型、模型自己说"那条路 —— 功能完整，只是安静。
-
-> 只做展示的订阅者要传 `{ voice: false }`（聊天框就是这么干的）：否则循环会以为"有人会念"，
-> 从此不再叫醒模型 —— 陪看会**默默地**变成哑巴。
-
-#### 现成适配器：`examples/voice-edge-tts`
-
-仓库里带了一个可以直接用的适配器：edge-tts 合成 → `ffplay` 播放 → 失败退回系统声音。
-每一句都会在 **stderr 打一行时间码**：
-
-```
-[voice 03:11.4] 钓上来了，池子里那条比他想的配合。
-```
-
-调试时最想知道的就是"它到底是第几秒吐出来这句话"，这行比音频本身还有用。
-
-启用只要一个文件：
-
-```json
-// ~/.dsh/voice.json
-{ "adapter": "D:/deepseek/3-Life/dsh-video-storyboard/examples/voice-edge-tts/index.mjs" }
-```
-
-或者环境变量 `DSH_VOICE_ADAPTER=<同样的路径>`。插件启动时 `import()` 它，挂不上只写一行 warn，
-**不会**影响插件启动。
-
-#### 最小适配器（一分钟）
-
-```js
-// my-voice.mjs
-import { execFile } from 'node:child_process';
-
-export function attach({ onSpeech }) {
-  return onSpeech(({ state, text }) => {
-    if (state === 'due') execFile('say', [text], () => {});   // macOS；换成你自己的引擎
-  });
-}
-```
-
-`attach(api)` 收到 `{ onSpeech, speechSubscribers, emitSpeech, lastSpeech }`，返回一个退订函数即可。
-
-> 想让"这一段的词念完了"提醒你补写？开 `wakeOnLinesEmpty: true`。
-
-### 聊天框 / 悬浮窗：一条统一的文本流
-
-插话那句和剧本台词**走同一条流**，一起显示在聊天框里，也一起被念出来：
-
-| role | 是什么 | 会念 |
-|---|---|---|
-| `line` | 剧本台词（到点由循环写进来） | 是 |
-| `assistant` | 模型插话时说的那句 | 是 |
-| `user` | 你自己打的字 | 否 |
-
-它们都落在 `chat.jsonl`（`%LOCALAPPDATA%\dsh-video-storyboard\cache\`）。
-
-**模型自己说的话怎么进到框里？** 靠 `say`：
-
-```js
-watch_together({ say: "你看这条，鱼比人还紧张。" })
-```
-
-插件读不到模型的正常回复，所以插话时想让用户**看见并听见**，就得把这句话交给 `say`。
-
-#### 悬浮窗（不用浏览器）
-
-`examples/floating-chat/window.py` 是个**真·独立悬浮窗**：无边框、置顶、半透明、
-按住顶部拖动、回车发送、Esc 关闭。用标准库 tkinter，不装任何第三方包。
-
-```bash
-pythonw examples/floating-chat/window.py     # 无控制台
-```
-
-> **一定要用带 tkinter 的 Python**：Windows 商店版自带；python.org 官方安装包勾上 tcl/tk 也有。
-
-它和浏览器那个框看的是同一个文件，两个一起开着也不打架。浏览器画中画（"↑ 悬浮"）仍然保留：
-标签页已经开着时它最省事，而这个原生窗口不需要浏览器。
-
-### 它不是全片概览
-
-- 一次只看一段，看完再下一段
-- 想细看某一格 → `video_zoom({ cellId: 3 })`
-- 每段 5 格 ≈ 1,000–1,300 token；90 分钟片约 4.5–6 万 token（是一次性概览的 4–6 倍，换的是"有时间顺序"）
+> `boardOptions()` 仍然保留 `kind: 'watch'` 这一档默认值（每段 5 格、`minGap: 0.5`）——
+> `dsh-watch-together` 就是调它来拿这些数字的，那边不再抄一遍。
+> 同理 `cache.js` 的 `PROTECTED_FILES` 仍然护着 `watch.json` / `latency.json`，
+> 因为两个包共用一个缓存目录，本包裁剪缓存时不能把陪看的数据删掉。
 
 ## 字幕与 ASR（怎么让它"听懂"）
 
@@ -718,7 +438,6 @@ video_storyboard({ input: "materials.mp4", hotwords: "位错 滑移 柏氏矢量
 
 | 文档 | 内容 |
 |---|---|
-| [docs/WATCH.zh.md](docs/WATCH.zh.md) | **陪看配置**：开调试端口、端口/配置怎么填、三个坑、性能开销 |
 | [docs/INSTALL.zh.md](docs/INSTALL.zh.md) | 从零安装：依赖、自检、排错表 |
 | [docs/USAGE.zh.md](docs/USAGE.zh.md) | 完整手册：三条安装路径、六个工作流、每个参数 |
 | [docs/HISTORY.zh.md](docs/HISTORY.zh.md) | 从 v0.1 到现在，按"被什么打脸"组织 |
@@ -734,61 +453,6 @@ video_storyboard({ input: "materials.mp4", hotwords: "位错 滑移 柏氏矢量
 <img src="docs/assets/wechat-reward.png" alt="微信赞赏码" width="220">
 
 > 仓库右上角的 **Sponsor** 按钮也指向这里（`.github/FUNDING.yml`）。
-
-## 开发者：不用 DSH 也能验证陪看逻辑
-
-"到点该不该说话"是纯逻辑问题，不需要重启宿主、不需要真看片：
-
-```bash
-npm run sim                 # 跑 5 个场景，打印时间线
-SIM_VERBOSE=1 npm run sim   # 连每次判定的原因一起打印
-npm run sim -- paused       # 只跑某一个
-```
-
-```
-【每 150 秒刷新（Edge 真实）】
-  说话 2 次：01:50, 03:50
-  求助 0 次
-  结束状态：not-due
-```
-
-把三样东西换成假的就行：**时钟**（虚拟时间）、**SMTC**（只在刷新点更新快照，
-中间返回冻结值——这正是 Edge 的真实行为）、**会话推送**（记录消息而不真发）。
-`src/watch-loop.js` 的依赖都可注入，所以同一份判定逻辑既能在 DSH 里跑，也能在测试里跑。
-
-### 整条链路也能自己跑（真解码、真转写）
-
-```bash
-npm run e2e -- --input "D:/Movie/xx.mp4" --from 600 --minutes 3 --speed 2 --segment 60 --lead 10
-```
-
-假的只有两样：**播放头**（按倍速推进）和**叫醒之后的事**（这里扮演 agent，收到叫醒就真的去出图）。
-真的部分：解码 → 切点 → 分镜 → 转写 → 清单 → PNG。
-
-```
-[e2e] 10:52 叫醒 → [一起看] 10:00–11:00 这一段该说话了…
-[e2e] 11:13 出图完成（10.3s）
-       cell 1 (r1c1) = 10:00.00-10:07.50 frame@10:07.25
-[e2e] 11:52 叫醒 → 出图完成（7.0s）
-[e2e] 12:52 叫醒 → 出图完成（7.4s）
-```
-
-### 整条链路也能自己跑（真解码、真转写）
-
-```bash
-npm run e2e -- --input "D:/Movie/xx.mp4" --from 600 --minutes 3 --speed 2 --segment 60 --lead 10
-```
-
-假的只有两样：**播放头**（按倍速推进）和**叫醒之后的事**（这里扮演 agent，收到叫醒就真的去出图）。
-真的部分：解码 → 切点 → 分镜 → 转写 → 清单 → PNG。
-
-```
-[e2e] 10:52 叫醒 → [一起看] 10:00–11:00 这一段该说话了…
-[e2e] 11:13 出图完成（10.3s）
-       cell 1 (r1c1) = 10:00.00-10:07.50 frame@10:07.25
-[e2e] 11:52 叫醒 → 出图完成（7.0s）
-[e2e] 12:52 叫醒 → 出图完成（7.4s）
-```
 
 ## 许可
 

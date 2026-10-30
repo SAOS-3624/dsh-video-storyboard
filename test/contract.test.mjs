@@ -15,8 +15,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-  locateToolSpec, probeToolSpec, storyboardToolSpec, validateToolArgs, validateWatchArgs,
-  validateZoomArgs, watchToolSpec, zoomToolSpec,
+  locateToolSpec, probeToolSpec, storyboardToolSpec, validateToolArgs,
+  validateZoomArgs, zoomToolSpec,
 } from '../src/tool-spec.js';
 
 const HOST_TOOLS = join(homedir(), '.dsh/profiles/node_modules/@deepseek-ai/dsh-tools/lib/index.js');
@@ -113,32 +113,6 @@ test('contract: video_zoom 的 schema 同样过宿主 defineTool', async (t) => 
   // 宿主 schema 没有数值上限，cells:20 会被放行 —— 这正是本地校验必须存在的理由
   assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a', from: 1, to: 2, cells: 20 }), []);
   assert.ok(validateZoomArgs({ input: 'a', from: 1, to: 2, cells: 20 }).length > 0, '本地必须挡住');
-});
-
-test('contract: watch_together schema 暴露文档里写了的 browserPort / loop / say', async (t) => {
-  if (!host) return t.skip('host @deepseek-ai/dsh-tools not found');
-  const spec = watchToolSpec();
-  const tool = host.defineTool({ ...spec, execute: async () => ({ images: [], text: '' }) });
-  assert.equal(tool.name, 'watch_together');
-  assert.equal(spec.parameters.browserPort.type, 'integer');
-  assert.deepEqual(host.validateArgs(spec.parameters, { browserPort: 9333, statusOnly: true }), []);
-  assert.deepEqual(validateWatchArgs({ browserPort: 9333, statusOnly: true }), []);
-  assert.ok(validateWatchArgs({ browserPort: 0 }).length > 0);
-  assert.ok(validateWatchArgs({ browserPort: 1.5 }).length > 0);
-  assert.ok(validateWatchArgs({ browserPort: 65536 }).length > 0);
-  // loop:false 是"别起后台循环"的开关。它以前不在 schema 里，于是永远关不掉。
-  assert.equal(spec.parameters.loop.type, 'boolean');
-  assert.deepEqual(host.validateArgs(spec.parameters, { loop: false }), []);
-  assert.deepEqual(validateWatchArgs({ loop: false }), []);
-  assert.ok(validateWatchArgs({ loop: 'no' }).length > 0);
-  // say：模型插话那句写进统一文本流（插件读不到正常回复）
-  assert.equal(spec.parameters.say.type, 'string');
-  assert.deepEqual(host.validateArgs(spec.parameters, { say: '这句' }), []);
-  assert.ok(validateWatchArgs({ say: '  ' }).length > 0);
-  // 语音参数已经从核心移除
-  for (const gone of ['tts', 'voice', 'rate', 'listVoices', 'speakAloud', 'text']) {
-    assert.equal(spec.parameters[gone], undefined, `${gone} 应该已从 watch_together 移除`);
-  }
 });
 
 test('contract: video_locate 暴露 cookies / allowAnonymous', async (t) => {

@@ -177,10 +177,10 @@ test('插件接线: apply() 注册一个叫 video_storyboard 的工具', async (
   try {
     const disposer = await apply(ctx);
     assert.deepEqual(registered.map((t) => t.name).sort(),
-      ['video_locate', 'video_probe', 'video_storyboard', 'video_zoom', 'watch_together']);
+      ['video_locate', 'video_probe', 'video_storyboard', 'video_zoom']);
     assert.equal(typeof disposer, 'function', 'apply 必须返回 disposer');
     disposer();
-    assert.equal(disposed, 5, '五个工具都应被释放');
+    assert.equal(disposed, 4, '四个工具都应被释放');
     // 真跑一次 execute，确保交给附件的是真 PNG（这一条能抓住线上那个 malformed 事故）
     const dir2 = await mkdtemp(join(tmpdir(), 'dsh-exec-'));
     t.after(() => rm(dir2, { recursive: true, force: true }));
