@@ -81,18 +81,28 @@ test('measureGroup: 布局与 bestLayout 一致（不自己另算一套）', () 
   }
 });
 
-test('子帧下限按内容分流：音乐驱动 160×90，其余 200×112', async () => {
+test('子帧下限按内容分流：音乐驱动 110×56，其余 200×112', async () => {
   const { subFloorFor } = await import('../src/storyboard/measure.js');
-  assert.deepEqual(subFloorFor(true), { minSubW: 160, minSubH: 90 });
+  assert.deepEqual(subFloorFor(true), { minSubW: 110, minSubH: 56 });
   assert.deepEqual(subFloorFor(false), { minSubW: 200, minSubH: 112 });
 
-  // 3×3 的格子（331×184）：音乐驱动下摊 2×2 得 165×92 能过线，普通素材摊不动
-  const ranges = rangesOf(9, 10);
-  const cuts = Array.from({ length: 90 }, (_, i) => ({ t: i, score: 50 }));
-  const plain = measureGroup(ranges, { aspect: 16 / 9, cuts, musicDriven: false });
-  const music = measureGroup(ranges, { aspect: 16 / 9, cuts, musicDriven: true });
-  assert.equal(plain.frameCount, 9, '普通素材 3×3 不该摊');
-  assert.ok(music.frameCount > plain.frameCount, '音乐驱动应当摊开');
+  // 3×3（350×194）：音乐驱动下能摊 3×3 得 116×64。
+  // 160×90 时这一档摊不动 —— 正式 PV 第 1 格（24 秒、7 个切点）因此只拿到 4 帧，
+  // 用户的原话是"1 和 2 之间漏了特别多"。
+  const r9 = rangesOf(9, 10);
+  const cuts9 = Array.from({ length: 90 }, (_, i) => ({ t: i, score: 50 }));
+  const plain9 = measureGroup(r9, { aspect: 16 / 9, cuts: cuts9, musicDriven: false });
+  const music9 = measureGroup(r9, { aspect: 16 / 9, cuts: cuts9, musicDriven: true });
+  assert.equal(plain9.frameCount, 9, '普通素材 3×3 不该摊');
+  assert.ok(music9.cells.filter((c) => c.k === 3).length >= 6, '3×3 在音乐驱动下应能摊 3×3');
+
+  // 4×4（261×145）：160×90 过不了的一档（摊 2×2 得 130×72 < 160×90），110×56 必须放过去
+  const r16 = rangesOf(16, 8);
+  const cuts16 = Array.from({ length: 128 }, (_, i) => ({ t: i, score: 50 }));
+  const plain16 = measureGroup(r16, { aspect: 16 / 9, cuts: cuts16, musicDriven: false });
+  const music16 = measureGroup(r16, { aspect: 16 / 9, cuts: cuts16, musicDriven: true });
+  assert.equal(plain16.frameCount, 16, '普通素材 4×4 不该摊');
+  assert.ok(music16.cells.every((c) => c.k === 2), '4×4 在音乐驱动下每格都应摊 2×2');
 });
 
 test('allocateIntegerBudget: 总和精确、每份不低于下限', async () => {

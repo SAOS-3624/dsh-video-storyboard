@@ -49,13 +49,35 @@ export const PICK_MODES = ['sharp', 'mid', 'thumb'];// 只有两种：时间码�
 export const BURN_MODES = ['index', 'none'];
 
 /**
- * 一张图最多摊出多少子帧（k²−1 的预算）。
+ * 一张图最少摊出多少子帧（k²−1 的预算）。
  *
- * 原来设 32，实测概念 PV 上 41 个镜头只覆盖到 33 个（10 个镜头没出现在图上）；
- * 提到 48 就能全覆盖，代价约多 16 帧 × 并发 3 路 ≈ 0.3~0.5 秒。
- * 现在这个数是"测量"的输入 —— 切张和渲染都按它算，所以它同时决定张数。
+ * 原来是固定 48。问题是它跟"这一张里有几个镜头"无关：
+ * 90 秒 51 刀的 PV 分 9 格，每格约 6 个镜头，全摊 3×3 要 **72** 个额外帧；
+ * 48 只够 6 格，剩下 3 格被降档 —— 实测第 1 格（24 秒、8 个镜头）只拿到 4 帧，
+ * 用户的原话是"1 和 2 之间漏了特别多"。
+ *
+ * 现在按每张实际的镜头数算（见 subBudgetFor），48 只是下限。
  */
 export const SUB_BUDGET = 48;
+/** 上限：再多就是拿时间换覆盖，收益递减（240 帧 ≈ 240 次 ffmpeg）。 */
+export const SUB_BUDGET_MAX = 240;
+
+/**
+ * 这一张图该给多少子帧预算。
+ *
+ * 每格想要 k²−1 个额外帧，k = ceil(sqrt(格内镜头数))。
+ * 这里只用总镜头数 ÷ 格数估一下，宁可多给 —— 多给的代价是几次 ffmpeg，
+ * 少给的代价是**画面直接不出现**。
+ *
+ * @param {{cuts?:number, cells?:number}} o cuts 含真切点与积分采样点
+ */
+export function subBudgetFor({ cuts = 0, cells = 1 } = {}) {
+  const n = Math.max(1, Math.round(Number(cuts) || 0));
+  const c = Math.max(1, Math.round(Number(cells) || 1));
+  const perCell = n / c;
+  const k = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(perCell + 1))));
+  return Math.min(SUB_BUDGET_MAX, Math.max(SUB_BUDGET, Math.round(c * (k * k - 1))));
+}
 
 /**
  * @param {object} opts
@@ -677,6 +699,10 @@ export async function runStoryboard(opts) {
   // 一格不摊是 1 帧、摊 3×3 是 9 帧，格数一样但信息量差 9 倍，
   // 所以只能按"这一格贡献多少帧"来切，不能按格数均分。
   // 切的是格点边界（= 切点），上一张末尾切点就是下一张起点，天然衔接不断裂。
+  // 每张图的子帧预算按"这一张有多少个镜头"算，不用固定 48（见 subBudgetFor）。
+  // 真切点和积分采样点都算镜头边界 —— 摊开时它们一视同仁。
+  const shotsTotal = cuts.length + sampleMarks.length;
+  const budgetFor = (n) => subBudgetFor({ cuts: shotsTotal, cells: n });
   const splitSheets = (ranges) => {
     if (Number(opts.sheets) > 0) {
       // 调用方显式指定了张数（测试、批量脚本）就尊重它，仍按格数均分
@@ -690,9 +716,14 @@ export async function runStoryboard(opts) {
     // 见 measure.js 顶部的说明。
     const measured = measureGroup(ranges, {
       aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
-      subBudget: SUB_BUDGET, cuts, sampleMarks, stats: scan.stats ?? [],
+      subBudget: budgetFor(Math.min(16, ranges.length)), cuts, sampleMarks, stats: scan.stats ?? [],
     });
-    return planSheetsByFrames(measured.cells, { frameBudget: 64, maxCellsPerSheet: 16 });
+    // frameBudget 卡的是**渲染时间**，不是 token：一张图 9 格摊满 3×3 是 81 帧，
+    // 而 token 还是 384（图像按张算）。原来设 64，于是"9 格全摊开"被判定成要 2 张 ——
+    // 补满逻辑再把 2 张压成 12 格 1 张，格子从 331×184 缩到 286×159，
+    // 反而摊不动 3×3（95×53 < 110），最该细看的那档全丢了。
+    // 96 让常见的 9 格 / 12 格满摊都留在同一张里。
+    return planSheetsByFrames(measured.cells, { frameBudget: 96, maxCellsPerSheet: 16 });
   };
   let groups = splitSheets(cellRanges);
   // ---- 每张图也要**补满布局容量**
@@ -738,7 +769,7 @@ export async function runStoryboard(opts) {
   planInfo.trace = trace;
   planInfo.frames = groups.reduce((n, g) => n + measureGroup(g, {
     aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
-    subBudget: SUB_BUDGET, cuts, sampleMarks, stats: scan.stats ?? [],
+    subBudget: budgetFor(g.length), cuts, sampleMarks, stats: scan.stats ?? [],
   }).frameCount, 0);
 
   // textOnly：只重算"格 → 时间段 → 台词"，一帧都不解、一张图都不拼。
@@ -796,7 +827,7 @@ export async function runStoryboard(opts) {
     // 两次答案不同，`planSheetsByFrames()` 就按错的帧数切张（见 measure.js）。
     const measured = measureGroup(group, {
       aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
-      subBudget: SUB_BUDGET, cuts, sampleMarks, stats: scan.stats ?? [],
+      subBudget: budgetFor(group.length), cuts, sampleMarks, stats: scan.stats ?? [],
     });
     // cellBudget 也要用 measure 那个：composeSheet 与 layoutCanvas 必须是同一个预算，
     // 差 10% 会让取帧尺寸和拼图尺寸不一致（图会变成斜条纹）。
