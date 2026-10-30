@@ -620,20 +620,6 @@ export function watchToolSpec() {
           + 'speaks. Set this to be woken once when the current segment runs out of pre-written '
           + 'lines, so you can look at the picture and write the next batch.',
       },
-      attachOnly: {
-        type: 'boolean',
-        description: 'OPTIONAL. When true the plugin NEVER starts a browser of its own: if no '
-          + 'playback position can be read, it returns an error instead of launching one. Use this '
-          + 'when the user watches in their own browser and does not want another instance opened. '
-          + 'It also skips navigating or opening tabs.',
-      },
-      wakeOnLinesEmpty: {
-        type: 'boolean',
-        description: 'OPTIONAL, off by default. With tts: true the loop stays silent after speaking '
-          + '(that is what saves tokens), but then a finished line means silence until the user '
-          + 'speaks. Set this to be woken once when the current segment runs out of pre-written '
-          + 'lines, so you can look at the picture and write the next batch.',
-      },
       refillBelow: {
         type: 'number',
         description: 'OPTIONAL and off by default (0). If you set it, the loop wakes you when fewer than N '
