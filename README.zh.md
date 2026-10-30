@@ -34,7 +34,7 @@
 `input` 不再只认本地路径，B 站链接（以及任何 yt-dlp 支持的站点）直接传：
 
 ```js
-video_storyboard({ input: "https://www.bilibili.com/video/BV1fq4y1u7nC" })
+video_storyboard({ input: "https://example.com/some-video" })   // 任意 yt-dlp 支持的站点
 ```
 
 取流不是"下完再分析"，而是**两级**：扫描用一份 360P 全片（5 分钟约 7 MB），`video_zoom`

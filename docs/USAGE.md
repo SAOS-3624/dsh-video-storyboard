@@ -133,7 +133,7 @@ Returns duration / resolution / fps / rotation / audio / subtitles **and two rea
 | `burn` | `index` | `none` turns the burned cell number off. Timecodes are never burned in — they live in the text at 0.01 s |
 | `minGap` | 1.2 | drop to 0.4 so half-second shots get their own cell |
 | `transcript` | `auto` | `off` for pure visual analysis |
-| `transcriptFile` | — | SRT / JSON `[{start,end,text}]` / Bilibili subtitle JSON; skips subtitle extraction and ASR |
+| `transcriptFile` | — | SRT / JSON `[{start,end,text}]` / `{body:[{from,to,content}]}` (subtitle JSON in the `{body:[{from,to,content}]}` shape); skips subtitle extraction and ASR |
 | `sourceHash` | `false` | also write the source SHA-256 into the manifest (reads the whole file) |
 | `detail` | `med` | `low` 60 / `med` 120 / `high` 400 chars, cut on sentence boundaries |
 | `cellRange` | — | `[14, 42]` renders only that slice of the index |

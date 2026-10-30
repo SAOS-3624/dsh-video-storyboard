@@ -6,6 +6,14 @@
 >
 > 已收录于 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin)。
 
+> **协议变更（v0.5.0）**：本项目由 MIT 变更为 **Apache-2.0**。变更的目的是更好地保护代码版权
+> （要求保留署名），同时依旧允许大家自由使用、修改，甚至商用。此前基于 MIT 发布的版本仍是 MIT，
+> 已经产生的衍生版本不受影响。感谢所有使用者和开发者。
+>
+> **边界**：本项目不托管、不分发任何视频内容，缓存只在本地且会自动淘汰；不提供付费内容访问、
+> DRM 绕过、区域限制绕过或批量抓取能力。**能不能下载某个链接取决于你有没有相应授权**，
+> 请自行确认并遵守目标站点的条款与当地法律。完整说明见 [NOTICE](NOTICE)。
+
 ---
 
 ## 它解决什么问题
@@ -59,10 +67,14 @@ node scripts/install-dev.mjs        # 装插件，然后重启 DSH
 ### 贴一个链接
 
 ```
-https://www.bilibili.com/video/BV1xx411c7mD
+https://example.com/some-video
 ```
 
+**任何 yt-dlp 支持的站点**都行（YouTube、Vimeo、各种自建站……完整列表见 yt-dlp 文档）。
 插件会自己下载、缓存，然后用本地文件的那套流程跑。竖屏、DASH、多分P 都处理了。
+
+> ⚠️ **能不能下，取决于你**：请自行确认对目标内容有下载/使用授权，并遵守该站点的条款与
+> 当地法律。本项目不提供任何绕过付费、会员、DRM 或区域限制的能力，也不代为判断授权。
 
 ### 本地文件
 
@@ -143,24 +155,24 @@ cell 3 (r1c3) = 00:33.29-00:47.08  cuts 10  16 frames (4×4)
 |---|---|
 | 提示 `HTTP Error 567` | ✅ 这是 B 站风控，多半是"该视频要登录" |
 | `Sign in to confirm` / 需要登录 | ✅ |
-| 想要 1080P 以上的清晰度 | ✅（B 站高清要登录态） |
+| 想要 1080P 以上的清晰度 | ✅（很多站点的高清要登录态） |
 | 普通视频、360p、匿名 | ❌ 不需要 |
 
 ### 三步导出（Chrome / Edge）
 
 1. 装扩展 **Cookie-Editor**（作者 cgagnier）
-2. 打开 bilibili.com 并登录 → 点扩展 → **Export** → 选 **Netscape** 格式 → 存成 `bili-cookies.txt`
+2. 在目标站点登录 → 点扩展 → **Export** → 选 **Netscape** 格式 → 存成 `cookies.txt`
 3. 告诉插件它在哪：
 
 ```json
 // ~/.dsh/video.json
-{ "cookies": "D:/cookies/bili-cookies.txt" }
+{ "cookies": "D:/cookies/cookies.txt" }
 ```
 
 或者每次调用时传：
 
 ```js
-video_storyboard({ input: "https://www.bilibili.com/video/BV...", cookies: "D:/cookies/bili-cookies.txt" })
+video_storyboard({ input: "https://example.com/some-video", cookies: "D:/cookies/cookies.txt" })
 ```
 
 也可以设环境变量 `DSH_VIDEO_COOKIES`（桌面版读不到 `setx` 的变量，优先用配置文件）。

@@ -6,6 +6,16 @@
 
 **The effect, in numbers.** A 5-minute clip becomes **one image** — 9–16 frames for **384 tokens**, where a frame-per-image tool spends 3,072–6,144 for the same coverage. A 90-second PV scans in 9 s and returns 12 cells whose shot boundaries match 41 detected cuts. Second call on the same file: 3.6 s (cached). No model weights, no image library, no font config.
 
+> **License change (v0.5.0).** MIT → **Apache-2.0**. The reason is to protect the code's attribution
+> (the license requires keeping the copyright notice) while still allowing free use, modification and
+> commercial use. Releases published under MIT stay MIT; derivative works already in existence are
+> unaffected. Thanks to everyone using and building on this.
+>
+> **Scope.** This project does not host or distribute any video content; caches are local and evicted
+> automatically. It provides no paid-content access, no DRM or region-lock circumvention, and no bulk
+> scraping. **Whether a given link can be downloaded is your call** — make sure you are allowed to, and
+> follow the site's terms and your local law. Full text in [NOTICE](NOTICE).
+
 > Community project. Not affiliated with DeepSeek.
 >
 > **中文说明：[README.zh.md](./README.zh.md)** — 创新点、实现原理、实测基线、路线图。
@@ -26,10 +36,12 @@ as documentation only — see [NOTICE](./NOTICE).*
 
 ## Links work now
 
-`input` accepts an http(s) link as well as a local path — Bilibili, or anything yt-dlp supports:
+`input` accepts an http(s) link as well as a local path — **any site yt-dlp supports**
+(see the yt-dlp docs for the list). You are responsible for confirming you are allowed to
+download the content and for following that site's terms:
 
 ```js
-video_storyboard({ input: "https://www.bilibili.com/video/BV1fq4y1u7nC" })
+video_storyboard({ input: "https://example.com/some-video" })
 ```
 
 Fetching is **two-tier**, not "download then analyse": scanning reads a 360p copy of the whole file

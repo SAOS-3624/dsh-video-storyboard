@@ -190,13 +190,13 @@ video_storyboard({ input, cells: 9, textOnly: true, cellRange: [4, 6], detail: '
 
 ```js
 // ① 先探长度和"能拿到多高"，不下载（约 2.4 s）
-video_probe({ input: "https://www.bilibili.com/video/BV1xx" })
+video_probe({ input: "https://example.com/some-video" })
 
 // ② 出总览；首次会下一份 360P（5 分钟约 7 MB），之后命中缓存
-video_storyboard({ input: "https://www.bilibili.com/video/BV1xx", cells: 9 })
+video_storyboard({ input: "https://example.com/some-video", cells: 9 })
 
 // ③ 某一段看不清 → 回到原始流取 1080P，不落盘
-video_zoom({ input: "https://www.bilibili.com/video/BV1xx", from: 42, to: 58 })
+video_zoom({ input: "https://example.com/some-video", from: 42, to: 58 })
 ```
 
 **如果站点本来就有字幕，别让它再跑一遍 ASR**：把字幕存成 SRT 或 JSON，用 `transcriptFile` 传进去。

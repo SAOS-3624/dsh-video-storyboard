@@ -56,9 +56,9 @@ export function storyboardToolSpec() {
       input: {
         type: 'string',
         required: true,
-        description: 'Local absolute path (mp4/mov/mkv/webm...), or an http(s) link such as a Bilibili ' +
-          'video URL. Links are downloaded once at low resolution for scanning; video_zoom re-reads ' +
-          'the original stream at high resolution.',
+        description: 'Local absolute path (mp4/mov/mkv/webm...), or any http(s) link that yt-dlp can ' +
+          'resolve — you are responsible for having the right to download it. Links are fetched once ' +
+          'at low resolution for scanning; video_zoom re-reads the original stream at high resolution.',
       },
       from: {
         type: 'number',

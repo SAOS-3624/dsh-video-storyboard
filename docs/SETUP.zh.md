@@ -83,17 +83,16 @@ Chromium 127+ 启用了 **App-Bound Encryption**，`SESSDATA` 这类关键 cooki
 ### 步骤
 
 1. 浏览器装扩展 **Cookie-Editor**（作者 cgagnier，Chrome / Edge 商店都有）
-2. 打开并登录 `bilibili.com`
+2. 打开并登录 `example.com`
 3. 点扩展图标 → 右下角 **Export** → 选 **Netscape**
-4. 保存为 `bili-cookies.txt`
+4. 保存为 `cookies.txt`
 
 拿到的应该是一个 **Netscape HTTP Cookie File**，长这样：
 
 ```
 # Netscape HTTP Cookie File
-.bilibili.com	TRUE	/	FALSE	1799999999	SESSDATA	<value>
-.bilibili.com	TRUE	/	FALSE	1799999999	bili_jct	<value>
-.bilibili.com	TRUE	/	FALSE	1799999999	DedeUserID	<value>
+.example.com	TRUE	/	FALSE	1799999999	<session-cookie-name>	<value>
+.example.com	TRUE	/	FALSE	1799999999	<second-cookie>	<value>
 ```
 
 ⚠️ **这个文件等同于你的登录凭证**，不要提交进任何仓库。放进 `.secrets/` 或任何被 `.gitignore` 覆盖的位置。
@@ -102,10 +101,10 @@ Chromium 127+ 启用了 **App-Bound Encryption**，`SESSDATA` 这类关键 cooki
 
 ```bash
 # 方式一：环境变量（推荐）
-setx DSH_VIDEO_COOKIES "D:\deepseek\3-Life\.secrets\bili-cookies.txt"
+setx DSH_VIDEO_COOKIES "D:\deepseek\3-Life\.secrets\cookies.txt"
 
 # 方式二：每次调用显式传
-video_storyboard({ input: "...", cookies: "D:/.../bili-cookies.txt" })
+video_storyboard({ input: "...", cookies: "D:/.../cookies.txt" })
 ```
 
 > 桌面版 DSH 读不到 `setx` 设的用户环境变量时，改走 `~/.dsh/asr.json` 同款文件配置思路——这一点和 ASR 的已知问题一致。
@@ -120,7 +119,7 @@ video_storyboard({ input: "...", cookies: "D:/.../bili-cookies.txt" })
 ```json
 // ~/.dsh/video.json
 {
-  "cookies": "D:/path/to/bili-cookies.txt",
+  "cookies": "D:/path/to/cookies.txt",
   "scanHeight": 360,
   "zoomHeight": 1080
 }
@@ -158,14 +157,14 @@ video_storyboard({ input: "...", cookies: "D:/.../bili-cookies.txt" })
 yt-dlp --version
 
 # ② 能不能解析出格式列表（这一步不需要下载、不需要 cookie）
-yt-dlp -F "https://www.bilibili.com/video/BV1BK411Q7ys"
+yt-dlp -F "<a URL you are allowed to download>"
 
 # ③ 能不能拿到直链（解析开销约 2.6s）
-yt-dlp -g -f "bv*[height<=360]/b" "https://www.bilibili.com/video/BV1BK411Q7ys"
+yt-dlp -g -f "bv*[height<=360]/b" "<same URL>"
 
 # ④ 真下载一条 360P（约 3 MB / 3s）
 yt-dlp -f "bv*[height<=360]+ba/b[height<=360]" -o "test.%(ext)s" \
-  "https://www.bilibili.com/video/BV1BK411Q7ys"
+  "<same URL>"
 
 # ⑤ 带 cookie 拿 1080P（验证登录态真的生效）
 yt-dlp --cookies "$DSH_VIDEO_COOKIES" -F "同上"   # 看列表里有没有 1920x1080
@@ -181,17 +180,9 @@ B 站的 yt-dlp extractor 给的是 **DASH 分轨**（video only + audio only）
 -f "bv*[height<=360]"            # ✅ 只要视频轨（zoom 用，省一半带宽）
 ```
 
-实测匿名可见的档位（`BV1BK411Q7ys`，300 秒）：
-
-| 档位 | 视频码率 | 体积 | 需登录 |
-|---|---|---|---|
-| 640×360 | 90–122k | 3.1–4.3 MB | 否 |
-| 852×480 | 109–220k | 3.9–7.9 MB | 否 |
-| 1280×720 | 176–441k | 6.3–15.8 MB | 否 |
-| 1920×1080 | 336–789k | 12–28 MB | 否 |
-| 1080P **高码率** | — | — | **需大会员** |
-
-> 匿名拿不到的是"1080P 高码率"，普通 1080P 匿名可得。但**不同视频权限不同**，实测出现过直接失败的情况——所以默认策略仍然要求登录，避免"以为拿到高清、实际是 360P"。
+> **每个站点、每个视频的可下载档位差别很大**，取决于站点、视频本身和你的登录状态。
+> 所以配了 cookie 文件时默认走 cookie：这能消除"以为拿到高清、实际是 360P"的失败模式。
+> 拿不准就先 `yt-dlp -F` 看一眼，别信标题里的分辨率。
 
 ---
 

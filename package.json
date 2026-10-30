@@ -22,7 +22,7 @@
     "url": "git+https://github.com/SAOS-3624/dsh-video-storyboard.git"
   },
   "author": "SAOS-3624",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./src/index.js",
   "exports": {

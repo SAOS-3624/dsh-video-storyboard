@@ -149,7 +149,7 @@ node scripts/install-dev.mjs
 node bin/storyboard.mjs 你的视频.mp4 --cells 9 --out test.png
 
 # 或者贴一个链接（需要第 2 步的 yt-dlp）
-node bin/storyboard.mjs "https://www.bilibili.com/video/BV1xx411c7mD" --cells 9 --out test.png
+node bin/storyboard.mjs "https://example.com/some-video" --cells 9 --out test.png
 ```
 
 成功的标志是最后几行长这样：

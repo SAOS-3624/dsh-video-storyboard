@@ -163,11 +163,14 @@ export async function fetchMedia(input, opts = {}) {
 
   let downloaded = await run(tool, dlArgs, { timeoutMs: 600_000 });
 
-  // B 站风控（567）/ 限流（412）：带浏览器头 + Referer 再试一次。
-  // 不去猜它的风控算法，只给它一眼看得出是"浏览器在看网页"的请求。
-  if (downloaded.code !== 0 && /HTTP Error (?:567|412)/i.test(downloaded.stderr ?? '')) {
+  // 风控 / 限流（412 / 429 / 567）：带一个**正常的浏览器请求**再试一次 ——
+  // 用浏览器 UA，Referer 指向**这个 URL 自己的源站**（防盗链检查的就是"是不是从本站点的页面点进来的"）。
+  // 不去猜任何站点的风控算法，也不换代理、不轮换账号：就是一次普通重试，失败就如实报出来。
+  if (downloaded.code !== 0 && /HTTP Error (?:412|429|567)/i.test(downloaded.stderr ?? '')) {
+    let referer = null;
+    try { const u = new URL(url); referer = `${u.protocol}//${u.host}/`; } catch { /* 不是 http(s)，跳过 */ }
     const retryArgs = dlArgs.slice(0, -1).concat([
-      '--add-header', 'Referer:https://www.bilibili.com/',
+      ...(referer ? ['--add-header', `Referer:${referer}`] : []),
       '--user-agent',
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
         'Chrome/124.0.0.0 Safari/537.36',

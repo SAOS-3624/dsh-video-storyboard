@@ -1,4 +1,4 @@
-# Setup · Reading Bilibili and web links
+# Setup · Reading web links
 
 > For two audiences: local users who want the URL mode, and anyone cloning this from GitHub.
 > If you only ever pass local files (`video_storyboard({ input: "D:/a.mp4" })`), you can skip this document entirely.
@@ -82,17 +82,16 @@ So `yt-dlp --cookies-from-browser chrome/edge` fails with `Failed to decrypt wit
 ### Steps
 
 1. Install the **Cookie-Editor** extension (by cgagnier; available for Chrome and Edge)
-2. Open and sign in to `bilibili.com`
+2. Open and sign in to `example.com`
 3. Click the extension → **Export** (bottom right) → choose **Netscape**
-4. Save as `bili-cookies.txt`
+4. Save as `cookies.txt`
 
 You should get a **Netscape HTTP Cookie File** that looks like this:
 
 ```
 # Netscape HTTP Cookie File
-.bilibili.com	TRUE	/	FALSE	1799999999	SESSDATA	<value>
-.bilibili.com	TRUE	/	FALSE	1799999999	bili_jct	<value>
-.bilibili.com	TRUE	/	FALSE	1799999999	DedeUserID	<value>
+.example.com	TRUE	/	FALSE	1799999999	<session-cookie-name>	<value>
+.example.com	TRUE	/	FALSE	1799999999	<second-cookie>	<value>
 ```
 
 ⚠️ **This file is equivalent to your session credentials.** Never commit it. Keep it under `.secrets/` or anywhere covered by `.gitignore`.
@@ -101,10 +100,10 @@ You should get a **Netscape HTTP Cookie File** that looks like this:
 
 ```bash
 # Option A: environment variable (recommended)
-setx DSH_VIDEO_COOKIES "D:\path\to\bili-cookies.txt"
+setx DSH_VIDEO_COOKIES "D:\path\to\cookies.txt"
 
 # Option B: pass it per call
-video_storyboard({ input: "...", cookies: "D:/path/to/bili-cookies.txt" })
+video_storyboard({ input: "...", cookies: "D:/path/to/cookies.txt" })
 ```
 
 ### Config file — on Desktop, use this instead of setx
@@ -118,7 +117,7 @@ So configure through a file:
 ```json
 // ~/.dsh/video.json
 {
-  "cookies": "D:/path/to/bili-cookies.txt",
+  "cookies": "D:/path/to/cookies.txt",
   "scanHeight": 360,
   "zoomHeight": 1080
 }
@@ -157,14 +156,14 @@ Work through these in order — when something breaks you will know exactly whic
 yt-dlp --version
 
 # 2. Can it list formats? (no download, no cookies needed)
-yt-dlp -F "https://www.bilibili.com/video/BV1BK411Q7ys"
+yt-dlp -F "<a URL you are allowed to download>"
 
 # 3. Can it resolve a direct URL? (~2.6 s)
-yt-dlp -g -f "bv*[height<=360]/b" "https://www.bilibili.com/video/BV1BK411Q7ys"
+yt-dlp -g -f "bv*[height<=360]/b" "<same URL>"
 
 # 4. Real download, 360p (~3 MB / 3 s)
 yt-dlp -f "bv*[height<=360]+ba/b[height<=360]" -o "test.%(ext)s" \
-  "https://www.bilibili.com/video/BV1BK411Q7ys"
+  "<same URL>"
 
 # 5. With cookies, check 1080p is visible (proves the login actually took)
 yt-dlp --cookies "$DSH_VIDEO_COOKIES" -F "same URL"
@@ -172,7 +171,7 @@ yt-dlp --cookies "$DSH_VIDEO_COOKIES" -F "same URL"
 
 ### The format selector must use DASH syntax
 
-Bilibili's yt-dlp extractor returns **DASH tracks** (video-only + audio-only), not a single progressive mp4. So:
+**Many sites** hand back **DASH tracks** (video-only + audio-only) rather than one progressive mp4. When that happens:
 
 ```bash
 -f "b[height<=360]"              # ❌ Requested format is not available
@@ -180,17 +179,10 @@ Bilibili's yt-dlp extractor returns **DASH tracks** (video-only + audio-only), n
 -f "bv*[height<=360]"            # ✅ video only (for zoom — halves the bytes)
 ```
 
-Measured anonymous availability (`BV1BK411Q7ys`, 300 s):
-
-| Ladder | Video bitrate | Size | Login required |
-|---|---|---|---|
-| 640×360 | 90–122k | 3.1–4.3 MB | no |
-| 852×480 | 109–220k | 3.9–7.9 MB | no |
-| 1280×720 | 176–441k | 6.3–15.8 MB | no |
-| 1920×1080 | 336–789k | 12–28 MB | no |
-| 1080P **high bitrate** | — | — | **premium account** |
-
-> What anonymous access cannot reach is the "1080P high bitrate" tier; plain 1080p is available. But **per-video permissions vary** — we observed outright failures on some videos. That is why the default policy still requires login: it removes the "thought I got 1080p, actually got 360p" failure mode.
+> **Per-site and per-video permissions vary a lot.** Which ladder you can actually reach depends on the
+> site, the video, and whether you are signed in. That is why the default policy still prefers a
+> cookie file when one is configured: it removes the "thought I got 1080p, actually got 360p"
+> failure mode. Verify with `yt-dlp -F` before trusting a resolution.
 
 ---
 
@@ -202,7 +194,7 @@ Measured anonymous availability (`BV1BK411Q7ys`, 300 s):
 | `Requested format is not available` | Used progressive `b[height<=N]` syntax | Use `bv*[height<=N]+ba` |
 | `Failed to decrypt with DPAPI` | Tried to read browser cookies (v20 encryption) | Export cookies.txt per §3 |
 | `Sign in to confirm` / login required | Cookie expired or not passed | Re-export; check `DSH_VIDEO_COOKIES` |
-| `HTTP Error 412` | Bilibili risk control (rate, missing UA) | Slow down; make sure a UA is sent |
+| `HTTP Error 412` | Site risk control (rate limiting, missing UA) | Slow down; make sure a UA is sent |
 | Download stuck at 0% | Network or CDN node | Retry; check proxy needs |
 | Portrait video squashed | Rotation metadata not normalised | Fixed in 0.2.x — file a bug |
 | Media dir keeps filling | Normal rolling within the 300 MB cap | Raise `DSH_VIDEO_MEDIA_MAX_MB` or clear it |
