@@ -15,7 +15,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-  probeToolSpec, storyboardToolSpec, validateToolArgs, validateZoomArgs, zoomToolSpec,
+  probeToolSpec, storyboardToolSpec, validateToolArgs, validateWatchArgs, validateZoomArgs,
+  watchToolSpec, zoomToolSpec,
 } from '../src/tool-spec.js';
 
 const HOST_TOOLS = join(homedir(), '.dsh/profiles/node_modules/@deepseek-ai/dsh-tools/lib/index.js');
@@ -105,6 +106,19 @@ test('contract: video_probe 的 schema 同样过宿主 defineTool', async (t) =>
   const blocks = spec.output.render({ input: 'a' }, { text: 'hi' });
   assert.equal(blocks.length, 1);
   assert.equal(blocks[0].type, 'text');
+});
+
+test('contract: video_watch schema exposes the documented browserPort', async (t) => {
+  if (!host) return t.skip('host @deepseek-ai/dsh-tools not found');
+  const spec = watchToolSpec();
+  const tool = host.defineTool({ ...spec, execute: async () => ({ images: [], text: '' }) });
+  assert.equal(tool.name, 'video_watch');
+  assert.equal(spec.parameters.browserPort.type, 'integer');
+  assert.deepEqual(host.validateArgs(spec.parameters, { browserPort: 9333, statusOnly: true }), []);
+  assert.deepEqual(validateWatchArgs({ browserPort: 9333, statusOnly: true }), []);
+  assert.ok(validateWatchArgs({ browserPort: 0 }).length > 0);
+  assert.ok(validateWatchArgs({ browserPort: 1.5 }).length > 0);
+  assert.ok(validateWatchArgs({ browserPort: 65536 }).length > 0);
 });
 
 test('本地兜底校验：越界参数被自己挡住（schema 子集不支持 min/max）', () => {

@@ -768,6 +768,11 @@ export function watchToolSpec() {
         type: 'string',
         description: 'Video title, used to pick the right media session when several are playing.',
       },
+      browserPort: {
+        type: 'integer',
+        description: 'Per-call CDP debug port for the browser holding the video (e.g. 9333). ' +
+          'Overrides ~/.dsh/video.json and DSH_BROWSER_DEBUG_PORT for this call.',
+      },
       detail: {
         type: 'string',
         enum: ['low', 'med', 'high'],
@@ -831,6 +836,10 @@ export function validateWatchArgs(args) {
   }
   if (args?.detail !== undefined && !['low', 'med', 'high'].includes(args.detail)) {
     problems.push('detail must be one of low|med|high');
+  }
+  if (args?.browserPort !== undefined
+    && (!Number.isInteger(args.browserPort) || args.browserPort < 1 || args.browserPort > 65535)) {
+    problems.push('browserPort must be an integer 1..65535');
   }
   // 台词：at 必须在它所属的段里，否则这句永远不会到点（dueLine 只认 from <= 当前位置 的槽）
   if (Array.isArray(args?.lines)) {
