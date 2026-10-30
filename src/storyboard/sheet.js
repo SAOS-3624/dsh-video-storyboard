@@ -173,7 +173,16 @@ export function composeSheet(opts) {
       drawPadding(buf, width, height, x, y, cellW, cellH);
       continue;
     }
-    blit(buf, width, height, x, y, cellW, cellH, frame.buffer);
+    // 画面比格子小时（黑场格）居中摆放：黑屏里没有内容，占满一整格纯属浪费画布
+    const fw = frame.w ?? cellW;
+    const fh = frame.h ?? cellH;
+    if (fw < cellW || fh < cellH) {
+      const dx = x + Math.round((cellW - fw) / 2);
+      const dy = y + Math.round((cellH - fh) / 2);
+      blit(buf, width, height, dx, dy, fw, fh, frame.buffer, fw);
+    } else {
+      blit(buf, width, height, x, y, cellW, cellH, frame.buffer);
+    }
     if (burn !== 'none') drawBadge(buf, width, height, x + 2, y + 2, cellW, cellH, frame.index, badgeRatio);
   }
   return { buffer: buf, width, height, cellW, cellH };
@@ -205,13 +214,19 @@ export function tileSubFrames(tiles, k, cellW, cellH) {
 }
 
 /** 把一格 rawvideo（尺寸必须等于 cellW×cellH）贴到画布上 */
-export function blit(dst, dstW, dstH, x, y, cellW, cellH, src) {
-  const need = cellW * cellH * 3;
+/**
+ * 把一张 RGB 图贴到目标缓冲区的 (x,y)，占 cellW×cellH。
+ *
+ * `srcW` 是**源图自己的行宽**。黑场格会取一张只占半格的小图（buffer 宽度就是 cellW/2），
+ * 靠它才能按小图的行宽正确拷贝 —— 否则每行都会错位成斜的。
+ */
+export function blit(dst, dstW, dstH, x, y, cellW, cellH, src, srcW = cellW) {
+  const need = srcW * cellH * 3;
   if (src.length < need) throw new RangeError(`frame buffer too small: ${src.length} < ${need}`);
   for (let row = 0; row < cellH; row++) {
     const dy = y + row;
     if (dy < 0 || dy >= dstH) continue;
-    const sStart = row * cellW * 3;
+    const sStart = row * srcW * 3;
     const dStart = (dy * dstW + x) * 3;
     src.copy(dst, dStart, sStart, sStart + cellW * 3);
   }

@@ -275,3 +275,271 @@ export function planCellRanges({
   }
   return ranges;
 }
+
+/**
+ * 按**镜头数**均分时间段，而不是按时间或密度积分。
+ *
+ * 为什么比"密度积分等分"更对：
+ *   密度积分保证每格承载相同的"变化量"，但慢镜头的变化量低，
+ *   于是一段 3 分钟的慢戏可能只分到 1 格 —— 里面全是"几乎一样的画面"，
+ *   而一段 20 秒的快剪分到 2 格。观众想看的恰恰是慢戏里的细节。
+ *
+ * 按镜头数均分则是：**每格装同样多的镜头**。
+ *   慢段：10 个镜头要 50 秒 → 这一段就占 50 秒
+ *   快段：10 个镜头只要 5 秒 → 这一段就占 5 秒
+ * 段长天然与镜头密度成反比，不需要再调参。
+ *
+ * 每段内部再由 chooseSubGrid 决定摊开几张：镜头多的段摊 3×3/4×4，
+ * 镜头少的段（1~2 个）整格一张 —— 慢镜头因此拿到"格内最大"的画面。
+ *
+ * @param {{cuts:number[], duration:number, cells:number}} opts
+ * @returns {Array<{from:number,to:number,dur:number,shots:number}>}
+ */
+export function planByShotCount({ cuts = [], duration, cells } = {}) {
+  if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
+  if (!Number.isInteger(cells) || cells < 1) throw new RangeError(`cells must be a positive integer, got ${cells}`);
+
+  // 镜头边界：[0, ...切点..., duration]
+  const marks = [0, ...cuts.filter((c) => c > 0 && c < duration).sort((a, b) => a - b), duration];
+  const shots = marks.length - 1;
+  if (shots <= cells) {
+    // 镜头比格子还少：一个镜头一格，多出来的格子不硬塞（调用方按实际长度处理）
+    return marks.slice(0, -1).map((from, i) => ({
+      from, to: marks[i + 1], dur: marks[i + 1] - from, shots: 1,
+      density: +(1 / Math.max(0.1, marks[i + 1] - from)).toFixed(2),
+    }));
+  }
+
+  // 每格 targetShots 个镜头；除不尽的把余数摊到前面几格
+  const base = Math.floor(shots / cells);
+  const extra = shots % cells;
+  const out = [];
+  let k = 0;
+  for (let i = 0; i < cells; i++) {
+    const n = base + (i < extra ? 1 : 0);
+    if (n <= 0) continue;
+    const from = marks[k];
+    const to = marks[k + n];
+    out.push({ from, to, dur: to - from, shots: n, density: +(n / Math.max(0.1, to - from)).toFixed(2) });
+    k += n;
+  }
+  return out;
+}
+
+/**
+ * **rodt 函数** —— 每格长度 = 常数 ÷ 该处的切点密度。
+ *
+ * 密度 A（刀/秒）越大 → 每格长度 B 越短，B = K / A。这是最直觉的关系：
+ * 一分钟切 30 刀的地方，一格放 2 秒就够；一分钟才切 1 刀的地方，一格放 60 秒也不算长。
+ *
+ * 和 `planCellRanges` 的区别在这里：
+ *   - `planCellRanges` 把密度夹到 [1, 2.5] 倍（MAX_DENSITY），且算的是**相对全片平均**的倍数。
+ *     结果最密的地方和最疏的地方最多只差 2.5 倍 —— 实测段长 8.5~21.1s，拉不开。
+ *   - 这里用**绝对密度**、不做上限夹取（只兜一个下限防止除零），
+ *     所以快段和慢段能差十几倍，正好对应"快切要细、长镜头要粗"。
+ *
+ * 实现上用"累积密度等分"：∫density·dt 每段相等 → 段长 L = C/density，天然就是 1/A。
+ * 不用逐点算 1/A 再累加（那反而会算成 L ∝ A，方向是反的）。
+ *
+ * @param {{cuts:number[], duration:number, cells:number,
+ *          window?:number, minDensity?:number, snapTo?:number}} opts
+ *   window      算局部密度的观察半径（秒）
+ *   minDensity  密度下限（刀/秒），防止长时间无切点时除零
+ *   snapTo      段长吸附粒度（秒）：数据是离散的，掐到 0.5 秒的整数倍便于对齐
+ * @returns {Array<{from:number,to:number,dur:number,density:number,shots:number}>}
+ */
+export function planByRodt({
+  cuts = [], duration, cells, window = 5, minDensity = 0.02, snapTo = 0.5, maxDensity = 20,
+} = {}) {
+  if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
+  if (!Number.isInteger(cells) || cells < 1) throw new RangeError(`cells must be a positive integer, got ${cells}`);
+
+  const marks = cuts.filter((c) => c > 0 && c < duration).sort((a, b) => a - b);
+  const shots = marks.length + 1;
+  if (shots <= cells) {
+    const bounds = [0, ...marks, duration];
+    return bounds.slice(0, -1).map((from, i) => {
+      const to = bounds[i + 1];
+      return { from, to, dur: to - from, density: +(1 / Math.max(0.1, to - from)).toFixed(2), shots: 1 };
+    });
+  }
+
+  // 1) 累积密度：cum(t) = 从 0 到 t 一共"切了多少刀"
+  //    用累积而不是逐点密度，是为了让等分等价于 ∫density·dt 相等。
+  const cum = (t) => marks.filter((c) => c <= t).length;
+  // 2) 找 cells-1 个内点，让每段的"切点数"尽可能相等
+  //    （切点数相等 = 密度积分相等 → 段长 ∝ 1/密度）
+  const targets = [];
+  for (let j = 1; j < cells; j++) targets.push((marks.length * j) / cells);
+
+  const bounds = [0];
+  for (const tgt of targets) {
+    // 3) 离散化：边界直接落在**切点**上。
+    //    切点本身就是离散的（0.01 秒精度），再吸附到 0.5 秒反而会把边界挪离切点，
+    //    导致一段里跨进半个镜头 —— 那正是"每格装多少镜头"失准的原因。
+    const idx = Math.min(marks.length - 1, Math.max(0, Math.round(tgt)));
+    let t = marks[idx] ?? duration;
+    t = Math.max(t, bounds.at(-1) + (snapTo > 0 ? snapTo : 0.01));
+    t = Math.min(t, duration - snapTo * (cells - bounds.length));
+    if (t > bounds.at(-1)) bounds.push(t);
+  }
+  bounds.push(duration);
+
+  return bounds.slice(0, -1).map((from, i) => {
+    const to = bounds[i + 1];
+    const n = cum(to) - cum(from) + 1;
+    return {
+      from, to, dur: +(to - from).toFixed(2),
+      density: +(n / Math.max(0.1, to - from)).toFixed(2),
+      shots: n,
+    };
+  });
+}
+
+/**
+ * **sheet 的边界直接由切点决定** —— 这是"按密度积分"最直接的写法。
+ *
+ * 思路：沿时间轴走，每累积 `shotsPerWindow` 个切点就划一张图。
+ * 因为密度高的地方攒够 N 个切点用的时间短，密度低的地方用得长，
+ * 所以每张覆盖的时长自动就是 B = K / A（A 是局部切点密度），不用再单独算。
+ *
+ * 边界不落在切点上，而是取**相邻两个切点的加权平均**：
+ * 直接切在切点上会把一个镜头劈成两半（前一张尾巴、后一张开头各半截），
+ * 取中间位置能保证每张都以完整镜头开始和结束。
+ *
+ * @param {{cuts:number[], duration:number, shotsPerWindow?:number}} opts
+ * @returns {Array<{from:number, to:number}>}
+ */
+export function planSheetWindows({ cuts = [], duration, shotsPerWindow = 40 } = {}) {
+  if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
+  const marks = [...cuts].filter((c) => c > 0 && c < duration).sort((a, b) => a - b);
+  if (marks.length < shotsPerWindow) return [{ from: 0, to: duration }];
+
+  const windows = [];
+  let start = 0;
+  for (let i = shotsPerWindow - 1; i < marks.length; i += shotsPerWindow) {
+    const a = marks[i];
+    const b = marks[i + 1] ?? duration;
+    const mid = a + (b - a) * 0.5;      // 加权平均，避开转场正中
+    if (mid <= start || mid >= duration) continue;
+    windows.push({ from: start, to: mid });
+    start = mid;
+  }
+  if (start < duration) windows.push({ from: start, to: duration });
+  return windows;
+}
+
+/**
+ * **按「累计画面帧数」切 sheet** —— 流程的最后一步。
+ *
+ * 为什么不能用"时间"或"格数"来切：
+ *   - 按时间切：快剪段和长镜头段拿到一样长的图，前者塞不下、后者太空
+ *   - 按格数切：一格不摊是 1 帧、摊 3×3 是 9 帧，格数一样但信息量差 9 倍
+ *
+ * 正确做法是先把画面**排好**（rodt 分格 + 每格决定摊几×几），
+ * 再沿时间累加每个格点贡献的帧数（k²），累到预算就切一张。
+ * 因为切的是**格点边界**，而格点边界本来就在切点上，所以两张之间天然衔接、不断裂：
+ * 上一张最后一个切点就是下一张的起点。
+ *
+ * @param {Array<{from:number,to:number,k?:number}>} cells 已排好的格点（时序）
+ * @param {{frameBudget?:number, maxCellsPerSheet?:number}} opts
+ *   frameBudget      一张图累计多少帧就切（建议 64）
+ *   maxCellsPerSheet 单张最多几个大格点（布局上限，默认 16）
+ * @returns {Array<Array>} 每个元素是一张 sheet 的格点数组
+ */
+export function planSheetsByFrames(cells, { frameBudget = 64, maxCellsPerSheet = 16 } = {}) {
+  if (!Array.isArray(cells)) throw new TypeError('cells must be an array');
+  if (cells.length === 0) return [];
+  const framesOf = (c) => Math.max(1, (c.k ?? 1) ** 2);
+  const totalFrames = cells.reduce((n, c) => n + framesOf(c), 0);
+
+  // **先算要几张，再把帧数均摊。**
+  // 旧写法是"装满再切"（贪心），最后一张常常只剩一两格：实测 250 秒素材跑出
+  // 第 1 张 16 格、第 2 张 2 格 → 2 格按 bestLayout 排成 1×2（715×843 的竖长条），
+  // 两个格子各占 707×396，等于两张图只看了两个画面。
+  // 均摊之后每张的帧数接近，张数不变但形状正常。
+  const count = Math.max(
+    1,
+    Math.ceil(totalFrames / Math.max(1, frameBudget)),
+    Math.ceil(cells.length / Math.max(1, maxCellsPerSheet)),
+  );
+  const target = totalFrames / count;
+
+  const sheets = [];
+  let cur = [];
+  let acc = 0;
+  const flush = () => { if (cur.length) { sheets.push(cur); cur = []; acc = 0; } };
+
+  for (let i = 0; i < cells.length; i++) {
+    const frames = framesOf(cells[i]);
+    const left = count - sheets.length;     // 还差几张（含正在装的这张）
+    const rest = cells.length - i;          // 还没装进去的格数（含当前这一格）
+    // 这一格塞进去会明显超过本张的目标，且剩下的格数还够后面每张至少分一格 → 切。
+    // 10% 的余量是给"一格 16 帧、目标是 12"这种整数边界留的，不然会切得太碎。
+    const over = acc + frames > target * 1.1;
+    if (cur.length > 0 && rest >= left && (over || cur.length >= maxCellsPerSheet)) flush();
+    cur.push(cells[i]);
+    acc += frames;
+  }
+  flush();
+  return sheets;
+}
+
+/**
+ * **积分采样点（假切点）** —— 沿时间累加画面变化率，累够阈值就记一个点、然后清零。
+ *
+ * 为什么放在"扫描之后"而不是"取帧的时候"：取帧那一层只知道"这一格要几张"，
+ * 而这里能拿到**全片的逐帧分数**。把触发点当成额外的切点交给下游，
+ * rodt 分格、二重细分、取帧全部原样复用 —— 不需要新的一套采样器。
+ *
+ * 阈值怎么定：`T = 全片平均每秒变化量 × equivSeconds`。
+ * 所以每个采样点代表"约 equivSeconds 秒的平均变化"：
+ *   - 长时间静止的段落永远累积不到 T → 一个点都不加 → 那一格还是一张整帧；
+ *   - 摇镜/推拉/连续动作的地方会连续触发 → 那一段自然被切成几块、多取几张。
+ * **它是唯一真正自由的旋钮**：音频驱动（音乐片信息全在画面上）就是把 equivSeconds 调小。
+ *
+ * 两条必须的排除：
+ *  1. 真切点附近不补点 —— 真切点本身就是边界，再补一个是重复；
+ *  2. 两个点之间至少 minGap 秒 —— 一次爆发里的连续触发会挤成一堆。
+ *
+ * 注意：这些点**只用于"格内怎么取帧"**，不并进 `cuts`。清单里的"切点 N 个"必须是真切点，
+ * 否则模型会以为那些地方有硬切 —— 假切点描述的是"这里变化攒够了"，不是"这里是一刀"。
+ *
+ * @param {{duration:number, series:Array<{t:number,score:number}>, cuts?:number[],
+ *          start?:number, equivSeconds?:number, minGap?:number, skipNearCut?:number}} opts
+ * @returns {number[]} 采样时刻（绝对秒，升序）
+ */
+export function integralMarks({
+  duration, series = [], cuts = [], start = 0,
+  equivSeconds = 6, minGap = 0.8, skipNearCut = 0.35,
+} = {}) {
+  if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
+  const pts = (Array.isArray(series) ? series : [])
+    .filter((s) => Number.isFinite(s?.t) && s.t >= start && s.t < start + duration)
+    .sort((a, b) => a.t - b.t);
+  const real = [...cuts].filter((c) => Number.isFinite(c)).sort((a, b) => a - b);
+  // **真切点附近的分不参与累加**。那一帧的分数是"跨过这一刀"的差值（实测 40~100），
+  // 比一次摇镜高一两个数量级；混进来会把阈值抬到"只有连续动作狂甩才够"，
+  // 于是这批切点密的地方一个采样点都加不出来。真切点本来就自带边界，不需要再补。
+  const clean = pts.filter((s) => !real.some((c) => Math.abs(c - s.t) < skipNearCut));
+  const total = clean.reduce((acc, s) => acc + Math.max(0, Number(s.score) || 0), 0);
+  if (!(total > 0)) return [];
+
+  // 全片平均每秒变化量 × equivSeconds。用全片均值当基准，换素材不用重新调参。
+  const T = (total / duration) * equivSeconds;
+  if (!(T > 0)) return [];
+
+  const out = [];
+  let acc = 0;
+  let last = -Infinity;
+  for (const p of clean) {
+    acc += Math.max(0, Number(p.score) || 0);
+    if (acc < T) continue;
+    acc = 0;                                     // 触发即清零
+    if (p.t - last < minGap) continue;
+    if (real.some((c) => Math.abs(c - p.t) < skipNearCut)) continue;
+    out.push(+p.t.toFixed(3));
+    last = p.t;
+  }
+  return out;
+}

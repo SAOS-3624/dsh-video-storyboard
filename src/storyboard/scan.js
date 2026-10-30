@@ -453,3 +453,34 @@ export function refineCutsByWindow({
   };
 }
 
+
+/**
+ * 找出**黑场区间**（片头黑屏、转场黑场、片尾字幕前的黑）。
+ *
+ * 为什么需要：黑场在分数上几乎为 0（前后都是黑的，没有"变化"），所以永远不会被当成切点。
+ * 结果它就和后面的 logo / 正片挤在同一格里，那一段的代表帧取中点 —— 正好落在黑里，
+ * 整格变成一张纯黑图，片头的内容全丢。
+ *
+ * 实测概念 PV：前 5 秒亮度只有 1（全黑），第一个切点在 5.71 秒（logo 出现），
+ * 而 0–37.6 秒那一格的中点 18.8 秒亮度是 0 —— 整格黑。
+ *
+ * @param {number[]} means 逐帧亮度均值（0–255）
+ * @param {{threshold?:number, minFrames?:number, fps?:number}} opts
+ *   threshold: 低于它算黑（默认 12）
+ *   minFrames: 至少持续这么多帧才算一段黑场（默认 0.4 秒），避免把暗场镜头误判
+ * @returns {Array<{from:number, to:number}>} 黑场区间（秒）
+ */
+export function detectDarkRuns(means, { threshold = 12, minFrames = 10, fps = 25 } = {}) {
+  if (!Array.isArray(means) || means.length === 0) return [];
+  const runs = [];
+  let start = -1;
+  for (let i = 0; i <= means.length; i++) {
+    const dark = i < means.length && means[i] < threshold;
+    if (dark && start < 0) start = i;
+    if (!dark && start >= 0) {
+      if (i - start >= minFrames) runs.push({ from: start / fps, to: i / fps });
+      start = -1;
+    }
+  }
+  return runs;
+}

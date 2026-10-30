@@ -49,6 +49,9 @@ test('e2e: runStoryboard 出一张图 + 完整清单', async (t) => {
   // 时间码单调、首尾相接、落在窗口内
   for (let i = 1; i < sheet.cells.length; i++) {
     assert.equal(sheet.cells[i].t_start, sheet.cells[i - 1].t_end);
+    // 摊开的格（有 sub 字段）**没有 t_frame**：它的画面是 k² 个瞬间，
+    // 不存在"这一格的取帧时刻"。所以只比较两个都有 t_frame 的相邻格。
+    if (sheet.cells[i].t_frame === undefined || sheet.cells[i - 1].t_frame === undefined) continue;
     assert.ok(sheet.cells[i].t_frame > sheet.cells[i - 1].t_frame);
   }
   assert.equal(sheet.cells[0].t_start, 0);
@@ -451,7 +454,7 @@ test('refineCutsByWindow: 分数不够大时不采纳（宁可少报）', async 
 
 test('chooseSubGrid: 按密度决定，不看镜头数', async () => {
   const { chooseSubGrid } = await import('../src/storyboard/pipeline.js');
-  // 15 秒 5 个镜头（0.33/s）是正常叙事节奏，不该摊
+  // 15 秒 5 个镜头（0.33/s）低于 0.4 门槛，不摊
   assert.equal(chooseSubGrid({ shots: 5, dur: 15, cellW: 499, cellH: 278 }), 1);
   // 同样 5 个镜头挤在 3 秒里（1.7/s）就是快闪，该摊
   assert.ok(chooseSubGrid({ shots: 5, dur: 3, cellW: 499, cellH: 278 }) >= 2);

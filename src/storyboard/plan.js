@@ -13,7 +13,7 @@ export const PIXEL_BUDGET = 640_000;
 export const IMAGE_TOKEN_CAP = 384;
 export const MIN_CELL_W = 240;
 export const MIN_CELL_H = 135;
-export const MAX_SHEETS = 4;
+export const MAX_SHEETS = 99;   // 不封顶：片长决定张数（每 5 分钟一张），token 随片长线性增长
 export const DEFAULT_ASPECT = 16 / 9;
 
 /** Content-classification thresholds. Kept in one place so the manifest can report them. */
@@ -82,6 +82,19 @@ export const COVERAGE = {
 };
 
 /**
+ * 音乐驱动判据：**响度高 + 几乎不说话**。
+ * 实测基准：口播片最轻最吵（5.6 字/秒 @ −23 LUFS），音乐片最响最静（0.3 字/秒 @ −14.2 LUFS）。
+ * 两个信号反向，一起看比任何主观判断都准。
+ *
+ * 它**只表示"这片子的信息全在画面上"**，因此只该影响"取帧密不密"（摊开门槛 / 积分触发值），
+ * 不该影响格数 —— 格数走 rodt，由切点密度决定。
+ */
+export function isMusicDriven({ meanLufs, speechRate = 0, thresholds } = {}) {
+  const T = { ...PLAN_THRESHOLDS, ...(thresholds ?? {}) };
+  return Number.isFinite(meanLufs) && meanLufs > T.musicLufs && speechRate < T.musicSpeechRate;
+}
+
+/**
  * 从廉价元数据推导建议：多少格、几张。
  *
  * 依据实测（B站 5 分钟镜头密集素材，1920×1080）：
@@ -89,16 +102,14 @@ export const COVERAGE = {
  *  - 所以格数不该按"时长÷固定值"硬算，而是按"每格看多少秒"反推，且不超过镜头数
  *  - 镜头密集（均镜头 <4s）时每格 15s，否则 40s
  *
- * 每格看多少秒由**画面变化密度**决定（不是由切点数量，因为切点数量已被速率法归一化）：
- *  - motion（分数 p90）≥15 ：快剪，12s/格
- *  - 5 ≤ motion < 15    ：中等，20s/格
- *  - motion < 5         ：静，40s/格
- * 实测：B-roll 类 p90=7.9→16 格（19s/格）；快剪 PV p90=26→9 格；静态单镜头 p90=2.2→4 格。
+ * 每格看多少秒由**画面变化 p90** 连续决定（40 - p90，夹 8~45），不再三档硬切：
+ * 实测 B-roll 类 p90=7.9、快剪 PV p90=26、静态单镜头 p90=2.2 都能落在合理档位。
  *
  * @param {{duration:number, cuts?:number, motion?:number, aspect?:number,
- *          hasSubtitle?:boolean, speechRate?:number}} meta
+ *          hasSubtitle?:boolean, speechRate?:number, meanLufs?:number, thresholds?:object}} meta
  *   motion：scanSummary().p90，拿不到就退回按均镜头长估
  *   speechRate：台词字数/秒（有字幕或 ASR 时才有；没有就传 0）
+ *   meanLufs：整片平均响度，用来判"音乐驱动"（只影响取帧，不影响格数）
  */
 export function suggest(meta) {
   const { duration, cuts = 0, motion, speechRate = 0, hasSubtitle = false, meanLufs } = meta;
@@ -112,39 +123,58 @@ export function suggest(meta) {
     return pick('overview', 4, 1,
       `单镜头 ${(duration / 60).toFixed(1)}min → 视觉切分无用；建议配合台词，或直接用 zoom 看某几秒`);
   }
-  if (duration <= 90) {
+  // "短就 4 格"只对**内容简单**的短片成立。这条规则原来只看时长，于是 90 秒 41 个镜头的
+  // 概念 PV 被一句"4 帧足够概览"打发了 —— 那是这支片子最需要细看的时候。
+  // 现在要求镜头数也少，才认为是"真的能一眼看全"。
+  if (duration <= 90 && shots <= 8) {
     return pick('overview', 4, 1, `${duration.toFixed(0)}s、${shots} 个镜头 → 4 帧足够概览`);
   }
 
+  // 每格多少秒，只看**画面变化 p90**。
+  // 曾经试过再叠加一个"剪辑密度（刀/秒）取更密者"，想让快剪 PV 拿到更多格 ——
+  // 实测反而更差：概念 PV 会被推到 12 格，每格只剩 3~4 个镜头，摊开也覆盖不住，
+  // 一张图只能展示 36 个画面；而 9 格（每格 4~5 镜）配摊开能做到 41/41 全覆盖。
+  // **格数多 ≠ 看到的多**：格数是"把时间切成几段"，摊开才是"每段看几张"。
+  // 每格秒数随画面变化 p90 **连续**下降，不再三档硬切。
+  // 旧的 `motion>=15?12:motion>=5?20:40` 在 13.2 和 17.1 之间划了一刀：
+  // 两支几乎同长的 PV，一个 4 格一个 9 格，纯属跨不跨这条线的运气。
+  // 经验式：p90 每高 1 分，每格少 1 秒，夹在 [8, 45] —— 画面越"忙"，越该细看。
   const perCell = typeof motion === 'number'
-    ? (motion >= 15 ? 12 : motion >= 5 ? 20 : 40)
+    ? Math.max(8, Math.min(45, 40 - motion))
     : (avgShot < 4 ? 15 : 40);
-  // 内容类型分流（实测基准）：口播片最轻最吵（5.6 字/秒 @ −23 LUFS），音乐片最响最静
-  // （0.3 字/秒 @ −14.2 LUFS）。响度与字/秒是反向的，两个一起看比任何主观判断都准。
-  const musicDriven = Number.isFinite(meanLufs)
-    && meanLufs > T.musicLufs
-    && speechRate < T.musicSpeechRate;
+  // 内容类型分流（判据见 isMusicDriven）：只影响取帧密度，不影响下面算出的格数。
+  const musicDriven = isMusicDriven({ meanLufs, speechRate, thresholds: meta.thresholds });
 
-  let cells = Math.round(duration / perCell);
-  cells = Math.min(cells, shots);            // 格数不该超过镜头数
-  if (musicDriven) cells = Math.max(cells, 9);  // 音乐片的信息在画面上，别把格数压太低
-  cells = snapCells(clamp(cells, 4, 16));
-  if (!musicDriven && (hasSubtitle || speechRate > 0)
-    && speechRate > T.speechRateCut) {
-    cells = snapCells(clamp(Math.round(cells * 0.6), 4, 12));   // 台词承担信息，图只做锚点
+  // **总格数直接由「切点总数」决定 —— 这就是对整片密度做积分。**
+  //
+  // 切点总数 = ∫(局部密度)dt，是全片"热闹程度"的精确总量。
+  // 原来用 p90（全片第 90 百分位）当代理指标，它只反映"平时多热闹"，
+  // 快慢混杂的片子会被平均掉：前 5 分钟狂切、后面 30 分钟长镜头，p90 只看到中间值。
+  //
+  // 现在：**每格装 TARGET_SHOTS 个镜头**，格数 = 镜头数 ÷ TARGET_SHOTS。
+  // 每格 12 个镜头 → 摊 3×3 或 4×4 刚好，也不至于一格塞十几个看不清。
+  const TARGET_SHOTS_PER_CELL = 8;
+  const MAX_PER_SHEET = 16;
+  // **宁可挤一挤，也不为几格多开一张图。** 一张图 384 token，
+  // 如果总格数只比单张容量多一点点（≤15%），塞进一张、少看两三格，比多一张划算。
+  const OVERFLOW_TOLERANCE = 0.15;
+  let totalCells = Math.max(4, Math.round(shots / TARGET_SHOTS_PER_CELL));
+  if (!musicDriven && (hasSubtitle || speechRate > 0) && speechRate > T.speechRateCut) {
+    totalCells = Math.max(4, Math.round(totalCells * 0.6));   // 台词承担信息，图只做锚点
   }
-
-  let sheets = 1;
-  if (duration > 1200) sheets = Math.min(MAX_SHEETS, Math.ceil(duration / 300));
-  else if (duration > 600) sheets = 2;
+  const perSheetCap = MAX_PER_SHEET * (1 + OVERFLOW_TOLERANCE);
+  const sheets = Math.min(MAX_SHEETS, Math.max(1, Math.ceil(totalCells / perSheetCap)));
+  // 每张分到的格数：总格数摊到各张，再吸附成能整除的布局
+  let cells = snapCells(clamp(Math.ceil(totalCells / sheets), 4, MAX_PER_SHEET));
 
   const label = cells <= 4 ? 'overview' : cells <= 9 ? 'balanced' : cells <= 12 ? 'detailed' : 'timeline';
+  // 说明里把两个信号都写出来，否则"为什么给这个格数"又变成猜的
   const pace = typeof motion === 'number'
-    ? `画面变化 p90=${motion.toFixed(1)}（${perCell}s/格）`
-    : `均镜头 ${avgShot.toFixed(1)}s（${perCell}s/格）`;
+    ? `画面变化 p90=${motion.toFixed(1)}（${perCell.toFixed(0)}s/格）`
+    : `均镜头 ${avgShot.toFixed(1)}s（${perCell.toFixed(0)}s/格）`;
   return pick(label, cells, sheets,
     `${duration.toFixed(0)}s、${shots} 个镜头、${pace} → ${cells} 格 × ${sheets} 张（≈${Math.round(duration / (cells * sheets))}s/格）` +
-    (musicDriven ? '·音乐驱动，画面承担信息' : ''));
+    (musicDriven ? '·音乐驱动（取帧更密，格数不受影响）' : ''), musicDriven);
 }
 
 /** 吸附到"能整除成好布局"的格数，避免出现大量 padding（8→9 比 8+1 空格好） */
@@ -157,8 +187,17 @@ export function snapCells(n) {
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-function pick(label, cells, sheets, reason) {
-  return { coverage: label, cells, sheets, reason };
+/**
+ * @param {boolean} [musicDriven] 音乐驱动。**必须真的带出去**：
+ *   下游 pipeline 靠 `suggest().musicDriven` 决定"取帧门槛压不压低"。
+ *   这个参数曾经在调用处传了、在这里没接 → 返回值里永远是 undefined，
+ *   于是"音乐片取帧更密"这条规则写了一套却从没生效过。
+ */
+function pick(label, cells, sheets, reason, musicDriven) {
+  return {
+    coverage: label, cells, sheets, reason,
+    ...(musicDriven ? { musicDriven: true } : {}),
+  };
 }
 
 /** 按数量均分（用于"已用 fitSegments 调好段数"的场景，保证每张图正好填满） */

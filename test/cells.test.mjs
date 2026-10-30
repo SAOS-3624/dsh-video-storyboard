@@ -65,5 +65,8 @@ test('suggest: 阈值可覆盖，且覆盖真的改变分类结果', () => {
   // 把 musicLufs 抬到 -10，就不该再判成音乐驱动
   const b = suggest({ ...meta, thresholds: { musicLufs: -10 } });
   assert.notEqual(a.reason, b.reason, '阈值覆盖必须真的影响判定');
-  assert.ok(a.cells >= 9, '音乐片至少 9 格');
+  assert.equal(a.musicDriven, true, '默认阈值下应判成音乐驱动');
+  assert.equal(b.musicDriven, undefined, '抬高阈值后不该再判成音乐驱动');
+  // 判定结果只影响取帧，不该反过来改格数（旧规则会强制 9 格）
+  assert.equal(a.cells, b.cells, '音乐判定不该改格数');
 });

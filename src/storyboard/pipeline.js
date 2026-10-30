@@ -16,13 +16,15 @@ import { cpus } from 'node:os';
 import { probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
 import { resolveInput } from './fetch.js';
 import { loadTranscriptFile } from './transcript-file.js';
-import { refineCutsByWindow, scanShots, spikeCuts, suppressClose } from './scan.js';
+import { detectDarkRuns, refineCutsByWindow, scanShots, spikeCuts, suppressClose } from './scan.js';
 import { tagCuts } from './flash.js';
 import { rememberSegments } from './locate.js';
 import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import { fitSegments, segmentsFromCuts } from './segments.js';
-import { bestLayout, fillLayout, suggest, PLAN_THRESHOLDS } from './plan.js';
-import { densityFromScore, findBursts, planCellRanges } from './density.js';
+import { bestLayout, fillLayout, isMusicDriven, suggest, PLAN_THRESHOLDS } from './plan.js';
+import {
+  densityFromScore, findBursts, integralMarks, planByRodt, planByShotCount, planCellRanges, planSheetsByFrames,
+} from './density.js';
 import { remember } from './memory.js';
 import { analyzeAudio, describeAudio, detectOnsets } from './audio.js';
 import {
@@ -229,7 +231,10 @@ export async function runStoryboard(opts) {
           });
           // 本地 ASR 可能要临时拉起（用完就停）—— 只在 asr.json 配了 manage.start 时才托管
           const asrCfg = resolveAsrConfig();
-          asrLife = await ensureAsr({ baseUrl: asrCfg.baseUrl, config: asrCfg, spawnImpl: spawn })
+          // `spawnImpl` 不要在这里传：这个文件从来没导入过 spawn，
+          // 传 `spawnImpl: spawn` 等于每跑一次就 ReferenceError 一次，被下面的 catch 吞成
+          // "asr-failed · spawn is not defined" —— 转写于是永远是空的。默认值在 asr-lifecycle 里。
+          asrLife = await ensureAsr({ baseUrl: asrCfg.baseUrl, config: asrCfg })
             .catch((e) => { if (process.env.DSH_ASR_DEBUG) console.error('[asr-lifecycle]', e.message); return null; });
           const asr = await withCache(asrCacheKey, () => transcribeLong({
             input, ffmpegPath, start: winStart, end: winStart + winDur,
@@ -308,11 +313,14 @@ export async function runStoryboard(opts) {
       // 而 prints 是 7500 个 Uint8Array —— 序列化后会变成 {"0":12,"1":34,…}，
       // 60 分钟片子直接几十 MB，而且读回来类型也丢了（判据会拿到坏数据）。
       // 它们只在本次调用里给 tagCuts 用，缓存命中时没有就算了（退化成不打标签）。
+      // 但**黑场段要单独存下来**：means 只在扫描那一次存在，不存的话"黑场独占一格"
+      // 只在第一次跑生效，第二次（命中缓存）黑场又并回内容格里 —— 同一支片子两次出图不一样。
       scanMeans = s.means;
       scanPrints = s.prints;
       return {
         cuts: s.cuts, stats: s.stats, frames: s.frames,
         threshold: s.threshold, degraded: s.degraded, summary: s.summary,
+        darkRuns: detectDarkRuns(s.means, { fps: info.fps }),
       };
     }, { enabled: cache });
   if (cache && !scan.cached && !precomputed) await pruneStorage();
@@ -434,6 +442,12 @@ export async function runStoryboard(opts) {
     cells = suggestion.cells;
     sheets = sheets || suggestion.sheets;
   }
+  // 音乐驱动**只影响取帧**，不影响格数（格数走 rodt）。音乐片的信息全在画面上，
+  // 所以把"摊开"的触发门槛压低：同样的段更容易摊、摊得更细。
+  // 用 isMusicDriven 单独判一次，而不是只读 suggestion —— 显式指定 cells 时 suggestion 是空的，
+  // 但"音乐片取帧更密"跟格数从哪来无关。
+  const musicDriven = suggestion?.musicDriven === true
+    || isMusicDriven({ meanLufs: audio?.mean, speechRate, thresholds: planThresholds ?? {} });
   sheets = sheets || 1;
   // ---- 格数**往上补满**
   // 5 格会排成 2×3（容量 6），右下留一个空格。空格和画面占的是同一张画布、同样的 token，
@@ -464,26 +478,110 @@ export async function runStoryboard(opts) {
   // 两条路：自适应按密度分配格位（快切区多给格），否则退回"并段到 k 格"
   mark('transcript');
   const relCuts = cuts.map((c) => c.t - winStart);
+  // **积分采样点（假切点）**：扫描之后立刻算好，交给下面"格内取几帧 / 取在哪"用。
+  // 它不进 `cuts` —— 清单里"切点 N 个"必须还是真切点，否则模型会以为那些地方有硬切。
+  // 阈值就是 equivSeconds（每条采样点代表多少秒的平均变化量），音频驱动只改这一个数：
+  // 音乐片信息全在画面上，所以每 4 秒等效变化就采一个点（默认 6 秒）。
+  const sampleMarks = scan.stats?.length
+    ? integralMarks({
+      duration: winDur,
+      series: scan.stats,
+      cuts: cuts.map((c) => c.t),
+      start: winStart,
+      equivSeconds: musicDriven ? 4 : 6,
+    })
+    : [];
+  planInfo.sampleMarks = sampleMarks.length;
   // 让 video_locate 能直接复用这次的转写，省掉一次 ASR
   if (transcriptInfo?.segments?.length) rememberSegments(input, transcriptInfo.segments);
   let cellRanges;
   if (adaptive && relCuts.length > 0) {
     // 密度来源：用**画面变化率**而不是切点计数（见 densityFromScore 的注释）。
-    // 复用缓存时没有逐帧 stats，退回切点计数，行为和以前一致。
-    const scoreDensity = scan.stats?.length
-      ? densityFromScore({ duration: winDur, scores: scan.stats, offset: winStart, speech })
-      : null;
-    cellRanges = planCellRanges({
-      duration: winDur, cuts: relCuts, cells: cells * sheets, speech, audioEvents, scoreDensity,
-    })
-      .map((r) => ({ from: r.from + winStart, to: r.to + winStart, density: r.density }));
+    // 复用缓存时逐帧 stats 还在（它跟着扫描结果一起存），所以这条不会退化。
+    // **黑场单独成段**：黑屏在分数上几乎是 0（前后都黑，没有"变化"），永远不会被当成切点，
+    // 于是它和后面的 logo/正片挤在同一格里，而那一格取中点数 —— 正好落在黑里，整格纯黑。
+    // 实测概念PV：片头 0–5.7s 全黑（亮度 1），0–37.6s 那一格的中点 18.8s 亮度是 0。
+    // 现在把 ≥2 秒的黑场各切出来独占一格，片头/片尾的黑屏不再吞掉内容。
+    // 黑场段是扫描时算好存进缓存的（见上面 darkRuns），不依赖本次有没有 means。
+    const darkRuns = (Array.isArray(scan.darkRuns) ? scan.darkRuns : [])
+      .filter((r) => r.to - r.from >= 2 && r.from < winDur);
+    let segRanges;
+    if (darkRuns.length > 0) {
+      const parts = [];
+      let cursor = 0;
+      for (const d of darkRuns) {
+        if (d.from > cursor + 0.5) parts.push({ from: cursor, to: d.from, dark: false });
+        parts.push({ from: d.from, to: Math.min(d.to, winDur), dark: true });
+        cursor = Math.min(d.to, winDur);
+      }
+      if (cursor < winDur - 0.5) parts.push({ from: cursor, to: winDur, dark: false });
+
+      // 黑场**额外占格**，不从内容格数里扣 —— 否则 4 段黑场就把 4 格吃光，
+      // 剩下 65 秒的内容挤成一格（实测踩过）。
+      const contentTotal = cells * sheets;
+      const countIn = (p2) => relCuts.filter((c) => c >= p2.from && c < p2.to).length;
+      const allContentCuts = parts.filter((x) => !x.dark).reduce((n, p2) => n + countIn(p2), 0);
+
+      segRanges = [];
+      for (const p2 of parts) {
+        if (p2.dark) {
+          segRanges.push({ from: p2.from, to: p2.to, density: 0, dark: true });
+          continue;
+        }
+        // 内容区按各自占的刀数比例分格，内部仍用 rodt
+        const share = allContentCuts > 0
+          ? Math.max(1, Math.round((contentTotal * countIn(p2)) / allContentCuts))
+          : 1;
+        const rs = planByRodt({
+          duration: p2.to - p2.from,
+          cuts: relCuts.filter((c) => c >= p2.from && c < p2.to).map((c) => c - p2.from),
+          cells: share,
+        });
+        segRanges.push(...rs.map((r) => ({ from: r.from + p2.from, to: r.to + p2.from, density: r.density })));
+      }
+      segRanges.sort((a, b) => a.from - b.from);
+    } else {
+      // **rodt**：每格长度 = 常数 ÷ 该处的切点密度（B = K/A）。
+      // 一分钟切 70 刀的地方一格 5 秒，一分钟才 18 刀的地方一格 24 秒 —— 实测相差 4.6~5.5 倍。
+      // 而且因为用"累积切点等分"实现，每格的镜头数也顺带均匀（6~10 个），不用再单独约束。
+      segRanges = planByRodt({ duration: winDur, cuts: relCuts, cells: cells * sheets });
+    }
+    cellRanges = segRanges
+      .map((r) => ({ from: r.from + winStart, to: r.to + winStart, density: r.density, dark: r.dark === true }));
+    // 黑场是从"内容格数"里抠出来的（每段独占一格），所以总段数会比原计划多。
+    // 布局按 cells 分组，容量不够就会丢格 —— 这里把 cells 抬到实际段数。
+    if (cellRanges.length > cells * sheets) {
+      cells = Math.ceil(cellRanges.length / sheets);
+    }
   } else {
     const segs = segmentsFromCuts(winDur, relCuts, 0.4, winStart);
     cellRanges = fitSegments(segs, cells * sheets, { minGap })
       .map(([a, b]) => ({ from: a, to: b, density: 1 }));
   }
   const groups = [];
-  for (let i = 0; i < sheets; i++) groups.push(cellRanges.slice(i * cells, (i + 1) * cells));
+  // **先排好画面，再按累计帧数切 sheet**（流程的最后一步）。
+  // 一格不摊是 1 帧、摊 3×3 是 9 帧，格数一样但信息量差 9 倍，
+  // 所以只能按"这一格贡献多少帧"来切，不能按格数均分。
+  // 切的是格点边界（= 切点），上一张末尾切点就是下一张起点，天然衔接不断裂。
+  if (!(Number(opts.sheets) > 0)) {
+    // 调用方没指定张数 → 按累计帧数切（自适应）
+    const kEst = cellRanges.map((r) => {
+      const cs = cuts.filter((c) => c.t >= r.from && c.t < r.to);
+      const marks = sampleMarks.filter((t) => t >= r.from && t < r.to);
+      const cutScore = cs.length ? cs.reduce((a, c) => a + (c.score ?? 0), 0) / cs.length : Infinity;
+      return chooseSubGrid({
+        shots: cs.length + 1 + marks.length, cellW: 250, cellH: 140, dur: r.to - r.from, cutScore,
+      });
+    });
+    groups.push(...planSheetsByFrames(
+      cellRanges.map((r, i) => ({ ...r, k: kEst[i] })),
+      { frameBudget: 64, maxCellsPerSheet: 16 },
+    ));
+    sheets = groups.length;
+  } else {
+    // 调用方显式指定了张数（测试、批量脚本）就尊重它，仍按格数均分
+    for (let i = 0; i < sheets; i++) groups.push(cellRanges.slice(i * cells, (i + 1) * cells));
+  }
 
   // textOnly：只重算"格 → 时间段 → 台词"，一帧都不解、一张图都不拼。
   // 用途：总览文本被宿主截断后，按 cellRange 分批把剩下的台词取回来（第二次调用命中缓存，几乎瞬时）。
@@ -545,7 +643,10 @@ export async function runStoryboard(opts) {
     const cellMeta = [];
     // 摊格子要额外取 k²−1 帧（4×4 就是 15 次 ffmpeg）。整张图最多多取 32 帧，
     // 否则一支全是快闪的片子会变成"每格取 16 张"，渲染时间翻十几倍。
-    const subBudget = 32;
+    // 摊格子要额外取 k²−1 帧（4×4 就是 15 次 ffmpeg）。原来设 32，实测概念 PV 上
+    // 41 个镜头只覆盖到 33 个 —— 有 10 个镜头（24%）压根没出现在图上。
+    // 提到 48 就能全覆盖（画面 57 个、覆盖 41/41），代价约多 16 帧 × 并发 3 路 ≈ 0.3~0.5 秒。
+    const subBudget = 48;
     // ---- 取帧：先算完所有格子的参数，再并发取帧，最后按顺序组装。
     // 原来是一格一格 await（9 格串行，短视频里占 60% 的时间）。ffmpeg 每次只解一帧，
     // 彼此没有依赖，并发 3 路就能把这部分压掉一半以上。
@@ -553,15 +654,28 @@ export async function runStoryboard(opts) {
     for (const [gi, { from: a, to: b }] of group.entries()) {
       const cellCutList = cuts.filter((c) => c.t >= a && c.t < b);
       const cellCuts = cellCutList.length;
+      // 本格里的积分采样点：它们和真切点一样是"分段边界"，所以合并成一份
+      // `marks` 传给下面 —— 摊几×几看它有几个分段，每个分段取一帧。
+      const cellMarks = sampleMarks.filter((t) => t >= a && t < b);
       const cutScore = cellCuts > 0
         ? cellCutList.reduce((n, c) => n + (c.score ?? 0), 0) / cellCuts
         : Infinity;
-      const want = chooseSubGrid({ shots: cellCuts + 1, cellW, cellH, dur: b - a, cutScore });
+      // 段内逐帧分数的均值 —— 静止约 0.2、匀速摇镜 1.5~3。
+      // 用来兜住"一个镜头但在动"的段，否则整段只取 1 帧，运动过程全丢。
+      const cellStats = (scan.stats ?? []).filter((x) => x.t >= a && x.t < b);
+      const meanMotion = cellStats.length
+        ? cellStats.reduce((n2, x) => n2 + x.score, 0) / cellStats.length
+        : 0;
+      const want = chooseSubGrid({
+        shots: cellCuts + 1 + cellMarks.length, cellW, cellH, dur: b - a, cutScore, meanMotion,
+        // 音乐驱动：单镜头但有动静就摊（门槛 1.5 → 0.7）
+        minMotion: musicDriven ? 0.7 : 1.5,
+      });
       plan.push({
         gi, a, b, cellCuts,
-        // 本格的切点时刻，摊开时用它决定每个子帧落在哪个镜头里（而不是等距采样）
-        cutTimes: cellCutList.map((c) => c.t),
-        sub: want, want, rate: (cellCuts + 1) / Math.max(0.1, b - a),
+        // 本格的分段边界（真切点 + 积分采样点），摊开时用它决定每个子帧落在哪一段里
+        cutTimes: [...cellCutList.map((c) => c.t), ...cellMarks].sort((x, y) => x - y),
+        sub: want, want, rate: (cellCuts + 1 + cellMarks.length) / Math.max(0.1, b - a),
       });
     }
     // 预算按「刀/秒」从高到低分配，**不按格序**。
@@ -604,6 +718,8 @@ export async function runStoryboard(opts) {
         // 平铺格的画面是 k² 个瞬间，不存在"这一格的取帧时刻"；
         // 不写 t_frame，清单和 evidence 都不会给出误导性的 frame@。
         ...(sub > 1 ? { sub } : { t_frame: +frame.t.toFixed(3) }),
+        // 黑场格：整段没有内容，清单要写明，否则模型会以为"这一格是空的、可能采样失败"
+        ...(group[gi]?.dark ? { dark: true } : {}),
         ...(cellCuts > 0 ? { cuts: cellCuts } : {}),
         ...(frame.sharp !== undefined ? { sharp: +frame.sharp.toFixed(1) } : {}),
         ...(text?.text ? { text: text.text, charsPerSec: text.charsPerSec } : {}),
