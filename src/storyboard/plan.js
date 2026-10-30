@@ -155,12 +155,26 @@ export function suggest(meta) {
   // 每格 12 个镜头 → 摊 3×3 或 4×4 刚好，也不至于一格塞十几个看不清。
   const TARGET_SHOTS_PER_CELL = 8;
   const MAX_PER_SHEET = 16;
+  // 单格最多覆盖多少秒。超过这个长度，一格里的"中点"就开始不像这一段的代表了
+  // （6 分钟的格子里，取哪一帧都是随便挑的）。
+  const MAX_CELL_SECONDS = 90;
   // **宁可挤一挤，也不为几格多开一张图。** 一张图 384 token，
   // 如果总格数只比单张容量多一点点（≤15%），塞进一张、少看两三格，比多一张划算。
   const OVERFLOW_TOLERANCE = 0.15;
-  let totalCells = Math.max(4, Math.round(shots / TARGET_SHOTS_PER_CELL));
+  // 格数取两个口径里更大的那个：
+  //   按镜头数：每格 8 个镜头（快剪素材的节奏基准）
+  //   按时长：  单格不超过 90 秒（安静的长素材的覆盖基准，且不超过镜头数）
+  // 只用镜头数会漏掉一整类素材：66 分钟讲座只有 150 刀，算出来 19 格 ——
+  // 最后是 12 格看 66 分钟（每格 5.5 分钟）。实测就是这么翻的车。
+  // 也不按"每格 40 秒"算：那会把 15 分钟 61 镜的片子推到 24 格，
+  // 而它 8 格就够 —— 只在"单格长到没法看"时才介入。
+  const byShots = Math.round(shots / TARGET_SHOTS_PER_CELL);
+  const bySeconds = Math.min(Math.round(duration / MAX_CELL_SECONDS), shots);
+  let totalCells = Math.max(4, byShots, bySeconds);
   if (!musicDriven && (hasSubtitle || speechRate > 0) && speechRate > T.speechRateCut) {
-    totalCells = Math.max(4, Math.round(totalCells * 0.6));   // 台词承担信息，图只做锚点
+    // 台词承担信息，图只做锚点 —— 但**不能锚到 90 秒才一张**：
+    // 降档之后再拿 bySeconds 兜一次底，否则 66 分钟讲座会被降成 24 格（每格 165 秒）。
+    totalCells = Math.max(4, Math.round(totalCells * 0.6), bySeconds);
   }
   const perSheetCap = MAX_PER_SHEET * (1 + OVERFLOW_TOLERANCE);
   const sheets = Math.min(MAX_SHEETS, Math.max(1, Math.ceil(totalCells / perSheetCap)));

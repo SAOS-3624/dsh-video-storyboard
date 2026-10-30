@@ -189,6 +189,15 @@ test('suggest: 台词密度高时降档（总量很小时会被 4 格下限吃�
   assert.ok(longDense.cells * longDense.sheets <= longPlain.cells * longPlain.sheets);
 });
 
+test('suggest: 长而静的素材不能只按镜头数给格（66 分钟讲座 150 刀）', () => {
+  // 只用「每格 8 个镜头」算：19 格 → 66 分钟摊下来每格 5.5 分钟，实际只出 12 格 1 张。
+  // 加「单格不超过 90 秒」兜底之后至少 40 格；口播降档也不能把它压回 12 格。
+  const s = suggest({ duration: 3955, cuts: 150, motion: 0.1, speechRate: 3.8, aspect: L });
+  const total = s.cells * s.sheets;
+  assert.ok(total >= 40, `66 分钟至少 40 格，实得 ${total}`);
+  assert.ok(3955 / total <= 100, `单格不该超过约 100 秒，实得 ${Math.round(3955 / total)}s`);
+});
+
 test('suggest: 时长必须为正', () => {
   assert.throws(() => suggest({ duration: 0, cuts: 0 }), RangeError);
 });
