@@ -42,6 +42,7 @@ export function buildEvidence(result) {
         frame_at: c.t_frame ?? null,
         cuts: c.cuts ?? 0,
         sub: c.sub ?? null,
+        dark: c.dark === true,
         chars: (c.text ?? '').length,
         text: c.text ?? '',
       });
@@ -495,11 +496,17 @@ export function formatManifest(result, {
     // frame@ 只在 pick='sharp' 时给：mid 的取帧时刻就是格中点，模型自己能算，
     // 而 sharp 是"3 个候选里选最锐的那个"，**推不出来** —— 少了它就等于暗示"画面在格首"。
     const showFrame = plan.pick === 'sharp' && Number.isFinite(c.t_frame);
+    // 黑场格要说清楚"这是原片的暗场，不是取帧失败"，否则模型会以为自己看漏了。
+    // 措辞不能说"无内容"：实测 PV 的暗格里还有 logo 和演职员表。
+    const darkTag = c.dark
+      ? ' dark/transition — this stretch of the source is black or a transition, not a capture failure; titles or text may still be visible'
+      : '';
     const head = `cell ${c.i}${where} = ${tc(c.t_start)}-${tc(c.t_end)}` +
       (showFrame ? ` frame@${tc(c.t_frame)}` : '') +
       (c.cuts ? `  cuts ${c.cuts}` : '') +
       // 被摊开的格子要说清里面有几张：否则模型会以为那是一整张画面
-      (c.sub ? `  ${c.sub * c.sub} frames (${c.sub}×${c.sub})` : '');
+      (c.sub ? `  ${c.sub * c.sub} frames (${c.sub}×${c.sub})` : '') +
+      darkTag;
     const body = text ? `${head}\n    "${text}"` : head;
     if (used + body.length + 1 > maxChars) { stoppedAt = c.i - 1; break; }
     lines.push(body);

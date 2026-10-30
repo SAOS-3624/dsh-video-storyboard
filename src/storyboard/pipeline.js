@@ -600,6 +600,37 @@ export async function runStoryboard(opts) {
 
   const plannedCells = cells * sheets;
   let cellRanges = planRanges(plannedCells);
+  // 黑场格是"额外占格"，但**不能因为多一格就多买一张图**：
+  // 48 格 3 张（每张 16）本来是满的，多一个黑场格就变成 49 格 → 4 张 → 多花 384 图像 token，
+  // 只为了画一块黑屏。这种情况把内容让出一格（内容 47 + 黑场 1 = 48），张数不变。
+  // 判据用 16（maxCellsPerSheet）而不是实际切张结果——切张本身要按帧数算，这里只是防边界。
+  const sheetsAt = (n) => Math.ceil(Math.max(1, n) / 16);
+  if (extraDark > 0 && sheetsAt(cellRanges.length) > sheetsAt(plannedCells)) {
+    const trimmed = planRanges(Math.max(1, plannedCells - extraDark));
+    if (sheetsAt(trimmed.length) <= sheetsAt(plannedCells)) {
+      trace.push(`dark-trimmed:${cellRanges.length}->${trimmed.length}`);
+      cellRanges = trimmed;
+    }
+  }
+  // 还有另一种溢出：`fitSegments` 在极短尾段上会多给一格（讲座 48 → 49），
+  // 49 格就跨过了 16 的边界 → 4 张。多一张图 = 多 384 token，而多出来的那一格只覆盖零点几秒。
+  // 把末尾两格并成一格即可（时间覆盖不变，只是少一次取样）。
+  if (!(Number(opts.sheets) > 0)) {
+    let merged = 0;
+    while (cellRanges.length > plannedCells
+      && sheetsAt(cellRanges.length) > sheetsAt(plannedCells)
+      && cellRanges.length >= 2) {
+      const a = cellRanges[cellRanges.length - 2];
+      const b = cellRanges[cellRanges.length - 1];
+      cellRanges.splice(-2, 2, {
+        from: a.from, to: b.to,
+        density: (a.density + b.density) / 2,
+        ...(a.dark && b.dark ? { dark: true } : {}),
+      });
+      merged += 1;
+    }
+    if (merged > 0) trace.push(`tail-merged:${merged}`);
+  }
   // ---- 把"因为取整而空出来的格位"填成真帧
   // 总格数不一定落在布局容量上：13 格排 4×4 空 3 个黑位、10 格排 3×4 空 2 个。
   // 空格和真帧占的是同一张画布、同样的 token —— 空着是纯损失（黑块还拉低整图的信噪比）。
@@ -608,7 +639,14 @@ export async function runStoryboard(opts) {
     const cap = fillLayout(cellRanges.length, info.aspect).cells;
     if (cap > cellRanges.length) {
       const retried = planToCapacity(cap);
-      if (retried.length > cellRanges.length) cellRanges = retried;
+      // 补满**不得把格数顶过一张图的边界**：48 格 3 张是满的，补成 49 就要第 4 张，
+      // 多 384 图像 token 只为填 1 个空位 —— 不划算，直接放弃这次补满。
+      if (retried.length > cellRanges.length
+        && sheetsAt(retried.length) <= sheetsAt(plannedCells)) {
+        cellRanges = retried;
+      } else if (retried.length > cellRanges.length) {
+        trace.push(`skip-fill-would-add-sheet:${cellRanges.length}->${retried.length}`);
+      }
     }
   }
   if (cellRanges.length !== plannedCells) trace.push(`ranges:${plannedCells}->${cellRanges.length}`);
@@ -651,6 +689,12 @@ export async function runStoryboard(opts) {
       if (re.length < total) break;
       const nextGroups = splitSheets(re);
       if (nextGroups.some((g) => g.length === 0)) break;
+      // **补满空格不得新增 sheet**：多一张图就是多 384 图像 token，
+      // 那不是"同 token 优化"，是偷偷加预算（讲座 48 格 3 张 → 64 格 4 张就是这种）。
+      if (nextGroups.length > groups.length) {
+        trace.push(`skip-refill-would-add-sheet:${groups.length}->${nextGroups.length}`);
+        break;
+      }
       trace.push(`sheets-refilled:${cellRanges.length}->${re.length}`);
       cellRanges = re;
       groups = nextGroups;

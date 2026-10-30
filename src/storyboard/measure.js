@@ -26,6 +26,13 @@ import { chooseSubGrid } from './frames.js';
  * 一格里"有几个分段"和"刀够不够狠"—— 决定 k 的内容侧输入。
  * 抽出来是为了让 measure 与渲染用的是同一份判断（以前这段在两处各写一遍）。
  */
+/** 子帧像素下限：默认要"能认出字"，音乐驱动的快剪素材放宽到"能分辨镜头"。 */
+export function subFloorFor(musicDriven) {
+  return musicDriven
+    ? { minSubW: 160, minSubH: 90 }
+    : { minSubW: 200, minSubH: 112 };
+}
+
 function cellSignals(range, { cuts, sampleMarks, stats }) {
   const cutList = cuts.filter((c) => c.t >= range.from && c.t < range.to);
   const marks = sampleMarks.filter((t) => t >= range.from && t < range.to);
@@ -91,6 +98,13 @@ export function measureGroup(ranges, {
       shots, cellW, cellH, dur: range.to - range.from, cutScore, meanMotion,
       // 音乐驱动：单镜头但有动静就摊（门槛 1.5 → 0.7）
       minMotion: musicDriven ? 0.7 : 1.5,
+      // **子帧下限按内容分流**。200×112 是为"看重字"定的（口播、字幕、讲义），
+      // 但它一刀切也把快剪素材的二重细分全关了：PV 9 格从 41 个画面塌到 9 个，
+      // 盲评"覆盖"直接掉分 —— 快剪片的信息量恰恰在画面上，不是字上。
+      // 所以音乐驱动（响度高 + 几乎不说话）单独放到 160×90：3×3 的 331×184 摊 2×2
+      // 得 165×92，刚好过线，而 4×4 的 247×137 仍然摊不动（123×68 太小）。
+      // 不全局降回 100×56：那会让沧野/木头那种字幕素材重新变糊。
+      ...subFloorFor(musicDriven),
     });
     return {
       ...range,

@@ -80,3 +80,29 @@ test('measureGroup: 布局与 bestLayout 一致（不自己另算一套）', () 
     assert.equal(m.rows, b.rows);
   }
 });
+
+test('子帧下限按内容分流：音乐驱动 160×90，其余 200×112', async () => {
+  const { subFloorFor } = await import('../src/storyboard/measure.js');
+  assert.deepEqual(subFloorFor(true), { minSubW: 160, minSubH: 90 });
+  assert.deepEqual(subFloorFor(false), { minSubW: 200, minSubH: 112 });
+
+  // 3×3 的格子（331×184）：音乐驱动下摊 2×2 得 165×92 能过线，普通素材摊不动
+  const ranges = rangesOf(9, 10);
+  const cuts = Array.from({ length: 90 }, (_, i) => ({ t: i, score: 50 }));
+  const plain = measureGroup(ranges, { aspect: 16 / 9, cuts, musicDriven: false });
+  const music = measureGroup(ranges, { aspect: 16 / 9, cuts, musicDriven: true });
+  assert.equal(plain.frameCount, 9, '普通素材 3×3 不该摊');
+  assert.ok(music.frameCount > plain.frameCount, '音乐驱动应当摊开');
+});
+
+test('allocateIntegerBudget: 总和精确、每份不低于下限', async () => {
+  const { allocateIntegerBudget } = await import('../src/storyboard/plan.js');
+  for (const [total, w] of [[24, [10, 5, 3]], [48, [7, 7, 7, 7]], [13, [1, 1, 1]], [5, [9, 1]]]) {
+    const out = allocateIntegerBudget(total, w, { min: 1 });
+    assert.equal(out.reduce((a, b) => a + b, 0), total, `total=${total} 加总不对`);
+    assert.ok(out.every((x) => x >= 1), '不该有 0');
+  }
+  // 配额不够保底时也不能超发
+  const tight = allocateIntegerBudget(2, [5, 5, 5], { min: 1 });
+  assert.equal(tight.reduce((a, b) => a + b, 0), 2);
+});
