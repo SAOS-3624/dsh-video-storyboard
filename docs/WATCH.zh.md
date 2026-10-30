@@ -288,6 +288,8 @@ video_watch({ waitForRefill: true, refillBelow: 2 }) // 阻塞到"库存只剩 1
 
 ## 五点七、台词交给脚本念（TTS）
 
+> 当前 TTS 仍在 video_watch 内；解耦提案见 [TTS-DECOUPLING.zh.md](TTS-DECOUPLING.zh.md)（未实现，仅设计）。
+
 台词是提前写好的，让它"等到点再由模型输出一遍"是纯浪费：等待期间模型被占着，
 输出还要花 token，而那些字早在几分钟前就定好了。
 
