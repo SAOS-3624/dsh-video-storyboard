@@ -47,6 +47,13 @@ Migration:
 
 ### Changed
 
+- **Each area owns its contract, handler and registration.** `video_watch`'s schema moved out of
+  the shared `src/tool-spec.js` into `src/watch/tool-spec.js`, its handler out of `src/tools/` into
+  `src/watch/handler.js`, and registration into `src/watch/register.js` — mirrored by
+  `src/storyboard/{tool-spec,register}.js` for the other four. `src/index.js` is now orchestration
+  only (149 → 126 lines) and `src/tool-spec.js` is a facade that re-exports both sides, so the
+  public `./tool-spec` subpath keeps working.
+  Extracting co-watching into its own plugin is now a directory move plus two deleted imports.
 - `pipeline.js` 1502 → 689 lines (`format.js`, `frames.js`, `ocr-subs.js` split out);
   `fetch.js` 913 → 373 (`ytdlp.js`, `media-store.js`, `direct-url.js`, `url.js`);
   `watch-run.js` 844 → 534 (`watch-source.js`, `watch-modes.js`, `watch-browser.js`).

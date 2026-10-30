@@ -21,14 +21,12 @@
  *  - saveImage 要的是**真正编码后的字节**（PNG/JPEG），不是裸 RGB —— 它会解码校验
  */
 
-import {
-  locateToolSpec, probeToolSpec, storyboardToolSpec, watchToolSpec, zoomToolSpec,
-} from './tool-spec.js';
-import * as storyboard from './tools/storyboard.js';
-import * as zoom from './tools/zoom.js';
-import * as probe from './tools/probe.js';
-import * as locate from './tools/locate.js';
-import * as watch from './tools/watch.js';
+// 两组工具各自的注册入口。**拆陪看插件时只需要删掉 watch 那两行** ——
+// 契约、handler、注册都在 src/watch/ 里，不用去别人家目录捡文件。
+import { storyboardTools } from './storyboard/register.js';
+import { watchTools } from './watch/register.js';
+
+// 声音与聊天框都跟着陪看走（拆走时一并搬）
 import { attachSpeechToChat } from './watch/chat.js';
 import { attachConfiguredVoice } from './watch/voice.js';
 
@@ -83,27 +81,8 @@ async function registerAll(ctx) {
   const watchCache = new Map();
 
   const tools = [
-    defineTool({
-      ...storyboardToolSpec(),
-      execute: (args) => storyboard.execute(ctx, args),
-    }),
-    defineTool({
-      ...zoomToolSpec(),
-      execute: (args) => zoom.execute(ctx, args),
-    }),
-    defineTool({
-      ...probeToolSpec(),
-      execute: (args) => probe.execute(ctx, args),
-    }),
-    defineTool({
-      ...locateToolSpec(),
-      execute: (args) => locate.execute(ctx, args),
-    }),
-    defineTool({
-      ...watchToolSpec(),
-      // sessionId 每次调用现读：它由下面的钩子更新，闭包拿的是变量而不是快照
-      execute: (args) => watch.execute(ctx, args, { sessionId: lastSessionId, cache: watchCache }),
-    }),
+    ...storyboardTools(defineTool, ctx),
+    ...watchTools(defineTool, ctx, { getSessionId: () => lastSessionId, cache: watchCache }),
   ];
 
   // **disposers 必须在最前面声明**：它以前声明在 ctx.on 之后，于是 `disposers.push(off)`

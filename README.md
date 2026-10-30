@@ -332,16 +332,26 @@ video_watch({ ramp: [] })              // 全程等长，不要阶梯
 
 ```
 src/
-  storyboard/   视频识别策略（32 个模块）—— 取流、扫描、转写、出图、清单
-  watch/        陪看（16 个模块）        —— 位置、节奏、台词、聊天、声音接口
-  tools/        五个工具的 handler
-  index.js      只做注册
-  tool-spec.js  五份 schema + 兜底校验
+  storyboard/   视频识别策略 —— 取流、扫描、转写、出图、清单
+    tool-spec.js   四个工具的 schema ＋ 兜底校验
+    register.js    四个工具的注册入口
+  watch/        陪看 —— 位置、节奏、台词、聊天、声音接口
+    tool-spec.js   video_watch 的 schema ＋ 兜底校验
+    handler.js     video_watch 的 execute
+    register.js    video_watch 的注册入口
+  tools/        四个视频识别 handler ＋ shared（陪看的 handler 在 watch/ 里）
+  index.js      只做编排：拿 defineTool → 调两个 register → 挂声音和聊天框
+  tool-spec.js  **门面**：把两边再导出成一份（`./tool-spec` 是公开子路径，不能断）
 ```
 
+**每个领域自带"契约 + handler + 注册"三件套**，所以把陪看拆成独立插件就是
+**搬 `src/watch/` 这一个目录 + 删 `index.js` 里的两行 import**，不用去别人家目录里捡文件。
+
 **依赖是单向的**：`watch/` 可以 import `storyboard/`，反过来不行。
-`test/layering.test.mjs` 把这条钉住了 —— 只要 `storyboard/` 里出现一个 `watch/` 的 import，
-构建就红。这样"把陪看拆成独立插件"才只需要搬目录，而不用先解耦。
+`test/layering.test.mjs` 五个用例把这条钉住 —— 只要 `storyboard/` 里出现一个 `watch/` 的 import，
+构建就红。
+
+几条容易看错的分界：
 
 几条容易看错的分界：
 

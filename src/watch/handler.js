@@ -1,5 +1,5 @@
 /**
- * tools/watch.js — `video_watch` 的 execute：单发命令分流 → 一次陪看调用 → 起循环。
+ * watch/handler.js — `video_watch` 的 execute：单发命令分流 → 一次陪看调用 → 起循环。
  *
  * 三段彼此独立，顺序也不能换：
  *   1. 单发命令（watch-actions.js）：一问一答就结束，一行都不进主流程；
@@ -7,17 +7,21 @@
  *   3. 起循环（watch-loop.js）：从这里往后每段到点自己叫醒。
  *
  * 本文件只负责"把宿主的 ctx 和机器配置接上去"，不做业务判断。
+ *
+ * 放在 `watch/` 里而不是 `tools/`：陪看要单独成包，**schema + handler + 注册**必须在一处，
+ * 否则拆的时候还得去别人家目录里捡文件。它唯一跨出去的那条线是
+ * `storyboard/`（建段、出清单），那是允许的依赖方向。
  */
 
-import { DEFAULT_RAMP, DEFAULT_SEGMENT } from '../watch/batches.js';
+import { DEFAULT_RAMP, DEFAULT_SEGMENT } from './batches.js';
 import { configuredLaunch, configuredPort } from '../storyboard/browser-time.js';
-import { ensureChatSession } from '../watch/chat.js';
+import { ensureChatSession } from './chat.js';
 import { formatManifest } from '../storyboard/format.js';
 import { runStoryboard } from '../storyboard/pipeline.js';
-import { validateWatchArgs } from '../tool-spec.js';
-import { makeBuilder, runWatchPass } from '../watch/watch-run.js';
-import { runWatchAction } from '../watch/watch-actions.js';
-import { DEFAULT_LOOKAHEAD, startWatchLoop } from '../watch/watch-loop.js';
+import { validateWatchArgs } from './tool-spec.js';
+import { makeBuilder, runWatchPass } from './watch-run.js';
+import { runWatchAction } from './watch-actions.js';
+import { DEFAULT_LOOKAHEAD, startWatchLoop } from './watch-loop.js';
 
 /**
  * @param {object} ctx   宿主上下文（存图用）

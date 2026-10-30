@@ -64,13 +64,17 @@ test('分层：watch/ 可以依赖 storyboard/（这是唯一允许的方向）'
   assert.ok(Array.isArray(uses));
 });
 
-test('分层：库不反向 import 入口层（tools/ index.js tool-spec.js）', () => {
-  const ENTRY = ['tools/', 'index.js', 'tool-spec.js'];
+test('分层：库不反向 import 入口层（tools/ index.js 顶层 tool-spec.js）', () => {
+  // 入口层 = 注册/接线的地方。`register.js`、`handler.js` 虽然住在库里，但它们**就是**入口，
+  // 允许 import `tools/` 的 handler；真正不许反向依赖的是普通库模块。
+  const isEntry = (rel) => rel === 'index.js' || rel === 'tool-spec.js'
+    || rel.startsWith('tools/') || rel.endsWith('/register.js') || rel.endsWith('/handler.js');
   const bad = [];
   for (const area of ['storyboard', 'watch']) {
     for (const { rel, deps } of byArea(area)) {
+      if (isEntry(rel)) continue;
       for (const d of deps) {
-        if (ENTRY.some((e) => d.startsWith(e) || d === e)) bad.push(`${rel} → ${d}`);
+        if (isEntry(d)) bad.push(`${rel} → ${d}`);
       }
     }
   }

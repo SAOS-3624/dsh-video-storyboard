@@ -6,7 +6,7 @@
  */
 
 import { boardOptions } from '../storyboard/board.js';
-import { validateToolArgs } from '../tool-spec.js';
+import { validateToolArgs } from '../storyboard/tool-spec.js';
 import { runAndAttach } from './shared.js';
 
 export function execute(ctx, args) {

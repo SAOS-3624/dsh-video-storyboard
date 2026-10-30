@@ -14,7 +14,7 @@ import { isHttpUrl } from '../storyboard/url.js';
 import { resolveDirectUrl } from '../storyboard/direct-url.js';
 import { runStoryboard } from '../storyboard/pipeline.js';
 import { formatForDetail } from '../storyboard/format.js';
-import { validateZoomArgs } from '../tool-spec.js';
+import { validateZoomArgs } from '../storyboard/tool-spec.js';
 import { attachSheetImages } from './shared.js';
 
 export async function execute(ctx, args) {

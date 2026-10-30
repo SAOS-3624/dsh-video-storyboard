@@ -43,7 +43,7 @@ const HANDLER_MODULES = {
   video_probe: ['tools/probe.js'],
   video_locate: ['tools/locate.js'],
   video_watch: [
-    'tools/watch.js', 'watch/watch-actions.js', 'watch/watch-run.js',
+    'watch/handler.js', 'watch/watch-actions.js', 'watch/watch-run.js',
     'watch/watch-modes.js', 'watch/watch-source.js',
   ],
 };
@@ -103,10 +103,17 @@ test('schema 审计：parameters 里没有重复键（后者会静默覆盖前�
     video_storyboard: storyboardToolSpec, video_zoom: zoomToolSpec, video_probe: probeToolSpec,
     video_locate: locateToolSpec, video_watch: watchToolSpec,
   };
+  // spec 不再都在一个文件里：video_watch 已经搬到 src/watch/tool-spec.js。
+  // 每个工具读**它自己那个文件**，否则切片会切到空字符串、测试假通过。
+  const FILES = {
+    video_storyboard: 'src/storyboard/tool-spec.js', video_zoom: 'src/storyboard/tool-spec.js',
+    video_probe: 'src/storyboard/tool-spec.js', video_locate: 'src/storyboard/tool-spec.js',
+    video_watch: 'src/watch/tool-spec.js',
+  };
   const problems = [];
   for (const tool of Object.keys(regions)) {
-    // 每个 spec 函数体单独切：一个文件里五个函数，不能整体扫
-    const all = read(join(ROOT, 'src/tool-spec.js'));
+    // 每个 spec 函数体单独切：一个文件里几个函数，不能整体扫
+    const all = read(join(ROOT, FILES[tool]));
     const fn = all.slice(all.indexOf(`export function ${regions[tool].name}(`) === -1
       ? 0 : all.indexOf(`export function ${regions[tool].name}(`));
     const body = fn.slice(0, fn.indexOf('\n}\n') + 1);
@@ -130,12 +137,18 @@ test('schema 审计：dsh.plugin.json 的版本和 package.json 一致', () => {
     'dsh.plugin.json 的 version 落后会让人装到"看起来是旧版"的插件');
 });
 
-test('schema 审计：五个工具的 name 和 index.js 注册的一致', () => {
-  const index = src('index.js');
+test('schema 审计：五个工具的 name 和注册入口的一致', () => {
+  // 注册已经拆到两个 register.js 里，index.js 只做编排 —— 所以看的地方也跟着变。
+  const sb = src('storyboard/register.js');
+  const wt = src('watch/register.js');
   for (const [tool, makeSpec] of Object.entries(SPECS)) {
     assert.equal(makeSpec().name, tool);
-    // 注册用的是 `...xxxToolSpec()` 展开，所以名字只能从 spec 来 —— 这里确认 spec 没被漏掉
-    assert.ok(index.includes(`ToolSpec()`), 'index.js 应该仍然按 spec 注册工具');
+    const home = tool === 'video_watch' ? wt : sb;
+    const specFn = makeSpec().name === 'video_watch' ? 'watchToolSpec' : null;
+    assert.ok(home.includes('ToolSpec()'),
+      `${tool} 的注册应该在自己的 register.js 里（用 ...xxxToolSpec() 展开）`);
+    assert.ok(!specFn || home.includes('watchToolSpec'),
+      'video_watch 的 spec 必须由 watch/register.js 引入');
   }
 });
 
