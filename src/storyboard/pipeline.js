@@ -879,6 +879,9 @@ export async function runStoryboard(opts) {
         // 黑场格：整段没有内容，清单要写明，否则模型会以为"这一格是空的、可能采样失败"
         ...(group[gi]?.dark ? { dark: true } : {}),
         ...(cellCuts > 0 ? { cuts: cellCuts } : {}),
+        // 格内平均画面变化（0–255 的分数）：诊断"为什么这格摊 3×3 而那格只摊 2×2"
+        ...(Number.isFinite(measured.cells[gi]?.meanMotion)
+          ? { meanMotion: measured.cells[gi].meanMotion } : {}),
         ...(frame.sharp !== undefined ? { sharp: +frame.sharp.toFixed(1) } : {}),
         ...(text?.text ? { text: text.text, charsPerSec: text.charsPerSec } : {}),
       });

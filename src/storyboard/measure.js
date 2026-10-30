@@ -126,6 +126,9 @@ export function measureGroup(ranges, {
       // 本格的分段边界（真切点 + 积分采样点），摊开时用它决定每个子帧落在哪一段里
       cutTimes: [...cutList.map((c) => c.t), ...marks].sort((x, y) => x - y),
       rate: shots / Math.max(0.1, range.to - range.from),
+      // 段内逐帧分数的均值（画面"有多热闹"）：静止约 0.2、匀速摇镜 1.5~3、快剪 5+。
+      // 和"镜头数"是两个维度：快剪 8 个镜头和慢摇 8 个镜头，前者该摊细、后者该留大图。
+      meanMotion: +meanMotion.toFixed(2),
     };
   });
   shrinkToBudget(cells, subBudget);

@@ -120,10 +120,16 @@ test('chooseSubGrid: 排版尺寸到不了 200×112 就一律不摊（2026-10-30
   assert.equal(chooseSubGrid({ ...dense, cellW: 460, cellH: 260 }), 2, '2×2 格可以摊 2×2');
 });
 
-test('chooseSubGrid: k 随镜头数增长，上限 4', () => {
+test('chooseSubGrid: k 随镜头数增长，上限 4（默认是"热闹"的前提）', () => {
   // 800×452 才撑得住 4×4（每格 200×113），尺寸门槛是按"摊完还能看清"卡的
-  const at = (shots) => chooseSubGrid({ shots, cellW: 800, cellH: 452, dur: shots * 0.15, cutScore: 50 });
+  const at = (shots, motion = 12) => chooseSubGrid({
+    shots, cellW: 800, cellH: 452, dur: shots * 0.15, cutScore: 50, meanMotion: motion,
+  });
   assert.equal(at(3), 2);
   assert.equal(at(6), 3);
   assert.equal(at(20), 4);
+  // 同样 6 个镜头，但画面几乎不动（meanMotion < 8）→ 停在 2×2，把格子留给"大图"
+  assert.equal(at(6, 1.2), 2);
+  // 镜头数一样、运动一样时仍然受"位置不该多过镜头"约束
+  assert.equal(at(5, 12), 2);
 });
