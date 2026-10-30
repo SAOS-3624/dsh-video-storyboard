@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`video_zoom({ cellId })` could not pass the host's argument validation.** `from` and `to`
+  were required in the tool schema, so the call died before `cellId` was resolved. Both are
+  optional now; `validateZoomArgs` still requires either `cellId` or both `from`/`to`.
+  Reported in #22.
+- **`video_zoom` dropped `transcriptFile` (and `detail`) before the handler saw them.** Both
+  were read by the handler but missing from the schema. Reported in #23.
+- **`video_watch({ browserPort })` was documented but missing from the schema.** The handler
+  already read it; the host could not deliver the per-call value. Added the parameter and a
+  1..65535 validation. Reported in #25.
+- **Truncated recordings no longer fail the whole sheet.** When the video stream is shorter than
+  the container/audio, the last cells could seek past the final frame; ffmpeg exits 0 with empty
+  stdout, and one failed candidate in `extractSharpest` killed the whole storyboard. Candidates
+  now use `Promise.allSettled`, and `extractFrameRaw` retries earlier seeks before giving up.
+  Reported in #30.
+- **`video_locate` dropped `cookies` and `allowAnonymous` before the handler saw them.** Both
+  were read by the handler but missing from the schema. Reported in #32.
+
 ## [0.4.5] - 2026-10-30
 
 ### Fixed
