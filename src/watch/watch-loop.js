@@ -401,7 +401,7 @@ export function startWatchLoop({
           const w = await wake(loop.ctx, {
             sessionId: loop.sessionId,
             text: `[一起看·补词] 台词库存不够了：${list} 还没有词（现在 ${mmss(estR.pos)}）。`
-              + '先用 video_watch({ speakNow: true }) 看画面，再用 lines: [...] 补上。',
+              + '先用 watch_together({ speakNow: true }) 看画面，再用 lines: [...] 补上。',
           });
           recordWake(loop, w, { segment: missing[0].from });
           note(`refill-needed ${missing.map((m) => m.from).join(',')} → ${w?.ok ? 'ok' : w?.reason ?? 'failed'}`);
@@ -445,7 +445,7 @@ export function startWatchLoop({
           const w = await wake(loop.ctx, {
             sessionId: loop.sessionId,
             text: `[一起看·高频] 现在 ${mmss(est.pos)}（这一段 ${mmss(seg.from)}–${mmss(seg.to)}）。`
-              + '调 video_watch({ speakNow: true }) 拿当前画面，然后说一句。',
+              + '调 watch_together({ speakNow: true }) 拿当前画面，然后说一句。',
           });
           recordWake(loop, w, { segment: seg.from });
           note(`speak-now ${Math.round(est.pos)}s → ${w?.ok ? 'ok' : w?.reason ?? 'failed'}`);
@@ -474,7 +474,7 @@ export function startWatchLoop({
           const w = await wake(loop.ctx, {
             sessionId: loop.sessionId,
             text: `[一起看] 读不到你的播放进度了（系统媒体控件最后一次更新在 ${stale} 秒前）。`
-              + '问一句"你看到几分几秒了"，拿到答复就带 cursor 再调 video_watch。',
+              + '问一句"你看到几分几秒了"，拿到答复就带 cursor 再调 watch_together。',
           });
           loop.log(`[watch] ask-for-cursor (${stale}s stale) → ${w.ok ? 'ok' : w.reason}`);
         }
@@ -500,7 +500,7 @@ export function startWatchLoop({
           const w = await wake(loop.ctx, {
             sessionId: loop.sessionId,
             text: `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 这一段的词已经用完了，`
-              + '没有新词可念。看一眼画面写下一段的台词，写好调 video_watch({ lines: [...] }) 存上。',
+              + '没有新词可念。看一眼画面写下一段的台词，写好调 watch_together({ lines: [...] }) 存上。',
           });
           recordWake(loop, w, { segment: seg.from, cause: 'lines-empty', countFailure: false });
           loop.log(`[watch] wake-on-lines-empty (${mmss(seg.from)}) → ${w.ok ? 'ok' : w.reason}`);
@@ -517,8 +517,8 @@ export function startWatchLoop({
       const head = `[一起看] ${mmss(seg.from)}–${mmss(seg.to)} 该说话了`
         + `（用户大约看到 ${mmss(r.pos)}${r.confidence === 'extrapolated' ? '，按墙钟推算' : ''}）。`;
       const text = line
-        ? `${head}\n你之前写好的那句：「${line}」\n直接说这句就行；觉得不对就调 video_watch 看一眼再改。`
-        : `${head}\n调 video_watch 拿这一段的画面，然后只说一句。`;
+        ? `${head}\n你之前写好的那句：「${line}」\n直接说这句就行；觉得不对就调 watch_together 看一眼再改。`
+        : `${head}\n调 watch_together 拿这一段的画面，然后只说一句。`;
       const w = await wake(loop.ctx, { sessionId: loop.sessionId, text });
       recordWake(loop, w, { segment: r.segment });
       note(`wake ${r.segment}s (${r.confidence}) → ${w?.ok ? 'ok' : w?.reason ?? 'failed'}`);

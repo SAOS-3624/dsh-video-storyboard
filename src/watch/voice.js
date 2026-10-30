@@ -111,7 +111,7 @@ export function emitSpeech(event) {
 }
 
 /**
- * 把存下来的台词槽（`[{ text, at }]`）转成事件形状，写进 `video_watch` 的返回值。
+ * 把存下来的台词槽（`[{ text, at }]`）转成事件形状，写进 `watch_together` 的返回值。
  *
  * 这是"文字流"那一半：**不依赖有没有订阅者**，模型和外部消费者都能拿到同一份带时间点的稿子。
  *

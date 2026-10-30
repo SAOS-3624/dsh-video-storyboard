@@ -177,7 +177,7 @@ test('插件接线: apply() 注册一个叫 video_storyboard 的工具', async (
   try {
     const disposer = await apply(ctx);
     assert.deepEqual(registered.map((t) => t.name).sort(),
-      ['video_locate', 'video_probe', 'video_storyboard', 'video_watch', 'video_zoom']);
+      ['video_locate', 'video_probe', 'video_storyboard', 'video_zoom', 'watch_together']);
     assert.equal(typeof disposer, 'function', 'apply 必须返回 disposer');
     disposer();
     assert.equal(disposed, 5, '五个工具都应被释放');

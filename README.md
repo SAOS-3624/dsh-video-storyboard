@@ -27,7 +27,7 @@
 | `video_storyboard` | 出宫格图 + 文本清单 | 主体功能 |
 | `video_zoom` | 只看某一段（更小的时间窗、更密的格） | 清单看完觉得某段重要，再放大 |
 | `video_locate` | **纯文本**：一句话 → 时间码 | 知道说了什么、不知道在第几分钟 |
-| `video_watch` | 陪看：按你的真实播放进度一段段往下看（见下文） | 用户说"陪我看" |
+| `watch_together` | 陪看：按你的真实播放进度一段段往下看（见下文） | 用户说"陪我看" |
 
 ## 安装
 
@@ -178,9 +178,9 @@ video_storyboard({ input: "D:/video/xxx.mp4" })
 
 > 完整步骤（含格式示例、验证顺序、故障对照）见 **[docs/SETUP.zh.md §3](docs/SETUP.zh.md)**。
 
-## 一起看电影 · `dsh watch together`（`video_watch`）
+## 一起看电影 · `dsh-watch-together`（`watch_together`）
 
-> 这一块将来会单独成一个插件，名字定的是 **`dsh watch together`**（小写）。
+> 这一块将来会单独成一个插件，名字定的是 **`dsh-watch-together`**（小写）。
 > 现在还在同一个包里，代码已经按 `src/watch/` 分好层了 —— 见下面的「代码结构」。
 
 > **想让它准到毫秒、并且自动认出你在看什么？** 先配一次调试端口，见 [docs/WATCH.zh.md](docs/WATCH.zh.md)。
@@ -188,7 +188,7 @@ video_storyboard({ input: "D:/video/xxx.mp4" })
 按你的**播放进度**一段段把片看下去，而不是一次性出一张全片分镜。
 
 ```js
-video_watch({ input: "D:/Movie/xxx.mp4" })   // 每 20 秒左右调一次
+watch_together({ input: "D:/Movie/xxx.mp4" })   // 每 20 秒左右调一次
 ```
 
 ### 它怎么工作
@@ -246,7 +246,7 @@ SMTC 的刷新是稀疏的。浏览器里那个 `<video>.currentTime` 才是**�
 DSH_BROWSER_DEBUG_PORT=9333      # 或者环境变量
 ```
 ```js
-video_watch({ browserPort: 9333 })   // 或者单次传参
+watch_together({ browserPort: 9333 })   // 或者单次传参
 ```
 
 > 端口别用 9222：那是 Chrome DevTools 的惯例端口，**WorkBuddy 自己就占着**（实测读到的会是它的界面）。
@@ -284,7 +284,7 @@ Edge 播网页视频时，Windows 媒体控件的 `Position` **只在事件发�
 位置刷新下来的那个值本身是准的（真机对表 3 次，误差都 ≤1 秒）——
 **错的是"刷新时刻到此刻"这一段**，所以不能把冻结值当实时值。
 
-`video_watch({ statusOnly: true })` 可以随时看钟的状态：读到第几秒、可不可信、为什么没说话。
+`watch_together({ statusOnly: true })` 可以随时看钟的状态：读到第几秒、可不可信、为什么没说话。
 
 需要一台装了 `winrt` 的 Python：
 
@@ -307,8 +307,8 @@ pip install winrt-runtime winrt-Windows.Media.Control winrt-Windows.Foundation
 所以开头几批短一些，代价只是那几分钟多跑几次分镜。
 
 ```js
-video_watch({ ramp: [30, 60, 120] })   // 更激进的起步
-video_watch({ ramp: [] })              // 全程等长，不要阶梯
+watch_together({ ramp: [30, 60, 120] })   // 更激进的起步
+watch_together({ ramp: [] })              // 全程等长，不要阶梯
 ```
 
 ### 双缓冲：永远留一个批次在后面
@@ -338,10 +338,10 @@ src/
   storyboard/   视频识别策略 —— 取流、扫描、转写、出图、清单
     tool-spec.js   四个工具的 schema ＋ 兜底校验
     register.js    四个工具的注册入口
-  watch/        陪看 dsh watch together —— 位置、节奏、台词、聊天、声音接口
-    tool-spec.js   video_watch 的 schema ＋ 兜底校验
-    handler.js     video_watch 的 execute
-    register.js    video_watch 的注册入口
+  watch/        陪看 dsh-watch-together —— 位置、节奏、台词、聊天、声音接口
+    tool-spec.js   watch_together 的 schema ＋ 兜底校验
+    handler.js     watch_together 的 execute
+    register.js    watch_together 的注册入口
   tools/        四个视频识别 handler ＋ shared（陪看的 handler 在 watch/ 里）
   index.js      只做编排：拿 defineTool → 调两个 register → 挂声音和聊天框
   tool-spec.js  **门面**：把两边再导出成一份（`./tool-spec` 是公开子路径，不能断）
@@ -376,7 +376,7 @@ src/
 
 #### 事件长什么样
 
-`video_watch` 交付一段时，返回值里有：
+`watch_together` 交付一段时，返回值里有：
 
 ```json
 "speech": [
@@ -456,7 +456,7 @@ export function attach({ onSpeech }) {
 **模型自己说的话怎么进到框里？** 靠 `say`：
 
 ```js
-video_watch({ say: "你看这条，鱼比人还紧张。" })
+watch_together({ say: "你看这条，鱼比人还紧张。" })
 ```
 
 插件读不到模型的正常回复，所以插话时想让用户**看见并听见**，就得把这句话交给 `say`。

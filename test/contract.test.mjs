@@ -115,11 +115,11 @@ test('contract: video_zoom 的 schema 同样过宿主 defineTool', async (t) => 
   assert.ok(validateZoomArgs({ input: 'a', from: 1, to: 2, cells: 20 }).length > 0, '本地必须挡住');
 });
 
-test('contract: video_watch schema 暴露文档里写了的 browserPort / loop / say', async (t) => {
+test('contract: watch_together schema 暴露文档里写了的 browserPort / loop / say', async (t) => {
   if (!host) return t.skip('host @deepseek-ai/dsh-tools not found');
   const spec = watchToolSpec();
   const tool = host.defineTool({ ...spec, execute: async () => ({ images: [], text: '' }) });
-  assert.equal(tool.name, 'video_watch');
+  assert.equal(tool.name, 'watch_together');
   assert.equal(spec.parameters.browserPort.type, 'integer');
   assert.deepEqual(host.validateArgs(spec.parameters, { browserPort: 9333, statusOnly: true }), []);
   assert.deepEqual(validateWatchArgs({ browserPort: 9333, statusOnly: true }), []);
@@ -137,7 +137,7 @@ test('contract: video_watch schema 暴露文档里写了的 browserPort / loop /
   assert.ok(validateWatchArgs({ say: '  ' }).length > 0);
   // 语音参数已经从核心移除
   for (const gone of ['tts', 'voice', 'rate', 'listVoices', 'speakAloud', 'text']) {
-    assert.equal(spec.parameters[gone], undefined, `${gone} 应该已从 video_watch 移除`);
+    assert.equal(spec.parameters[gone], undefined, `${gone} 应该已从 watch_together 移除`);
   }
 });
 

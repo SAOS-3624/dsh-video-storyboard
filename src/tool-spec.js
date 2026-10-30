@@ -3,7 +3,7 @@
  *
  * 真正的定义在：
  *   - `storyboard/tool-spec.js` —— video_storyboard / zoom / probe / locate
- *   - `watch/tool-spec.js`      —— video_watch
+ *   - `watch/tool-spec.js`      —— watch_together
  *
  * 为什么保留这个文件：`dsh-video-storyboard/tool-spec` 是 package.json 里的公开子路径，
  * 外部（CLI、测试、可能的第三方）一直从这里拿 spec。**搬家不能断入口**。

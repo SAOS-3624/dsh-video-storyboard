@@ -1,15 +1,15 @@
 /**
- * watch/tool-spec.js — `video_watch` 的 schema 与兜底校验。
+ * watch/tool-spec.js — `watch_together` 的 schema 与兜底校验。
  *
  * 从 `src/tool-spec.js` 挪出来的。这不是为了好看：陪看将来要单独成一个插件，
  * 而**模型能看见的参数表就是插件的对外契约** —— 契约留在别人家的文件里，拆不动。
  *
- * 这里是 `video_watch` 唯一该改 schema 的地方。加参数时记得跑
+ * 这里是 `watch_together` 唯一该改 schema 的地方。加参数时记得跑
  * `test/schema-audit.test.mjs`：宿主管参数走 schema，**没声明的参数会被静默丢掉**，
  * handler 读了也白读（今天一整天的 PR 都是这个病）。
  */
 
-export const WATCH_TOOL_NAME = 'video_watch';
+export const WATCH_TOOL_NAME = 'watch_together';
 
 /**
  * 一起看：按用户的播放进度一段段往下看。
@@ -32,11 +32,11 @@ export function watchToolSpec() {
       'COLD START (you know nothing about the session yet):',
       '  1. If you are not sure anything is playing, say so IN THE SAME MESSAGE ("I will wait for the video",',
       '     the tool cannot speak while it blocks) and call:',
-      '       video_watch({ waitForVideo: true, maxWaitSec: 120 })',
+      '       watch_together({ waitForVideo: true, maxWaitSec: 120 })',
       '  2. Look at the batch the user is already in - do not wait for it to end:',
-      '       video_watch({ speakNow: true })',
+      '       watch_together({ speakNow: true })',
       '  3. Write the lines for that batch (see LINES), then:',
-      '       video_watch({ wait: true })',
+      '       watch_together({ wait: true })',
       '  4. It returns when that batch is nearly over. Repeat from 3 forever. The conversation never ends',
       '     between batches: the blocking call IS the pause.',
       '',
@@ -48,7 +48,7 @@ export function watchToolSpec() {
       'So: write the lines either way; do not try to make yourself the only voice.',
       '',
       'LINES (you write them; whoever is attached speaks them):',
-      '  video_watch({ input, lines: [',
+      '  watch_together({ input, lines: [',
       '    { from: 180, at: 191, text: "钓上来了，池子里那条比他想的配合。" },',
       '    { from: 180, at: 214, text: "他一直在说饿，从昨天晚饭就空着。" }',
       '  ]})',
@@ -91,7 +91,7 @@ export function watchToolSpec() {
       'their browser is open, answer from the `browser:` line - never infer it from the position.',
       'If the plugin had to start a browser itself, the line says so: that instance is a fresh window with its own',
       'profile and no video open, and it is NOT the one the user is watching in.',
-      'To check the browser without building anything, call video_watch({ statusOnly: true }) - it now returns a',
+      'To check the browser without building anything, call watch_together({ statusOnly: true }) - it now returns a',
       '`browser` object as well.',
     ].join('\n'),
     // 宿主的 parameters 是**扁平 DSL**：每个字段一项，required 写在字段上，不是 JSON Schema 外壳
@@ -176,7 +176,7 @@ export function watchToolSpec() {
       speakEvery: {
         type: 'number',
         description: 'High-frequency mode in seconds: the loop wakes you every N seconds regardless of batch '
-          + 'boundaries (10 is fine). Pair it with video_watch({ speakNow: true }) inside the wake. Use 0 for '
+          + 'boundaries (10 is fine). Pair it with watch_together({ speakNow: true }) inside the wake. Use 0 for '
           + 'the normal one-comment-per-batch rhythm.',
       },
       speakNow: {
@@ -282,7 +282,7 @@ export function watchToolSpec() {
       loop: {
         type: 'boolean',
         description: 'Default true: after this call, keep a background loop running so each new segment ' +
-          'wakes the session on its own. Set false to drive everything by hand — you call video_watch ' +
+          'wakes the session on its own. Set false to drive everything by hand — you call watch_together ' +
           'again whenever you want the next segment, and nothing wakes you in between.',
       },
       detail: {

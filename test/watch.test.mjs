@@ -63,7 +63,7 @@ test('validateWatchArgs: input 可省略（自动探测），给了就必须非�
 
 test('watchToolSpec: 告诉模型"别复述剧情"和"读不到就问，不要猜"', () => {
   const spec = watchToolSpec();
-  assert.equal(spec.name, 'video_watch');
+  assert.equal(spec.name, 'watch_together');
   assert.match(spec.description, /do not retell the plot/i);
   assert.match(spec.description, /SMTC|media session/i);
   assert.equal(spec.parameters.input.required, undefined, 'input 不再必填：可以自动探测');

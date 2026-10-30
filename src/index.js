@@ -5,7 +5,7 @@
  *   video_zoom        某一段的近距离重看（格少、每格大）
  *   video_probe       只读容器头，不花图片 token
  *   video_locate      纯文本定位：那句话在第几分钟
- *   video_watch       陪看：按真实播放进度一段段往下看
+ *   watch_together       陪看：按真实播放进度一段段往下看
  *
  * 每个工具的 execute 在 `src/tools/<name>.js` —— 拆开是有原因的：
  * 宿主管参数走的是 schema，**schema 没声明的参数会被直接丢掉**。

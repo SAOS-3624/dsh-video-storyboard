@@ -4,13 +4,13 @@
 
 ### BREAKING — the TTS engine is out of core
 
-`video_watch` no longer speaks. The plugin ships **no engine, no default adapter, and no voice
+`watch_together` no longer speaks. The plugin ships **no engine, no default adapter, and no voice
 parameters**; it only emits timed speech events (issue #27, decided with @ggfgfgf-on). Keeping a
 Windows SAPI + `ffplay` + registry implementation inside a general video plugin made the core
 platform-specific, raced any speech plugin the host already had, and put an engine choice in the
 model-visible schema where it did not belong.
 
-Removed from `video_watch.parameters`: `tts`, `voice`, `rate`, `listVoices`, `speakAloud`, `text`
+Removed from `watch_together.parameters`: `tts`, `voice`, `rate`, `listVoices`, `speakAloud`, `text`
 (`text` existed only for `speakAloud`).
 
 Migration:
@@ -28,7 +28,7 @@ Migration:
   function; events are `{ seq, at, text, state, input?, segment?, origin? }` and are frozen.
   `emitSpeech()` returns the number of **successful** deliveries and does nothing when nobody is
   subscribed — that is what keeps the zero-engine promise. `speechEvents(lines, …)` turns stored
-  line slots into that shape, and `video_watch` results now carry `speech: [{ at, text, state }]`.
+  line slots into that shape, and `watch_together` results now carry `speech: [{ at, text, state }]`.
 - **Plug-in adapters, loaded by path.** `~/.dsh/voice.json` `{ "adapter": "<path or module>" }` (or
   `DSH_VOICE_ADAPTER`) is `import()`ed at startup; the module exports `attach(api)` and returns a
   detach. Nothing is bundled and a failure only logs a warning.
@@ -39,7 +39,7 @@ Migration:
   four PRs in one day. The audit scrapes `args.X` per tool, asserts every name is declared, rejects
   duplicate keys and keeps `dsh.plugin.json` in step with `package.json`.
 - **One text stream for the chat box.** `chat.jsonl` now carries `line` (scripted), `assistant`
-  (interjection) and `user`; `say: true` marks the speakable ones. `video_watch({ say: "…" })` is how
+  (interjection) and `user`; `say: true` marks the speakable ones. `watch_together({ say: "…" })` is how
   the model gets its interjection in — the plugin cannot read a normal reply. `attachSpeechToChat()`
   subscribes with `voice: false`, so a display-only consumer can never silence the loop.
 - **`examples/floating-chat/window.py`** — a real floating window, no browser: frameless, always on
@@ -47,7 +47,7 @@ Migration:
 
 ### Changed
 
-- **Each area owns its contract, handler and registration.** `video_watch`'s schema moved out of
+- **Each area owns its contract, handler and registration.** `watch_together`'s schema moved out of
   the shared `src/tool-spec.js` into `src/watch/tool-spec.js`, its handler out of `src/tools/` into
   `src/watch/handler.js`, and registration into `src/watch/register.js` — mirrored by
   `src/storyboard/{tool-spec,register}.js` for the other four. `src/index.js` is now orchestration
@@ -64,13 +64,21 @@ Migration:
   of pre-written lines, which is exactly what a voice consumer cannot report.
 - Starting the loop without a session id is allowed when a speech subscriber is attached.
 - `scripts/check-syntax.mjs` walks subdirectories; `src/tools/` was previously unchecked.
-- Fixed schema gaps found by the audit: `video_watch.loop` (the background loop could not be turned
+- Fixed schema gaps found by the audit: `watch_together.loop` (the background loop could not be turned
   off at all), `video_zoom.ocr` / `scanHeight`, `video_storyboard.adaptive`.
 - `video_zoom` accepts `cellId` alone (`from`/`to` are optional in the schema now);
   `transcriptFile` / `detail` / `cookies` / `allowAnonymous` / `browserPort` are declared where their
   handlers already read them.
 - Truncated recordings no longer lose the whole sheet: `extractSharpest` keeps whatever settled and
   `extractFrameRaw` retries earlier seeks (issue #30).
+
+### Renamed
+
+- **`video_watch` → `watch_together`.** The tool id now matches the name of the plugin it is going
+  to become (`dsh-watch-together`). The other four tools keep their `video_*` ids — only the
+  co-watching tool moved. Callers must update the name; the parameters are unchanged.
+- The co-watching side is documented as **`dsh-watch-together`** (hyphenated, same style as
+  `dsh-video-storyboard`). It still lives in this package until the split is decided.
 
 ## [0.4.5] - 2026-10-30
 

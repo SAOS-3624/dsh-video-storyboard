@@ -1,6 +1,6 @@
-# dsh watch together — 陪看配置
+# dsh-watch-together — 陪看配置
 
-> 陪看这一块的名字是 **`dsh watch together`**（对外统一小写）。
+> 陪看这一块的名字是 **`dsh-watch-together`**（对外统一小写）。
 > 这份文档只为了一件事：**让它稳定认出你在看什么、看到第几秒**。
 > 配好一次，之后打开视频就行，不用贴链接、不用搜索。
 
@@ -54,7 +54,7 @@ location.href                                  // 页面地址 = 视频地址
 { "browserPort": 9333, "launchBrowser": true }
 ```
 
-之后第一次调用 `video_watch` 时，如果端口没开，插件会自己把浏览器拉起来（独立 profile 那个窗口）。
+之后第一次调用 `watch_together` 时，如果端口没开，插件会自己把浏览器拉起来（独立 profile 那个窗口）。
 默认关，因为不想在用户没同意的情况下随便开程序。
 
 **这意味着：带端口的是一个独立窗口，和你平时那个 Edge 不是同一个。**
@@ -123,12 +123,12 @@ setx DSH_BROWSER_DEBUG_PORT 9333    # ❌ 对 DSH 桌面版无效
 长期成本和固定批次一样。
 
 ```js
-video_watch({ ramp: [30, 60, 120] })   // 更急的起步
-video_watch({ segment: 300 })          // 稳定档（默认 5 分钟）
-video_watch({ ramp: [] })              // 不要阶梯，全程等长
+watch_together({ ramp: [30, 60, 120] })   // 更急的起步
+watch_together({ segment: 300 })          // 稳定档（默认 5 分钟）
+watch_together({ ramp: [] })              // 不要阶梯，全程等长
 ```
 
-`video_watch({ statusOnly: true })` 里的 `batchPlan` 会告诉你当前用的是哪张表。
+`watch_together({ statusOnly: true })` 里的 `batchPlan` 会告诉你当前用的是哪张表。
 
 ### 余量按**时间**算，不按段数
 
@@ -136,7 +136,7 @@ video_watch({ ramp: [] })              // 不要阶梯，全程等长
 比一次构建失败还短。现在按秒算：
 
 ```js
-video_watch({ lookahead: 300 })   // 默认 5 分钟：当前位置之后要备好 5 分钟的内容
+watch_together({ lookahead: 300 })   // 默认 5 分钟：当前位置之后要备好 5 分钟的内容
 ```
 
 段短就自动多备几段：第 0 段（1 分钟）后面会连着备 2 分钟 + 3 分钟的两段，凑满 5 分钟；
@@ -153,7 +153,7 @@ video_watch({ lookahead: 300 })   // 默认 5 分钟：当前位置之后要备�
 词是模型写的（脚本只念），所以模型在阻塞前应该把这段窗口的 `at` 全排好。
 
 只在本次就要交付（already due）时例外：那时不为了预取拖慢返回，改写后台串行建。
-`video_watch({ prefetch: false })` 可以彻底关掉预取，只建当前段。
+`watch_together({ prefetch: false })` 可以彻底关掉预取，只建当前段。
 
 `statusOnly` 里 `depth` 会显示 `auto`（按时间算）还是一个数字（你显式给了 `depth`）。
 `depth` 这个按段数的旧口径还留着，但**一般不要用**：它会让余量随段长缩水。
@@ -207,9 +207,9 @@ onSpeech(({ state, text }) => { if (state === 'due') mySpeak(text); });
 固定成"每 10 秒一句"会把所有模型压成同一种语气。旋钮留在调用方：
 
 ```js
-video_watch({ speakEvery: 10 })   // 每 10 秒叫醒一次（密一点）
-video_watch({ speakEvery: 30 })   // 疏一点
-video_watch({ refillBelow: 2 })   // 盯着库存，缺了就醒
+watch_together({ speakEvery: 10 })   // 每 10 秒叫醒一次（密一点）
+watch_together({ speakEvery: 30 })   // 疏一点
+watch_together({ refillBelow: 2 })   // 盯着库存，缺了就醒
 ```
 
 ## 五点六、模型为什么可以"空出来"
@@ -273,7 +273,7 @@ onSpeech(({ state, text }) => { if (state === 'due') mySpeak(text); });
 对话根本没断过。它绕开了"叫醒"这一环，所以在那条路没验证通之前，它更可靠。
 
 ```js
-video_watch({ wait: true, maxWaitSec: 300 })   // 一直等到该说话，再返回
+watch_together({ wait: true, maxWaitSec: 300 })   // 一直等到该说话，再返回
 ```
 
 暂停 / 倒回 / 到封顶都会让它提前返回，不会死等。
@@ -291,7 +291,7 @@ B 站的字幕是**单独轨道**，只有登录用户能读。插件现在会�
 自检：
 
 ```js
-video_watch({ checkCookies: true, input: "https://www.bilibili.com/video/BV..." })
+watch_together({ checkCookies: true, input: "https://www.bilibili.com/video/BV..." })
 ```
 
 返回 `login.isLogin` 和 `subtitles.ok`。
@@ -299,7 +299,7 @@ video_watch({ checkCookies: true, input: "https://www.bilibili.com/video/BV..." 
 **还没打开视频？** 用 `waitForVideo` 让它等着：
 
 ```js
-video_watch({ waitForVideo: true, maxWaitSec: 120 })
+watch_together({ waitForVideo: true, maxWaitSec: 120 })
 ```
 
 调用方（模型）**必须先说一句"我在等你打开视频"**——工具阻塞期间说不出话，
@@ -323,14 +323,14 @@ video_watch({ waitForVideo: true, maxWaitSec: 120 })
 浏览器/SMTC 都没源 5 分钟 → 停（no-source）
 ```
 
-想手动停：`video_watch({ stopLoop: true })`。
+想手动停：`watch_together({ stopLoop: true })`。
 
 ---
 
 ## 八、排查
 
 ```js
-video_watch({ statusOnly: true })
+watch_together({ statusOnly: true })
 ```
 
 返回里看两个字段：

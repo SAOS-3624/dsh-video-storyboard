@@ -12,7 +12,7 @@
  *
  * ## 两条入口共用
  *
- * CLI（`watch.mjs`）和 DSH 插件（`video_watch`）都读同一个文件、同一套 watcher，
+ * CLI（`watch.mjs`）和 DSH 插件（`watch_together`）都读同一个文件、同一套 watcher，
  * 文件落在 `cacheDir()` 下。谁先起服务谁占端口，另一个复用。
  *
  * DSH 那边之所以也要：它的阻塞一遇到 `paused` 就会返回，用户想"不暂停视频、只说一句"
@@ -269,7 +269,7 @@ export async function startChatServer({ port = DEFAULT_CHAT_PORT, env = process.
 /**
  * 把聊天框**准备好**（幂等）：服务没起来就起，起来了就什么都不做。
  *
- * 为什么需要它：第一次调用要绑端口 + 可能要开标签页，是异步的；而调用方（`video_watch`
+ * 为什么需要它：第一次调用要绑端口 + 可能要开标签页，是异步的；而调用方（`watch_together`
  * 进入阻塞之前）只想要一句 `void ensureChatSession(port)` —— 起不来也不该让陪看失败，
  * 所以这里把异常吞掉，只留一个失败的 promise。
  */

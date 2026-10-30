@@ -1,5 +1,5 @@
 /**
- * watch/handler.js — `video_watch` 的 execute：单发命令分流 → 一次陪看调用 → 起循环。
+ * watch/handler.js — `watch_together` 的 execute：单发命令分流 → 一次陪看调用 → 起循环。
  *
  * 三段彼此独立，顺序也不能换：
  *   1. 单发命令（watch-actions.js）：一问一答就结束，一行都不进主流程；
