@@ -56,6 +56,8 @@ const SHARED_NOISE = {
   ],
   video_zoom: [
     'sheets', 'hotwords', 'textOnly', 'planThresholds', 'adaptive', // boardOptions 的 kind==='board' 分支
+    // boardGeometry() / segment 只在 kind==='board' 分支里读；zoom 的清晰度走 zoomHeight+quality
+    'budget', 'maxPerSheet', 'need', 'segment',
   ],
 };
 

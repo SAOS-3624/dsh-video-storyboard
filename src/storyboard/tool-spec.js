@@ -46,11 +46,17 @@ export function storyboardToolSpec() {
       '',
       'Use it like this:',
       '- Whole short clip: video_storyboard({ input })',
-      '- Long film, read in slices: video_storyboard({ input, from: 600, to: 900 })',
-      '- Wide shot of a long film: video_storyboard({ input, cells: 16, sheets: 2 })',
+      '- Long film, read in order (SEQUENCE): video_storyboard({ input, from: 0, segment: 300 }) —',
+      '  every result prints "segment 5/22 · 22% watched · 82 min left · next: from=..."',
+      '- One wide look at a long film (STRUCTURE, spoilers): cells: 9, sheets: 6',
       '',
-      'Cell count is chosen automatically from duration and how fast the picture changes',
-      '(fast-cut content gets more cells). Pass cells/sheets only if you want to override.',
+      'HOW TO PICK PARAMETERS — the one thing to get right:',
+      '- A sheet has a fixed pixel budget, so cells and legibility trade off. cells x sheets = how many',
+      '  moments you see; budget / cells = how big each moment is. 16 cells is ~341×189 at best.',
+      '- Never buy coverage with smaller cells. If you need more moments, add a sheet; if you need to',
+      '  read text, say need:"text" (it caps cells per sheet at what is actually readable).',
+      '- cells:1 is exactly one frame. The manifest prints the real cell size, the readability level and',
+      '  the token cost, and it warns you when the cells are too small to read what you asked for.',
     ].join('\n'),
     parameters: {
       input: {
@@ -66,17 +72,52 @@ export function storyboardToolSpec() {
       },
       to: {
         type: 'number',
-        description: 'Window end in seconds (default: end of file).',
+        description: 'Window end in seconds. Omit it to let `segment` size the window: 300 s when from > 0, '
+          + 'or the whole file when from = 0. Pass `to` only when you deliberately want a specific range.',
       },
       cells: {
         type: 'integer',
-        description: 'Cells per image, 1-16 (default: auto). More cells = more coverage but smaller each.',
+        description: 'Cells per image, 1-16 (default: auto). **cells x sheets = how many moments you see; '
+          + 'budget / cells = how much you can see in each one.** 9 cells at budget 1.2M is ~456x254 '
+          + '(faces, action); 16 is ~341x189 (composition only); 16 at budget 640k is 247x137 '
+          + '(286x118 on a 2.39:1 film) — colour blocks, not content. cells:1 is exactly ONE frame: '
+          + 'it is never packed into a 2x2 mosaic.',
       },
       sheets: {
         type: 'integer',
-        description: 'How many images to return, 1-16 (default: auto). Each image costs another ~384 tokens '
-          + '(16 means ~6k): ask for many only when the user wants a dense pass over a long video. '
-          + 'The auto value is not capped by this — a 66-minute lecture already returns 3.',
+        description: 'How many images to return, 1-16 (default: auto). Each image costs ~700 vision tokens '
+          + 'at the default budget (~390 at 640k, ~990 at 1.65M — not a flat 384). When you need more '
+          + 'coverage, **add a sheet rather than cramming more cells**: 2 images x 9 legible cells beat '
+          + '1 image x 16 tiny ones for the same token order.',
+      },
+      need: {
+        type: 'string',
+        enum: ['shot', 'scene', 'text'],
+        description: 'What you must actually SEE (default "scene"). This, not a size name, decides how many '
+          + 'cells fit per image: shot = tell shots apart (160x90 per cell), scene = recognise faces and '
+          + 'action (320x180), text = read subtitles / signs / UI (480x270). It caps the auto cell count; '
+          + 'when you pass cells explicitly it is still used to warn you that the cells are below what you asked for.',
+      },
+      budget: {
+        type: 'integer',
+        description: 'Pixels per image (default 1200000 ~= 700 vision tokens on DSH; 640000 ~= 390; '
+          + '1650000 ~= 990, near the host 1024-token cap). Raising it makes every cell bigger without '
+          + 'adding a second image — the right way to fix "too blurry". Above ~1.65M the host downscales, '
+          + 'and the cell= in the manifest stops matching what you really see.',
+      },
+      maxPerSheet: {
+        type: 'integer',
+        description: 'Advanced: hard cap on auto cells per image, 1-16. Default is derived from budget + need '
+          + '(9 at 640k/scene, 16 at 1.2M/scene). Only affects auto planning and how sheets are split; '
+          + 'it is ignored when you pass cells explicitly.',
+      },
+      segment: {
+        type: 'integer',
+        description: 'Window length in seconds when you pass `from` without `to` (default 300 when from > 0; '
+          + 'with from=0 and no segment you get the whole file). This is the SEQUENCE reader: call once with '
+          + 'from:0, segment:300, then pass back the `next: from=...` printed at the end of every result — '
+          + 'it also prints "segment 5/22 · 22% watched · 82 min left". Use 300 for films/episodes, '
+          + '120-180 for dense action.',
       },
       pick: {
         type: 'string',
@@ -103,10 +144,11 @@ export function storyboardToolSpec() {
       tileFirst: {
         type: 'boolean',
         description: 'Default false. Trade cells for resolution: fewer, bigger cells so each one can be ' +
-          'tiled 2×2/3×3 instead of staying a single frame. A 4×4 layout gives 247×137 per cell, and ' +
-          '2×2 of that is 123×68 — too small to read. With 9 cells (3×3 layout) each cell is 331×184 ' +
-          'and tiles to 165×92 or 110×61. Use this when the video is fast-cut and you care more about ' +
-          '"how many different shots did I see" than "can I read the on-screen text".',
+          'tiled 2×2/3×3 instead of staying a single frame. A 4×4 layout at the 640k budget gives 247×137 ' +
+          'per cell, and 2×2 of that is 123×68 — too small to read. With 9 cells (3×3 layout) each cell ' +
+          'is 331×184 and tiles to 165×92 or 110×61. Use this when the video is fast-cut and you care more ' +
+          'about "how many different shots did I see" than "can I read the on-screen text". Tiling is ' +
+          'skipped entirely when cells:1, so a single-cell request really returns one frame.',
       },
       transcript: {
         type: 'string',
@@ -143,16 +185,21 @@ export function storyboardToolSpec() {
           'Overrides asr.json for this call only. Use it when the subject has its own vocabulary — a global ' +
           'list from another subject is a negative bias, not a neutral default.',
       },
+      size: {
+        type: 'string',
+        enum: ['small', 'medium', 'large'],
+        description: 'Deprecated shorthand for `budget` only: small = 640k px (331×184 at 9 cells), '
+          + 'medium = 1.2M (~456×254 with the audio strip, default), large = 1.65M (~530×295). It no longer changes the cell '
+          + 'count or the download resolution — those are `need`/`maxPerSheet` and the pixel budget now. '
+          + 'Prefer `budget` + `need`.',
+      },
       quality: {
         type: 'string',
         enum: ['low', 'medium', 'high'],
-        description: 'Sharpness of the returned storyboard, **http(s) links only** — a local file is ' +
-          'always read at its own resolution, so this does nothing for it. ' +
-          'low = 360p (fast, on-screen text unreadable), medium = 720p (default), high = 1080p ' +
-          '(slowest download, biggest image budget). ' +
-          '**Raise it to high when the user says the image is blurry, or when the cell has to show ' +
-          'readable text / small detail.** A link is downloaded once at this tier and every cell is ' +
-          'cut from that file, so this is the only knob that changes how sharp the grid is.',
+        description: 'Override the download resolution (http(s) links only; a local file is always read at ' +
+          'its own resolution). Normally leave it out: the scan tier is derived from the pixel budget ' +
+          '(640k -> 360p, 1.2M -> 720p, 1.65M -> 1080p). low = 360p, medium = 720p, high = 1080p. Turn it ' +
+          'up only when video_zoom needs a sharper fallback copy.',
       },
       scanHeight: {
         type: 'integer',
@@ -298,6 +345,12 @@ export function zoomToolSpec() {
           'high = 1080p (default). Raise it when the fine detail is not readable; lower it when the ' +
           'download is too slow. Ignored for local files, which are always read at native resolution.',
       },
+      size: {
+        type: 'string',
+        enum: ['small', 'medium', 'high'],
+        description: 'Sharpness of the close-up frames: small = 720p source, medium = 1080p (default), ' +
+          'high = 1440p. Raise it when fine detail matters; lower it to save bandwidth.',
+      },
       zoomHeight: {
         type: 'integer',
         description: 'For http(s) links: which resolution to read the original stream at (default 1080). ' +
@@ -362,7 +415,10 @@ export function probeToolSpec() {
       'frame rate, rotation, audio track, subtitle tracks, and a suggested reading plan.',
       '',
       'Call this FIRST when you do not already know how long the file is. It costs no image tokens.',
-      'Then either video_storyboard (overview, or a window) or video_zoom (close-up).',
+      'Then read it: for a film / episode / any story use SEQUENCE —',
+      'video_storyboard({ input, from: 0, segment: 300 }) and follow the "next: from=..." it prints.',
+      'A one-shot overview of the whole file is only for identifying what it is (it spoils the ending',
+      'and makes every cell smaller). video_zoom is for a close-up of one moment.',
     ].join('\n'),
     parameters: {
       input: {
@@ -503,6 +559,21 @@ export function validateToolArgs(args) {
   }
   if (args.sheets !== undefined && (!Number.isInteger(args.sheets) || args.sheets < 1 || args.sheets > 16)) {
     problems.push('sheets must be an integer 1..16');
+  }
+  if (args.need !== undefined && !['shot', 'scene', 'text'].includes(args.need)) {
+    problems.push("need must be 'shot', 'scene' or 'text'");
+  }
+  if (args.budget !== undefined
+    && (!Number.isInteger(args.budget) || args.budget < 320_000 || args.budget > 4_000_000)) {
+    problems.push('budget must be an integer 320000..4000000 (pixels per image)');
+  }
+  if (args.maxPerSheet !== undefined
+    && (!Number.isInteger(args.maxPerSheet) || args.maxPerSheet < 1 || args.maxPerSheet > 16)) {
+    problems.push('maxPerSheet must be an integer 1..16');
+  }
+  if (args.segment !== undefined
+    && (!Number.isInteger(args.segment) || args.segment < 30 || args.segment > 3600)) {
+    problems.push('segment must be an integer 30..3600 (seconds)');
   }
   if (args.from !== undefined && args.from < 0) problems.push('from must be >= 0');
   if (args.maxStrips !== undefined && (!Number.isInteger(args.maxStrips) || args.maxStrips < 1 || args.maxStrips > 40)) {

@@ -94,6 +94,8 @@ function shrinkToBudget(cells, subBudget) {
 export function measureGroup(ranges, {
   aspect = 16 / 9, budget = 640_000, audioStrip = false, musicDriven = false,
   subBudget = 48, cuts = [], sampleMarks = [], stats = [],
+  // 1 = 禁止格内摊开。`cells:1` 的语义是"就要这一帧"，不能悄悄拼成 2×2。
+  maxK = 4,
 } = {}) {
   const n = Math.max(1, ranges.length);
   const { cols, rows } = bestLayout(n, aspect);
@@ -106,7 +108,7 @@ export function measureGroup(ranges, {
     const { cutList, marks, cutScore, meanMotion } = cellSignals(range, { cuts, sampleMarks, stats });
     const shots = cutList.length + 1 + marks.length;
     const want = chooseSubGrid({
-      shots, cellW, cellH, dur: range.to - range.from, cutScore, meanMotion,
+      shots, cellW, cellH, dur: range.to - range.from, cutScore, meanMotion, maxK,
       // 音乐驱动：单镜头但有动静就摊（门槛 1.5 → 0.7）
       minMotion: musicDriven ? 0.7 : 1.5,
       // **子帧下限逐格判，不看整片类型**。

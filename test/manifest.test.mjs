@@ -101,7 +101,8 @@ test('清单头部带 cell/tokens/ffmpeg/sha256 与 plan 输入', () => {
   };
   const text = formatManifest(r, { maxChars: 200_000 });
   assert.match(text, /cell="559x248"/);
-  assert.match(text, /tokens="384 \(est@384\/img[^"]*\)"/, '要写清 384 是按什么口径估的');
+  assert.match(text, /tokens="418 \(est@418\/img, DSH 42px grid[^"]*\)"/,
+    '要按实际像素算 token（1064x600 → 418），不能写死 384');
   assert.match(text, /ffmpeg="6\.1\.1-essentials_build"/);
   assert.match(text, /sha256="abc123"/);
   assert.match(text, /plan: auto 16 cells/);
@@ -372,10 +373,16 @@ test('清单：没修任何东西时不写 OCR 行（省 token）', () => {
 
 test('清单：minGap 压掉格数时首行写"实际/请求"，不写成请求值', () => {
   const r = makeResult({ cells: 16 });
-  r.plan = { ...r.plan, cells: 6, produced: 4,
+  r.sheets = [{
+    sheet: 1, cols: 3, rows: 2, width: 1064, height: 600,
+    cells: Array.from({ length: 4 }, (_, k) => ({
+      i: k + 1, sheet: 1, t_start: k * 2, t_end: k * 2 + 1.5, text: '台词',
+    })),
+  }];
+  r.plan = { ...r.plan, cells: 6, sheets: 1, produced: 4,
     inputs: { duration: 60, scanThreshold: 40, meanLufs: -20, speechRate: 2, motion: 5, cuts: 12, hasSubtitle: false } };
   const text = formatManifest(r, { maxChars: 200_000 });
-  assert.match(text, /4\/6 cells \(minGap-limited\)/, '首行必须同时给出实际与请求');
+  assert.match(text, /4\/6 cells/, '首行必须同时给出实际与请求');
 });
 
 test('清单：格数一致时不加括号噪音', () => {
@@ -436,4 +443,40 @@ test('minGap 卡住时说清"要了多少、出了多少"（不虚报）', () =>
   }];
   const text = formatManifest(r, { maxChars: 200_000 });
   assert.match(text, /grid="8 cells x 1 image\(s\) \(asked 16\)"/);
+});
+
+test('看不清时清单必须主动说，并给三条可执行的改法', () => {
+  const r = makeResult({ cells: 16 });
+  r.plan = {
+    ...r.plan, budget: 640_000, need: 'text',
+    cell: { w: 286, h: 118, readability: 'composition' },
+  };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /!! cells are 286x118/);
+  assert.match(text, /below what you asked for \(text/);
+  assert.match(text, /cells:\d+ on this same budget/, '要给"减格数"的具体数字');
+  assert.match(text, /budget:\d+/, '要给出另一条路');
+  assert.match(text, /video_zoom/, '要给出第三条路');
+  // 声明够用的时候不要唠叨
+  r.plan = { ...r.plan, need: 'shot' };
+  assert.ok(!/!! cells are/.test(formatManifest(r, { maxChars: 200_000 })));
+});
+
+test('成本按"图数 x token + ASR 秒数"报，不报 CPU', () => {
+  const r = makeResult({ cells: 16 });
+  r.transcript = { ...r.transcript, source: 'asr', asrSeconds: 192.4, asrCached: false };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /cost: 1 image\(s\) × ~418 = ~418 vision tokens/);
+  assert.match(text, /ASR 192\.4 s/);
+
+  r.transcript = { ...r.transcript, asrCached: true, asrSeconds: 0 };
+  assert.match(formatManifest(r, { maxChars: 200_000 }), /transcript reused from cache \(0 s\)/);
+});
+
+test('SEQUENCE 的进度写进清单：不用调用方自己记时间', () => {
+  const r = makeResult({ cells: 16 });
+  r.segment = { sec: 300, index: 5, total: 22, watchedSec: 1200, leftSec: 4920, auto: false };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /segment 5\/22 · 13% watched · 82 min left/);
+  assert.match(text, /next: from=1500/);
 });

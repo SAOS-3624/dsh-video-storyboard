@@ -13,6 +13,12 @@ import { cacheDir } from './cache.js';
 
 const FILE = 'cells.json';
 const MAX_FILES = 12;
+/**
+ * 记录版本。**2 = 修掉 issue #37 之后的绝对时间**。
+ * 旧表（没有 v）里的 from 被重复加过一次窗口起点，拿它去 zoom 会跳到 2×from 的位置；
+ * 所以查表时直接不认，让用户下次跑分镜时自然重建。
+ */
+export const CELLS_VERSION = 2;
 
 const norm = (p) => String(p ?? '').replace(/\\/g, '/').toLowerCase();
 
@@ -39,6 +45,7 @@ export async function saveCells(path, cells, { env = process.env, at = Date.now(
   } catch { /* 没有或坏了：重建 */ }
 
   const record = {
+    v: CELLS_VERSION,
     at,
     cells: cells.map((c) => ({ i: c.i, from: +c.from.toFixed(3), to: +c.to.toFixed(3) })),
   };
@@ -62,6 +69,8 @@ export async function lookupCell(path, cellId, { env = process.env } = {}) {
   try {
     const all = JSON.parse(await readFile(cellsPath(env), 'utf8')) ?? {};
     const rec = all[norm(path)];
+    // 旧表不认：没有 v 的是被 #37 污染过的时间（窗口起点加了两次），宁可不寻址也不跳到错位置。
+    if (!rec || rec.v !== CELLS_VERSION) return null;
     const hit = rec?.cells?.find((c) => c.i === Number(cellId));
     return hit ? { ...hit } : null;
   } catch {

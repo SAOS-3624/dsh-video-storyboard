@@ -3,6 +3,7 @@
  * storyboard — CLI 薄壳，真正的逻辑全在 src/pipeline.js（与 DSH 工具同一份实现）。
  *
  *   node bin/storyboard.mjs <video> [--cells 9] [--sheets 1] [--from 0] [--to 300]
+ *                                   [--segment 300] [--need scene] [--budget 1200000]
  *                                   [--pick sharp|mid|thumb] [--burn index|none]
  *                                   [--threshold auto|15] [--min-gap 1.2]
  *                                   [--transcript auto|off] [--no-adaptive] [--badge 0.15]
@@ -18,15 +19,16 @@ import { resolveInput } from '../src/storyboard/fetch.js';
 import {
   DETAIL_CHARS, formatManifest, formatTimeline, runStoryboard, saveStoryboards,
 } from '../src/storyboard/pipeline.js';
-import { QUALITY_HEIGHTS } from '../src/storyboard/board.js';
+import { QUALITY_HEIGHTS, SIZE_BUDGETS, boardGeometry } from '../src/storyboard/board.js';
 
 const opt = parse(process.argv.slice(2), {
   cells: 0, sheets: 0, from: 0, to: 0, threshold: 'auto', 'min-gap': 1.2,
   pick: 'sharp', burn: 'index', badge: 0.15, transcript: 'auto',
   out: 'storyboard.png', manifest: null, plan: 0, 'text-only': false, 'cell-range': null,
   batch: 0, detail: 'med',
-  cookies: null, 'allow-anonymous': false, 'scan-height': 360, 'zoom-height': 1080,
-  'transcript-file': null, 'source-hash': false, quality: 'medium',
+  // scan-height 默认 0 = 交给预算推导（medium → 720p）；写死 360 会让 --size 永远不生效。
+  cookies: null, 'allow-anonymous': false, 'scan-height': 0, 'zoom-height': 1080,
+  'transcript-file': null, 'source-hash': false, quality: 'medium', size: 'medium',
 });
 const input = opt._[0];
 if (!input) {
@@ -39,7 +41,10 @@ const fetchOptions = {
   cookies: opt.cookies ?? undefined,
   allowAnonymous: opt['allow-anonymous'] === true,
   // quality 是给人的旋钮；--scan-height 精确覆盖它
-  scanHeight: Number(opt['scan-height']) || QUALITY_HEIGHTS[opt.quality] || 360,
+  scanHeight: Number(opt['scan-height'])
+    || QUALITY_HEIGHTS[opt.quality]
+    || SIZE_BUDGETS[opt.size]?.scanHeight
+    || 360,
   zoomHeight: Number(opt['zoom-height']) || 1080,
 };
 let localPath = input;
@@ -143,6 +148,12 @@ const r = await runStoryboard({
   sheets: Number(opt.sheets) || 0,
   threshold: opt.threshold === 'auto' ? 'auto' : Number(opt.threshold),
   minGap: Number(opt['min-gap']) || 0,
+  // `--size` 现在只是 --budget 的别名；格数上限由 need + 预算推，也可 --max-per-sheet 覆盖。
+  // **必须传给 runStoryboard 本身**，放进 fetchOptions（下载参数）会被忽略。
+  budget: boardGeometry(opt).budget,
+  maxPerSheet: boardGeometry(opt).maxPerSheet,
+  need: boardGeometry(opt).need,
+  segment: Number(opt.segment) || 0,
   pick: String(opt.pick),
   burn: String(opt.burn),
   // `--badge 0` 必须真的等于 0：`Number(0) || 0.15` 会把它变成 0.15，
@@ -160,7 +171,9 @@ console.log(`[probe] ${info.width}x${info.height} ${info.fps.toFixed(2)}fps ${in
     ? `  window=${r.window.from.toFixed(1)}..${r.window.to.toFixed(1)}s` : ''));
 console.log(`[scan] ${r.summary.frames} 帧 → ${r.cuts.length} 个切点（阈值 ${r.threshold}，` +
   `${r.plan.adaptive ? `自适应 ${r.plan.bursts.length} 个密集段` : '均匀分配'}）`);
-console.log(`[plan] ${r.plan.cells} 格 × ${r.plan.sheets} 张 — ${r.plan.reason}`);
+console.log(`[plan] ${r.plan.cells} 格 × ${r.plan.sheets} 张` +
+  (r.plan.requested && r.plan.requested.cells !== r.plan.cells * r.plan.sheets
+    ? `（要 ${r.plan.requested.cells}）` : '') + ` — ${r.plan.reason}`);
 if (r.audio) console.log(`[audio] ${r.audio.summary}`);
 if (r.transcript) {
   console.log(`[transcript] ${r.transcript.source}${r.transcript.model ? ` (${r.transcript.model})` : ''}` +

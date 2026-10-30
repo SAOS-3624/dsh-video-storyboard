@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { isLoopback,
-  alignCells, CELL_BREAK_GAP, chunkWindows, mergeSegments, shortStamp, transcribeLong,
+  alignCells, asrBackendId, CELL_BREAK_GAP, chunkWindows, mergeSegments, shortStamp, transcribeLong,
 } from '../src/storyboard/asr.js';
 
 /* ---------------------------------------------------------------- 空结果的诚实度 */
@@ -116,4 +116,18 @@ test('isLoopback: 本机服务不需要 key', () => {
   assert.equal(isLoopback('http://[::1]:8000/v1'), true);
   assert.equal(isLoopback('https://api.siliconflow.cn/v1'), false);
   assert.equal(isLoopback('not a url'), false);
+});
+
+
+/* ---------------------------------------------------------------- 缓存身份（issue #38） */
+
+test('asrBackendId: 热词 / 语言 / 模型任一变化，键就必须变', () => {
+  const base = { baseUrl: 'http://127.0.0.1:8000/v1', model: 'm', language: 'zh', maxChunk: 45, hotwords: '' };
+  assert.match(asrBackendId(base), /^asr2\|/, '前缀 = 2 才会让 0.5.3 的旧缓存自然作废');
+  assert.notEqual(asrBackendId(base), asrBackendId({ ...base, hotwords: '位错 滑移' }),
+    '热词不同不能共用缓存');
+  assert.notEqual(asrBackendId(base), asrBackendId({ ...base, language: 'en' }),
+    '语言不同不能共用缓存');
+  assert.notEqual(asrBackendId(base), asrBackendId({ ...base, model: 'm2' }));
+  assert.equal(asrBackendId(base), asrBackendId({ ...base }));
 });

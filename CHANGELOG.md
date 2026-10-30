@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.5.4] - 2026-10-31
+
+这一版只解决一件事：**参数不再让人用"更小的格子"去换"更大的封面面积"**。
+起因是一份真实反馈：看一部电影时按 `cells:16` 总览，每格 286×118，模型只能看见色块，
+然后照着色块编剧情 —— 而清单对此一声不吭。
+
+### Changed
+
+- **`size` 拆开，不再是一个旋钮绑三个量。** 现在：
+  - `budget` 只管"一张图多少像素"（默认 **1.2M**，≈700 vision token；640k ≈390，1.65M ≈990）；
+  - `need` 管"要看多清"（`shot` 160×90 / `scene` 320×180 / `text` 480×270）；
+  - `maxPerSheet` 由前两者推出，也可显式覆盖；`quality`/`scanHeight` 仍单独覆盖下载清晰度。
+  `size` 保留为 `budget` 的别名（small 640k / medium 1.2M / large 1.65M），不再影响格数和下载档位。
+- **默认预算 640k → 1.2M。** 9 格从 331×184 变成 456×254。代价是每张图约 390 → 700 token；
+  要省钱显式传 `size:"small"` 或 `budget:640000`，清单会把可读性和代价都写出来。
+- **`cells` 不再被静默改写**：补满布局、并尾段、黑场让格，都会写进清单的 `adjusted=`。
+- **`from` > 0 且没给 `to` 时不再扫到片尾**：默认按 300 秒推一段（可用 `segment` 改）。
+
+### Added
+
+- **`segment`（SEQUENCE 自动推段）**：`video_storyboard({ input, from: 0, segment: 300 })`
+  只管第一段，结果末尾回显 `segment 5/22 · 22% watched · 82 min left · next: from=1500`，
+  下一段把那个 `from` 传回来就行。调用方不用自己记时间，也不容易停在中途就忘。
+- **清单新增三行**：
+  - `cell=421x237 (scene)` —— 每格实际多大、能读到哪一档；
+  - `cost: 2 image(s) × ~737 = ~1474 vision tokens · ASR 192 s` —— 成本按"图数×token + ASR 秒数"报，
+    不再报 CPU 秒；
+  - `!! cells are 286x118 — below what you asked for (text: 480x270…)` —— **看不清时主动报警**，
+    并给三条可执行改法（减格数 / 加预算 / 用 zoom）。
+- **ASR 按片落盘复用**：转写结果以**绝对时间**存到 `<cache>/transcripts/<file>.json`，
+  只要已有一段完整覆盖本次窗口，就直接切出来用 —— zoom 回看已转写段里的 20 秒不再重跑 ASR，
+  也不会为了它临时拉起本地模型。后端（模型/切片长度/热词）变了就不复用。
+- `transcript:"off"` 现在有独立标签，清单会说明"这是主动关掉，不是这片子没人说话"。
+- 一次出超过 8 张图时，清单提示"这是 wide pass，叙事内容用 SEQUENCE 更便宜也不剧透"。
+
+### Fixed
+
+- **`cells:1` 真的只给一帧**：旧版格内摊开会把它拼成 2×2（一格 4 个瞬间），
+  清单仍写 "1 cell" —— 模型以为看到的是一帧。
+- **`maxPerSheet` 以前只影响"建议格数"**：真正切张仍写死 16，参数看着生效了其实没有。现在两处同一个值。
+- **token 不再写死 384**：按宿主 42px 网格、用实际出图尺寸算（1.2M 的图约 700）。
+  旧口径只对 640k 成立，会让模型以为"多要几张不贵"。
+- **#37：cell 表不再重复加窗口起点。** `t_start` 本来就是绝对时间（`planRanges()` 两条路都加过
+  `winStart`），`saveCells()` 又加了一次 → `from>0` 或 zoom 之后 `video_zoom({cellId})` 会跳到
+  2× 位置。顺手把"t_start 是窗口相对值"那句错误注释改掉，并给 `cells.json` 记录加 `v: 2`：
+  `lookupCell()` 不认旧表，用户机器上已被污染的记录自动失效。
+- **#38：热词/语言进了缓存键。** 旧键用入参 `hotwords ?? ''`，实际没传时用的是 `asr.json` 的值 ——
+  改热词仍命中旧缓存，而且新的按片复用会把它放大成"换任何窗口都命旧缓存"。现在统一走
+  `asrBackendId()`（`asr2|baseUrl|model|language|maxChunk|transcript|hotwords`），
+  键和 `transcribeLong()` 的实参用同一个解析值；`asr2|` 前缀让旧缓存自然作废。`terms` 仍不进键。
+
+### Docs
+
+- `video_probe` 的读法建议改写：**叙事内容默认 SEQUENCE**（`from` + `segment`），
+  STRUCTURE 明确标成"只用于辨认这是什么片 / 已有剧透许可时"，并删掉原来的
+  `cells:16, sheets:4` 配方 —— 那正是 286×118 的来源。
+
 ## [0.5.3] - 2026-10-31
 
 ### Added

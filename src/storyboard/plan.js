@@ -17,6 +17,83 @@ export const MAX_SHEETS = 99;   // 不封顶：片长决定张数（每 5 分钟
 export const DEFAULT_ASPECT = 16 / 9;
 
 /**
+ * 可读性档位 —— **模型该说的不是"图多大"，而是"我需要看清到什么程度"**。
+ *
+ * 一图一预算，格数越多每格越小：640k px 的图放 16 格，每格只有 247×137，
+ * 那是"看得出构图"，不是"看得清内容"。所以格数必须由**目标可读性**反推，
+ * 而不是由档位名字暗示（旧版 small 允许 16 格、large 只允许 9 格，正好是反的）。
+ *
+ * 门限来自 2026-10-30 的盲评：123×68 认不出字幕/UI（1~2 分），165×92 只能分辨镜头，
+ * 252×156 能认字。取整成三档，并留 5% 容差（真实布局有 gutter，见 sheet.layoutCanvas）。
+ */
+export const NEED_TIERS = Object.freeze({
+  shot: { minCellW: 160, minCellH: 90, label: 'tell one shot from another (no reading)' },
+  scene: { minCellW: 320, minCellH: 180, label: 'recognise faces, action and large titles' },
+  text: { minCellW: 480, minCellH: 270, label: 'read subtitles, signs and UI text' },
+});
+export const DEFAULT_NEED = 'scene';
+/** 布局有 gutter，纯算术按 96% 估；差 1~2 格时宁可保守。 */
+const CELL_GEOMETRY_SLACK = 0.96;
+/**
+ * 选格数时再保守 6%：`cellPixels` 没算 gutter 与取整，用来**展示**是准的，
+ * 用来**卡门槛**就会偏乐观（640k 的 12 格算 323×181，实际出图 303×166，低于 scene）。
+ * 这条只用于 maxCellsForNeed，不污染清单里的 cell= 数字。
+ */
+const CELL_FIT_SLACK = 0.94;
+
+/**
+ * 一张图放 n 格时，每格**大致**多少像素（按 96% 估 gutter，给模型看的量级）。
+ * 真实出图以 sheet.layoutCanvas 为准；这里只用于选格数与写清单。
+ */
+export function cellPixels(cells, aspect = DEFAULT_ASPECT, budget = PIXEL_BUDGET) {
+  const n = Math.max(1, Math.round(Number(cells) || 1));
+  const area = Math.max(1, budget) / n;
+  const w = Math.round(Math.sqrt(area * aspect) * CELL_GEOMETRY_SLACK);
+  return { w, h: Math.round(w / aspect), area: Math.round(area) };
+}
+
+/**
+ * 一格实际能支撑到哪一档可读性。**这是清单要对模型说的实话**：
+ * 它不需要知道像素，只需要知道"这张图能读到字，还是只能看构图"。
+ */
+export function readabilityOf(cellW, cellH) {
+  if (!(cellW > 0) || !(cellH > 0)) return 'unknown';
+  for (const level of ['text', 'scene', 'shot']) {
+    const t = NEED_TIERS[level];
+    if (cellW >= t.minCellW * 0.95 && cellH >= t.minCellH * 0.95) return level;
+  }
+  return 'composition';
+}
+
+/**
+ * 在给定像素预算下，为了达到 need 档可读性，一张图最多放几格。
+ *
+ * 从大到小试，返回**布局友好的整数**（4/6/9/12/16 的子集）。
+ * 640k + scene → 9；1.2M + scene → 16；1.2M + text → 9；640k + text → 4。
+ */
+export function maxCellsForNeed(budget = PIXEL_BUDGET, aspect = DEFAULT_ASPECT, need = DEFAULT_NEED) {
+  const tier = NEED_TIERS[need] ?? NEED_TIERS[DEFAULT_NEED];
+  for (const n of [16, 12, 9, 6, 4, 2, 1]) {
+    const c = cellPixels(n, aspect, budget);
+    if (c.w * CELL_FIT_SLACK >= tier.minCellW && c.h * CELL_FIT_SLACK >= tier.minCellH) return n;
+  }
+  return 1;
+}
+
+/**
+ * DSH 宿主的视觉 token 计价：14px patch、每轴 3:1 下采样（一格 42px），每行加一个分隔 token。
+ *
+ * 用它而不是常数 384：384 只对"640k px 的图"成立。默认预算提到 1.2M 之后，
+ * 一张图约 700 token —— 报 384 就是谎报，模型会据此做出错误的成本判断。
+ * API 宿主按像素计费，口径不同，所以这个数只标成 DSH 口径。
+ */
+export function imageTokens(width, height) {
+  const gw = Math.ceil(Math.max(1, width) / 42);
+  const gh = Math.ceil(Math.max(1, height) / 42);
+  return gw * (gh + 1) + 2;
+}
+
+/**
  * Content-classification thresholds. Kept in one place so the manifest can report them.
  *
  * `musicLufs` 只在**既没有台词、也没有音频包络**时兜底（见 isMusicDriven 第 3 条）。
@@ -214,7 +291,9 @@ export function suggest(meta) {
   // 现在：**每格装 TARGET_SHOTS 个镜头**，格数 = 镜头数 ÷ TARGET_SHOTS。
   // 每格 12 个镜头 → 摊 3×3 或 4×4 刚好，也不至于一格塞十几个看不清。
   const TARGET_SHOTS_PER_CELL = 8;
-  const MAX_PER_SHEET = 16;
+  // 每张最多几格：由 `size` 档位决定（small 16 / medium 12 / large 9）。
+  // 长片用 4×4 时每格只有 247×137，再二重细分就没法看 —— 高档位宁可多出一张图。
+  const MAX_PER_SHEET = Math.max(4, Math.min(16, Number(meta.maxPerSheet) || 16));
   // 单格最多覆盖多少秒。超过这个长度，一格里的"中点"就开始不像这一段的代表了
   // （6 分钟的格子里，取哪一帧都是随便挑的）。
   const MAX_CELL_SECONDS = 90;
@@ -255,8 +334,13 @@ export function suggest(meta) {
   const pace = typeof motion === 'number'
     ? `画面变化 p90=${motion.toFixed(1)}（${perCell.toFixed(0)}s/格）`
     : `均镜头 ${avgShot.toFixed(1)}s（${perCell.toFixed(0)}s/格）`;
+  // 把"这张图每格多大、能看清到什么程度"写进 reason：
+  // 旧版只报格数，模型无从判断 16 格是不是已经糊了（286×118 就是这么被接受的）。
+  const px = cellPixels(cells, meta.aspect ?? DEFAULT_ASPECT, meta.budget ?? PIXEL_BUDGET);
+  const readable = readabilityOf(px.w, px.h);
   return pick(label, cells, sheets,
-    `${duration.toFixed(0)}s、${shots} 个镜头、${pace} → ${cells} 格 × ${sheets} 张（≈${Math.round(duration / (cells * sheets))}s/格）` +
+    `${duration.toFixed(0)}s、${shots} 个镜头、${pace} → ${cells} 格 × ${sheets} 张` +
+    `（≈${Math.round(duration / (cells * sheets))}s/格、${px.w}×${px.h}/格 = ${readable}）` +
     (musicDriven ? '·音乐驱动（取帧更密，格数不受影响）' : ''), musicDriven);
 }
 
@@ -351,7 +435,8 @@ export function planTotal(meta, opts = {}) {
   const truncated = sheets > budgetImages;
   if (truncated) sheets = budgetImages;
 
-  const cell = cellSize(cols, rows, aspect);
+  const budget = opts.budget ?? PIXEL_BUDGET;
+  const cell = cellSize(cols, rows, aspect, budget);
   return {
     cols,
     rows,
@@ -359,6 +444,8 @@ export function planTotal(meta, opts = {}) {
     sheets,
     coverage,
     cell,
+    readable: readabilityOf(cell.w, cell.h),
+    budget,
     canvasAspect: canvasAspect(cols, rows, aspect),
     images: sheets,
     approxTokens: sheets * IMAGE_TOKEN_CAP,

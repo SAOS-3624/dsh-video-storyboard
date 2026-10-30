@@ -154,23 +154,28 @@ video_storyboard({ input, cells: 9 })          // 一张图
 video_zoom({ input, from: 12, to: 18 })        // 觉得某段有意思再放大
 ```
 
-### B. 长片顺序读（追剧情、怕剧透）
+### B. 长片顺序读（追剧情、怕剧透）—— 叙事内容默认这条
 
 ```js
-video_probe({ input })                          // 先知道多长
-video_storyboard({ input, from: 0,    to: 300 })
-video_storyboard({ input, from: 300,  to: 600 })
-// …一次 5 分钟，永远不往后看
+video_probe({ input })                                    // 先知道多长
+video_storyboard({ input, from: 0, segment: 300 })        // 第 1 段
+// → 结尾回显：segment 1/22 · 5% watched · 82 min left · next: from=300
+video_storyboard({ input, from: 300, segment: 300 })      // 把 next 的 from 传回来，segment 不变
+// …永远不往后看
 ```
 
-每段的扫描结果会缓存，回头重看某段是免费的。
+不用自己记时间：每段结果都带进度和下段的 `from`。
+扫描与 ASR 都落盘缓存，回头重看某段是免费的。
 
-### C. 长片结构读（做索引、判断值不值得看）
+### C. 长片结构读（只在"确认这是什么片"或允许剧透时）
 
 ```js
-video_storyboard({ input, cells: 16, sheets: 4 })   // 4 张图盖全片
+video_storyboard({ input, cells: 9, sheets: 6 })    // 54 个瞬间，每格约 421×237（能认脸和动作）
 video_storyboard({ input, from: 600, to: 900 })     // 只打开可疑的段落
 ```
+
+**不要用 `cells:16` 换"更大的封面面积"**：640k 预算下 16 格只有 247×137
+（2.39:1 的片子是 286×118），那是色块，不是内容。要覆盖更多就加 `sheets`。
 
 ### D. 快闪蒙太奇
 

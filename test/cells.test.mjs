@@ -1,12 +1,13 @@
 /**
  * cells.test.mjs — cellId 寻址 + 阈值可配。
  *
- * cellId 的意义：清单里的 t_start 是**窗口相对值**，模型抄数字换窗口就会错位。
- * 这里锁两件事：绝对时间被正确记下；找不到时**明确报错**而不是猜一个窗口。
+ * cellId 的意义：模型不该自己抄时间码，换窗口就会错位。
+ * 这里锁三件事：**绝对时间**被正确记下（issue #37：t_start 本来就是绝对时间，不能再加窗口起点）；
+ * 旧版本的脏表不参与寻址；找不到时明确返回 null，而不是猜一个窗口。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -36,6 +37,24 @@ test('cells: 路径大小写/斜杠不同也能命中（Windows 真实情况）'
     const sep = String.fromCharCode(92);   // 反斜杠：源码里写死容易被转义搞乱
     await saveCells(['D:', 'Videos', 'A.mp4'].join(sep), [{ i: 3, from: 1, to: 2 }], { env });
     assert.ok(await lookupCell('d:/videos/a.mp4', 3, { env }));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('cells: 旧版脏表（没有 v）不参与寻址 —— issue #37 的窗口起点被加过两次', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cells4-'));
+  const env = { DSH_VIDEO_CACHE_DIR: dir };
+  try {
+    // 模拟 0.5.3 及以前写下的表：没有 v，from 已经是错的
+    await writeFile(join(dir, 'cells.json'), JSON.stringify({
+      'd:/v/old.mp4': { at: 1, cells: [{ i: 5, from: 102.71, to: 110 }] },
+    }), 'utf8');
+    assert.equal(await lookupCell('D:/v/old.mp4', 5, { env }), null,
+      '旧表的绝对时间不可信，宁可退回 from/to');
+    // 新表照常命中
+    await saveCells('D:/v/old.mp4', [{ i: 5, from: 52.71, to: 60 }], { env });
+    assert.deepEqual(await lookupCell('D:/v/old.mp4', 5, { env }), { i: 5, from: 52.71, to: 60 });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

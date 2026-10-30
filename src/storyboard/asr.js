@@ -170,6 +170,20 @@ export const ASR_DEFAULTS = new Proxy({}, {
   getOwnPropertyDescriptor: (_t, k) => ({ configurable: true, enumerable: true, value: resolveAsrConfig()[k] }),
 });
 
+/**
+ * 后端身份（缓存键 + 按片转写的复用判据）。
+ *
+ * **必须包含所有会改变转写文本的输入**：baseUrl / model / language / 切片长度 / 热词。
+ * issue #38：旧键用的是入参 `hotwords ?? ''`，而实际没传时用的是 asr.json 里的热词 ——
+ * 改了热词仍命中旧缓存。现在调用方传进来的必须是**解析后的值**。
+ * `terms` 不进键：它是转写之后才替换的，不改变 ASR 的输出。
+ */
+export function asrBackendId({
+  baseUrl, model, language, maxChunk, transcript = 'auto', hotwords = '',
+} = {}) {
+  return `asr2|${baseUrl}|${model}|${language ?? ''}|${maxChunk}|${transcript}|${hotwords ?? ''}`;
+}
+
 /** 一句话说明"我们在往哪儿发请求"，用于把错误信息变得可定位（永远不含 key） */
 export function describeAsrTarget(cfg = ASR_DEFAULTS) {
   const where = cfg.source === 'file' && cfg.configPath ? `${cfg.source} (${cfg.configPath})` : cfg.source;

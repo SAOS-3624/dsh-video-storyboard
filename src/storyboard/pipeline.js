@@ -20,8 +20,11 @@ import { detectDarkRuns, refineCutsByWindow, scanShots, spikeCuts, suppressClose
 import { tagCuts } from './flash.js';
 import { rememberSegments } from './locate.js';
 import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
+import { cachedTranscript, rememberTranscript } from './transcript-cache.js';
 import { fitSegments, segmentsFromCuts } from './segments.js';
-import { allocateIntegerBudget, fillLayout, musicDrivenVerdict, suggest, PLAN_THRESHOLDS } from './plan.js';
+import {
+  allocateIntegerBudget, fillLayout, musicDrivenVerdict, readabilityOf, suggest, PLAN_THRESHOLDS,
+} from './plan.js';
 import {
   densityFromScore, findBursts, integralMarks, planByRodt, planByShotCount, planCellRanges, planSheetsByFrames,
 } from './density.js';
@@ -30,7 +33,7 @@ import { measureGroup } from './measure.js';
 import { remember } from './memory.js';
 import { analyzeAudio, analyzeRhythm, describeAudio, detectOnsets } from './audio.js';
 import {
-  ASR_DEFAULTS, alignCells, applyTermMap, canTranscribe, describeAsrTarget, explainFetchError,
+  alignCells, applyTermMap, asrBackendId, canTranscribe, describeAsrTarget, explainFetchError,
   extractSubtitleTrack, filterSuspectSegments, resolveAsrConfig, speechCurve, transcribeLong,
 } from './asr.js';
 import { fetchRemoteSubtitles } from './subtitles.js';
@@ -141,7 +144,15 @@ export async function runStoryboard(opts) {
     textOnly = false,
     precomputed = null,
     badgeRatio = 0.15,
+    // 出图几何：像素预算 / 每张格数上限 / 目标可读性（need 只影响自动排格的上限）。
+    // 三个值由 board.js 的 boardGeometry() 算好传进来，管线不再自己解释 size 档位。
     budget = 640_000,
+    maxPerSheet = 16,
+    need = 'scene',
+    // 只传 from 时自动推下一段：segment 秒。0 = 看到片尾（短片默认）。
+    segment = 0,
+    // 只取一帧（cells:1 的语义）：不做格内摊开。清单说 1 格就必须是 1 帧。
+    noTile = false,
     encode = true,
     ffmpegPath = DEFAULT_FFMPEG,
     ffprobePath = DEFAULT_FFPROBE,
@@ -173,13 +184,33 @@ export async function runStoryboard(opts) {
     ...(sourceHash ? { sha256 } : {}),
   };
   const winStart = Math.max(0, Math.min(Number(from) || 0, Math.max(0, info.duration - 0.2)));
-  const winEnd = Math.min(info.duration, Number(to) > 0 ? Number(to) : info.duration);
+  /**
+   * 窗口终点。三种情况，按优先级：
+   *  1. 显式 `to` —— 调用方说了算；
+   *  2. 给了 `segment`（或 from>0 但没给 to）—— 按固定长度推下一段。
+   *     这是给 SEQUENCE 用的：只传 from，不用自己记"下一段从哪开始"；
+   *  3. 都没有 —— 看到片尾（短片/整片概览）。
+   *
+   * 旧行为是"from>0 且没 to → 看到片尾"：2 小时的片子传了 from:600 就等于
+   * 悄悄把剩下 110 分钟全扫了，扫描和 ASR 都按整段算，一次调用能烧十几分钟。
+   */
+  const segSec = Number(segment) > 0
+    ? Math.max(1, Math.round(Number(segment)))
+    : (winStart > 0 ? 300 : 0);
+  const autoWindow = !(Number(to) > 0) && segSec > 0;
+  const winEnd = Math.min(
+    info.duration,
+    Number(to) > 0 ? Number(to) : (autoWindow ? winStart + segSec : info.duration),
+  );
   const winDur = Math.max(0.2, winEnd - winStart);
 
   // 分阶段计时：只有真跑的时候才知道慢在哪。结果里带 timing，不额外开销（Date.now 级别）
   // 本地 ASR 的生命周期句柄：只有"我们拉起来的"那个才会在结束时被停。
   // 必须声明在转写块之前 —— 转写现在跑在扫描之前（并行），拿不到后面声明的变量。
   let asrLife = null;
+  // ASR 的耗时与命中情况（清单的成本行要用）：null = 这次没转写
+  let asrSeconds = null;
+  let asrCached = null;
 
   const timing = {};
   let _t = Date.now();
@@ -260,23 +291,56 @@ export async function runStoryboard(opts) {
         try {
           // 切片调用：单次请求过长会让时间码整体压早（实测 299s 压早 13s）。
           // 结果按 (文件, 窗口, 后端, 切片长度) 缓存 —— 否则 textOnly 分页每翻一页都要重跑 ASR。
-          const asrCacheKey = await cacheKey({
-            input, start: winStart, end: winStart + winDur,
-            threshold: `asr|${ASR_DEFAULTS.baseUrl}|${ASR_DEFAULTS.model}|${asrMaxChunk}|${transcript}|${hotwords ?? ''}`,
-          });
-          // 本地 ASR 可能要临时拉起（用完就停）—— 只在 asr.json 配了 manage.start 时才托管
+          //
+          // **后端身份必须和实参同源**（issue #38）：没传 hotwords 时，实际用的是 asr.json 里的值，
+          // 旧键却写 '' —— 改了热词仍命中旧缓存。现在先把 hotwords/language 解析成这一次真正要用的值，
+          // 键和 `transcribeLong()` 的入参都用它。
+          // 前缀 `asr2|` 让旧缓存（以及 transcript-cache 里的旧后端身份）自然作废，不需要用户手清。
           const asrCfg = resolveAsrConfig();
-          // `spawnImpl` 不要在这里传：这个文件从来没导入过 spawn，
-          // 传 `spawnImpl: spawn` 等于每跑一次就 ReferenceError 一次，被下面的 catch 吞成
-          // "asr-failed · spawn is not defined" —— 转写于是永远是空的。默认值在 asr-lifecycle 里。
-          asrLife = await ensureAsr({ baseUrl: asrCfg.baseUrl, config: asrCfg })
-            .catch((e) => { if (process.env.DSH_ASR_DEBUG) console.error('[asr-lifecycle]', e.message); return null; });
-          const asr = await withCache(asrCacheKey, () => transcribeLong({
-            input, ffmpegPath, start: winStart, end: winStart + winDur,
-            // apiKey 必须传：否则关掉 ASR 只能靠"没 key"，而本机服务不需要 key
-            silences, maxChunk: asrMaxChunk, apiKey: asrKey,
-            ...(hotwords !== undefined ? { hotwords } : {}),
-          }), { enabled: cache });
+          const asrHotwords = hotwords !== undefined ? hotwords : asrCfg.hotwords;
+          const asrBackend = asrBackendId({
+            baseUrl: asrCfg.baseUrl, model: asrCfg.model, language: asrCfg.language,
+            maxChunk: asrMaxChunk, transcript, hotwords: asrHotwords,
+          });
+          const asrCacheKey = await cacheKey({
+            input, start: winStart, end: winStart + winDur, threshold: asrBackend,
+          });
+          // **先看按片缓存**：只要已有一段完整覆盖这个窗口，就直接切出来用。
+          // 这一层和上面的 cacheKey 不重复：那个键含窗口，zoom 到已转写段里的 20 秒会 miss；
+          // 这里存的是绝对时间，覆盖住就给，不再把同一段语音转第二遍。
+          const covered = cache
+            ? await cachedTranscript(input, { from: winStart, to: winStart + winDur, backend: asrBackend })
+              .catch(() => null)
+            : null;
+          // 本地 ASR 可能要临时拉起（用完就停）—— 只在 asr.json 配了 manage.start 时才托管。
+          // 命中按片缓存时**不拉起**：省一次模型加载，也不会白占几 GB。
+          if (!covered) {
+            // `spawnImpl` 不要在这里传：这个文件从来没导入过 spawn，
+            // 传 `spawnImpl: spawn` 等于每跑一次就 ReferenceError 一次，被下面的 catch 吞成
+            // "asr-failed · spawn is not defined" —— 转写于是永远是空的。默认值在 asr-lifecycle 里。
+            asrLife = await ensureAsr({ baseUrl: asrCfg.baseUrl, config: asrCfg })
+              .catch((e) => { if (process.env.DSH_ASR_DEBUG) console.error('[asr-lifecycle]', e.message); return null; });
+          }
+          // 记下 ASR 花了几秒：清单要报"这次转写花了 3 分 12 秒 / 命中缓存 0 秒"。
+          // 只报 CPU 秒数没有意义（用户原话：成本该报成"图数×token + ASR 秒数"）。
+          const asrStart = Date.now();
+          const asr = covered
+            ? { segments: covered.segments, empty: covered.segments.length === 0, cached: true }
+            : await withCache(asrCacheKey, () => transcribeLong({
+              input, ffmpegPath, start: winStart, end: winStart + winDur,
+              // apiKey 必须传：否则关掉 ASR 只能靠"没 key"，而本机服务不需要 key
+              silences, maxChunk: asrMaxChunk, apiKey: asrKey,
+              // 显式传解析后的值：不传的话 transcribe 会再解析一次，键和实参可能不是同一份
+              hotwords: asrHotwords, language: asrCfg.language,
+            }), { enabled: cache });
+          asrSeconds = covered ? 0 : +((Date.now() - asrStart) / 1000).toFixed(1);
+          asrCached = asr?.cached === true;
+          if (asr && !covered && cache && asr.segments?.length) {
+            // 落盘成"绝对时间的一段"，下次任何子窗口都能切出来（不用再跑 ASR）
+            await rememberTranscript(input, {
+              from: winStart, to: winStart + winDur, segments: asr.segments, backend: asrBackend,
+            }).catch(() => {});
+          }
           if (asr) {
             // 音乐段的幻觉句会命中多个格子、被复制好几遍，先过滤（结果里报出来，不静默丢）
             const { kept, dropped } = filterSuspectSegments(asr.segments);
@@ -307,6 +371,10 @@ export async function runStoryboard(opts) {
       }
     } else if (transcript !== 'off' && !info.hasAudio) {
       transcriptInfo = { segments: [], source: 'no-audio' };
+    } else if (transcript === 'off') {
+      // **主动关掉**也要有自己的标签。旧版这里什么都不留，清单于是和"没字幕轨、ASR 没跑成"
+      // 长得一模一样，模型只能猜"这片子是不是没人说话"。
+      transcriptInfo = { segments: [], source: 'off' };
     }
     // 一致性检查：台词落在"被判静音"的区间里 = 两种可能，轻声被吞了，或者 ASR 编的。
     const textInSilence = transcriptInfo?.source === 'asr'
@@ -465,7 +533,8 @@ export async function runStoryboard(opts) {
   // 「有没有台词」是**有没有拿到转写结果**，不是"转出来几个字"：
   // 跑了 ASR 但一个字没转出来，那是"这片子确实没台词"，结论有效；
   // 没跑 ASR（--transcript off）才是"不知道"，才需要去听音频。
-  const hasSpeech = transcriptInfo != null;
+  // transcript:'off' 是一个明确结果（"没听"），不是"没有台词" —— 不能拿它当"这片子没人说话"的证据。
+  const hasSpeech = transcriptInfo != null && transcriptInfo.source !== 'off';
   // 没有台词数据时才去听节奏（多一次音频解码，只在需要时付这个成本）。
   const rhythm = !hasSpeech && info.hasAudio && !textOnly
     ? await analyzeRhythm({ input, ffmpegPath, start: winStart, end: winStart + winDur })
@@ -486,6 +555,9 @@ export async function runStoryboard(opts) {
       hasSpeech,
       rhythm,
       tileFirst,
+      maxPerSheet,
+      budget,
+      need,
       meanLufs: audio?.mean,
       ...(planThresholds ? { thresholds: planThresholds } : {}),
     });
@@ -511,9 +583,15 @@ export async function runStoryboard(opts) {
   const filledFrom = fitted.cells > cells ? cells : null;
   if (filledFrom) trace.push(`cells-filled:${filledFrom}->${fitted.cells}`);
   cells = fitted.cells;
+  // **cells:1 就真的给一帧**。旧版即使只要 1 格，格内摊开逻辑也会把它拼成 2×2
+  // （一格 4 个瞬间），清单却写"1 cell" —— 模型以为看到的是一帧，其实是四帧拼图。
+  const noTiling = noTile === true || (cells === 1 && sheets === 1);
   // 本次实际输入 + 生效阈值。只记录，不做成十几个可配置旋钮。
   const planInfo = {
     cells, sheets, adaptive, pick, burn, minGap,
+    // 几何：清单据此报"每格多大、能看清到什么程度、这一张多少钱"
+    budget, need, maxPerSheet,
+    ...(noTiling ? { noTiling: true } : {}),
     ...(tileFirst ? { tileFirst: true } : {}),
     ...(filledFrom ? { filledFrom } : {}),
     reason: suggestion?.reason ?? 'explicit',
@@ -656,7 +734,15 @@ export async function runStoryboard(opts) {
   // 48 格 3 张（每张 16）本来是满的，多一个黑场格就变成 49 格 → 4 张 → 多花 384 图像 token，
   // 只为了画一块黑屏。这种情况把内容让出一格（内容 47 + 黑场 1 = 48），张数不变。
   // 判据用 16（maxCellsPerSheet）而不是实际切张结果——切张本身要按帧数算，这里只是防边界。
-  const sheetsAt = (n) => Math.ceil(Math.max(1, n) / 16);
+  // **必须用调用方的 maxPerSheet**，不能写死 16：写死的话 size/budget 推出的上限
+  // 只影响"建议格数"，真正切张仍然 16 格一张 —— 参数看着生效了，其实没有。
+  // **显式 cells 不能被这个上限切碎**：调用方说"一张 16 格"，就不能因为默认上限是 9
+  // 而把它拆成两张各 8 格 —— 那是另一个决定，必须由调用方自己做。
+  const perSheetCap = Math.max(
+    1,
+    Math.min(16, Math.max(Number(maxPerSheet) || 16, Number(opts.cells) || 0)),
+  );
+  const sheetsAt = (n) => Math.ceil(Math.max(1, n) / perSheetCap);
   if (extraDark > 0 && sheetsAt(cellRanges.length) > sheetsAt(plannedCells)) {
     const trimmed = planRanges(Math.max(1, plannedCells - extraDark));
     if (sheetsAt(trimmed.length) <= sheetsAt(plannedCells)) {
@@ -725,13 +811,14 @@ export async function runStoryboard(opts) {
     const measured = measureGroup(ranges, {
       aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
       subBudget: budgetFor(Math.min(16, ranges.length)), cuts, sampleMarks, stats: scan.stats ?? [],
+      ...(noTiling ? { maxK: 1 } : {}),
     });
     // frameBudget 卡的是**渲染时间**，不是 token：一张图 9 格摊满 3×3 是 81 帧，
     // 而 token 还是 384（图像按张算）。原来设 64，于是"9 格全摊开"被判定成要 2 张 ——
     // 补满逻辑再把 2 张压成 12 格 1 张，格子从 331×184 缩到 286×159，
     // 反而摊不动 3×3（95×53 < 110），最该细看的那档全丢了。
     // 96 让常见的 9 格 / 12 格满摊都留在同一张里。
-    return planSheetsByFrames(measured.cells, { frameBudget: 96, maxCellsPerSheet: 16 });
+    return planSheetsByFrames(measured.cells, { frameBudget: 96, maxCellsPerSheet: perSheetCap });
   };
   let groups = splitSheets(cellRanges);
   // ---- 每张图也要**补满布局容量**
@@ -763,6 +850,9 @@ export async function runStoryboard(opts) {
   }
   sheets = groups.length;
   if (cellRanges.length > cells * sheets) cells = Math.ceil(cellRanges.length / sheets);
+  // 建议是"4 格 × 3 张"，按帧预算切张后可能变成"6 格 × 2 张" —— 两个都写进 trace，
+  // 否则 reason 里的数字和首行对不上，模型会以为哪里出错了。
+  if (requested.sheets !== sheets) trace.push(`sheets:${requested.sheets}->${sheets}`);
   // planInfo 是在分格之前建的，那时还不知道"黑场占格 / 补满布局 / 按帧切张"会把它改成什么样。
   // 这里的两个数是**最终生效值**，清单和 manifest 读的是它们 —— 不刷就会报 12 格 1 张、
   // 而实际出了 25 格 2 张（2026-10-30 对比测试踩到，报告里对不上账）。
@@ -778,6 +868,7 @@ export async function runStoryboard(opts) {
   planInfo.frames = groups.reduce((n, g) => n + measureGroup(g, {
     aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
     subBudget: budgetFor(g.length), cuts, sampleMarks, stats: scan.stats ?? [],
+    ...(noTiling ? { maxK: 1 } : {}),
   }).frameCount, 0);
 
   // textOnly：只重算"格 → 时间段 → 台词"，一帧都不解、一张图都不拼。
@@ -836,6 +927,7 @@ export async function runStoryboard(opts) {
     const measured = measureGroup(group, {
       aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
       subBudget: budgetFor(group.length), cuts, sampleMarks, stats: scan.stats ?? [],
+      ...(noTiling ? { maxK: 1 } : {}),
     });
     // cellBudget 也要用 measure 那个：composeSheet 与 layoutCanvas 必须是同一个预算，
     // 差 10% 会让取帧尺寸和拼图尺寸不一致（图会变成斜条纹）。
@@ -970,10 +1062,19 @@ export async function runStoryboard(opts) {
         } : {}),
         ...(transcriptInfo.termsFixed ? { termsFixed: transcriptInfo.termsFixed } : {}),
         ...(textInSilence ? { textInSilence } : {}),
+        ...(asrSeconds !== null ? { asrSeconds, asrCached: asrCached === true } : {}),
         ...(transcriptInfo.error ? { error: transcriptInfo.error } : {}) }
       : null,
     plan: {
       ...planInfo,
+      // **每格实际多大、能看清到什么程度**：清单的头等大事。
+      // 旧清单只报 image= 和 cell=，模型得自己做除法才知道 286×118 已经读不了字。
+      ...(out[0] ? {
+        cell: {
+          w: out[0].cellW, h: out[0].cellH,
+          readability: readabilityOf(out[0].cellW, out[0].cellH),
+        },
+      } : {}),
       // 实际出片格数：minGap 会把"要 16 格"压成 8 格，清单必须两个数都给，
       // 否则首行写 16、末尾写 total 8，读起来像是出错了。
       produced: cellRanges.length,
@@ -984,15 +1085,30 @@ export async function runStoryboard(opts) {
     },
     sheets: out,
     totalDuration,
+    // SEQUENCE 的进度：只传 from 时，调用方不用自己记"下一段从哪开始"。
+    // index/total 用固定 segment 推，最后一段可能短于 segment。
+    ...(segSec > 0 ? {
+      segment: {
+        sec: segSec,
+        auto: autoWindow,
+        index: Math.floor(winStart / segSec) + 1,
+        total: Math.max(1, Math.ceil(info.duration / segSec)),
+        watchedSec: +winStart.toFixed(2),
+        leftSec: +Math.max(0, info.duration - winEnd).toFixed(2),
+      },
+    } : {}),
   };
 
-  // 记下"这一格 = 这段绝对时间"，供 video_zoom({ cellId }) 直接寻址（清单里的 t_start 是窗口相对值）。
+  // 记下"这一格 = 这段**绝对**时间"，供 video_zoom({ cellId }) 直接寻址。
+  // **t_start 本来就是绝对时间**：`planRanges()` 的两条路都把 winStart 加过了
+  // （密度分支 `r.from + winStart`、切点分支 `segmentsFromCuts(..., winStart)`），
+  // 这里再加一次就是 issue #37 —— 第 5 格会变成 102.71s 而不是 52.71s，zoom 直接跳错位置。
   // 不 await：写失败不该影响出图，寻址会退回 from/to。
   if (!textOnly) {
     const cellTimes = [];
     for (const sheet of out) {
       for (const c of sheet.cells) {
-        cellTimes.push({ i: c.i, from: c.t_start + winStart, to: c.t_end + winStart });
+        cellTimes.push({ i: c.i, from: c.t_start, to: c.t_end });
       }
     }
     // 必须 await：紧接着的 video_zoom({cellId}) 可能立刻来查；saveCells 自己吞写失败，

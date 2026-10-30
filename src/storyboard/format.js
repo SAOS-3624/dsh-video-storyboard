@@ -15,6 +15,7 @@ import { encodeRaw } from './sheet.js';
 import { charsForDetail, DETAIL_CHARS } from './board.js';
 import { describeMemory } from './memory.js';
 import { canTranscribe, resolveAsrConfig } from './asr.js';
+import { cellPixels, imageTokens, maxCellsForNeed, NEED_TIERS, readabilityOf } from './plan.js';
 
 /** 三档台词预算（字符）：low 只判断"这段在讲什么"，high 要能引用原话。定义在 board.js，这里转出。 */
 export { DETAIL_CHARS };
@@ -133,23 +134,33 @@ export async function formatProbe(info) {
   // 短片不铺这些：一句话能说完的片子，给一条建议就够，别用通用模板灌水。
   if (mins > 8) {
     // 只看时长给个粗估（不调 suggest：probe 没扫描，cuts=0 会被当成"单镜头"，算出 4 格那种假结果）
-    const estCells = Math.min(16, Math.max(4, Math.round(info.duration / 40)));
-    const estSheets = Math.min(4, Math.ceil(info.duration / 300));
-    lines.push(`one-shot overview would be about ${estCells} cells x ${estSheets} image(s) ` +
-      '(duration-only estimate; cut density can change it).');
-    lines.push('Two ways to read this, pick by what you need:');
-    lines.push(`  • STRUCTURE (spoils the ending): one wide pass — ` +
-      `video_storyboard({ input, cells: 16, sheets: 4 }) → whole film in 4 images, ` +
-      `then open the 2-3 sections that look interesting. ~${(info.duration / 30).toFixed(0)} s of CPU.`);
-    lines.push(`  • SEQUENCE (no spoilers, like watching it): ` +
-      `video_storyboard({ input, from: 0, to: 300 }) then 300-600, 600-900 … one window at a time, ` +
-      `never looking ahead. Each window is ~${Math.ceil(mins / 5)} calls in total; ` +
-      'the scan of each window is cached, so re-reading a stretch is free.');
+    const segSec = 300;
+    const totalSeg = Math.max(1, Math.ceil(info.duration / segSec));
+    const estSheets = Math.min(8, Math.max(2, Math.ceil(info.duration / 1200)));
+    const overviewCells = 9 * estSheets;
+    // 用**默认预算**算每格像素：探针要让模型在花第一张图之前就知道"这个配方能不能看清"。
+    const px = cellPixels(9, info.aspect || 16 / 9, 1_200_000);
+    const perImage = imageTokens(
+      Math.round(Math.sqrt(1_200_000 * (info.aspect || 16 / 9))),
+      Math.round(Math.sqrt(1_200_000 * (info.aspect || 16 / 9)) / (info.aspect || 16 / 9)),
+    );
+    lines.push(`How to read ${mins.toFixed(0)} min: **window by window, not one overview.**`);
+    lines.push(`  • SEQUENCE (no spoilers, like watching it) — default for films / episodes / any story:`);
+    lines.push(`      video_storyboard({ input, from: 0, segment: ${segSec} })`);
+    lines.push(`    ${totalSeg} windows. Every result ends with "segment k/${totalSeg} · x% watched · ` +
+      `y min left · next: from=…"; pass that from back with the same segment. ` +
+      `One image (~${perImage} vision tokens) per window; ASR is transcribed once per window, cached after that.`);
+    lines.push(`  • STRUCTURE (spoils the ending) — **only to identify what this is, or when spoilers are allowed**:`);
+    lines.push(`      video_storyboard({ input, cells: 9, sheets: ${estSheets} }) → ${overviewCells} moments ` +
+      `at ~${px.w}×${px.h} each, ~${perImage * estSheets} vision tokens.`);
+    lines.push('    Do NOT reach for cells:16 at the cheap budget: 16 cells in a 640k image is 247×137 ' +
+      '(286×118 on a 2.39:1 film) — below the readable line, so you get colour blocks and start ' +
+      'inventing a plot from them.');
   } else if (mins < 1) {
     lines.push(`under a minute (${info.duration.toFixed(0)}s): one call is enough.`);
   } else {
     lines.push(`Short (${mins.toFixed(0)} min): one call is enough. Following a story rather than ` +
-      'analysing structure? Use `from`/`to` windows so later scenes are not on screen early.');
+      'analysing structure? Use `from` + `segment` (e.g. segment:120) so later scenes are not on screen early.');
   }
   const seen = await describeMemory(info).catch(() => null);
   if (seen) lines.push(`seen before: ${seen}`);
@@ -187,7 +198,12 @@ export function formatRemoteProbe(remote) {
 
   const dur = Number(remote.duration) || 0;
   if (dur > 1200) {
-    lines.push(`note: ${Math.round(dur / 60)} min long — read it in windows (from/to) instead of one pass.`);
+    const segSec = 300;
+    lines.push(`note: ${Math.round(dur / 60)} min long — read it in windows, not one pass. ` +
+      `For narrative content the default is SEQUENCE: ` +
+      `video_storyboard({ input, from: 0, segment: ${segSec} }) — ` +
+      `${Math.ceil(dur / segSec)} windows, and every result tells you the next from. ` +
+      'A one-shot overview (cells:16 over the whole file) spoils the ending and makes each cell unreadable.');
   }
   lines.push('nothing was downloaded yet. video_storyboard with this link downloads a low-res copy ' +
     'once (fast, and cached afterwards); video_zoom then reads the original stream at ' +
@@ -256,8 +272,12 @@ function formatPlanLine(plan) {
   const fmt = (v) => (v === null || v === undefined || (typeof v === 'number' && !Number.isFinite(v))
     ? 'n/a' : String(v));
   const mode = plan.auto ? 'auto' : 'explicit';
-  const cellsText = plan.produced && plan.produced !== plan.cells
-    ? `${plan.produced}/${plan.cells} cells (minGap-limited)`
+  // `produced` 是**所有图加起来**的格数，比较对象必须是 cells × sheets。
+  // 以前拿它和"每张几格"比，6 格 × 2 张会被写成 "12/6 cells (minGap-limited)" —— 数字没错，
+  // 但归因错了（不是 minGap 卡的，是重新切张），模型会去调 minGap 而问题不在那。
+  const totalAsked = plan.cells * Math.max(1, plan.sheets ?? 1);
+  const cellsText = plan.produced && plan.produced !== totalAsked
+    ? `${plan.produced}/${totalAsked} cells (see adjusted= for why)`
     : plan.filledFrom
       // 补满了就说清补过：否则"我要了 5 格，怎么给了 6 格"会像 bug
       ? `${plan.cells} cells (filled from ${plan.filledFrom} — a blank slot costs the same tokens)`
@@ -268,13 +288,65 @@ function formatPlanLine(plan) {
     ? `audioClass=music-driven (basis=${plan.musicBasis ?? '?'}: ${plan.musicDetail ?? ''}) — ` +
       'sub-frames packed denser on purpose; if this reading is wrong, pin cells/sheets explicitly'
     : `audioClass=speech-led (basis=${plan.musicBasis ?? '?'}: ${plan.musicDetail ?? ''})`);
-  return `plan: ${mode} ${cellsText} — ${plan.reason ?? 'auto'} · ` +
+  // **几何与代价单独一段**：格数、格像素、可读性、预算、以及"被改过没有"。
+  // 这几项以前散在 image= / cell= 里，模型要自己做除法，于是 286×118 被当成"够看"。
+  const geo = [];
+  if (plan.budget) geo.push(`budget=${plan.budget}`);
+  if (plan.cell) {
+    geo.push(`cell=${plan.cell.w}x${plan.cell.h} (${plan.cell.readability})`);
+  }
+  if (plan.need) geo.push(`need=${plan.need}`);
+  if (plan.maxPerSheet) geo.push(`maxPerSheet=${plan.maxPerSheet}`);
+  // 静默改格数是旧版最招人恨的一条：要 16 给 8、要 5 给 6，清单里却只有一个数。
+  if (Array.isArray(plan.trace) && plan.trace.length > 0) {
+    geo.push(`adjusted=${plan.trace.join(',')}`);
+  }
+  // 实际出的格数少于"要的"时，标题里就要显示两个数 —— 只写 8 会让人以为是 8 格的结果。
+  const askedTotal = plan.requested?.cells;
+  const short = Number.isFinite(askedTotal) && askedTotal > plan.cells * Math.max(1, plan.sheets ?? 1)
+    ? ` (asked ${askedTotal})` : '';
+  return `plan: ${mode} ${cellsText}${short} — ${plan.reason ?? 'auto'} · ` +
     `meanLufs=${fmt(plan.inputs.meanLufs)} LUFS · ` +
     `speechRate=${fmt(plan.inputs.speechRate)} chars/s · ` +
     `motion=${fmt(plan.inputs.motion)} · cuts=${fmt(plan.inputs.cuts)} · ` +
     `cutThreshold=${fmt(plan.inputs.scanThreshold)} · ` +
     `thresholds musicLufs>${fmt(t.musicLufs)}, musicSpeechRate<${fmt(t.musicSpeechRate)}, ` +
-    `speechRateCut>${fmt(t.speechRateCut)}` + audioClass;
+    `speechRateCut>${fmt(t.speechRateCut)}` + audioClass +
+    (geo.length ? ' · ' + geo.join(' · ') : '');
+}
+
+/**
+ * 可读性告警：**格子小到看不清时必须主动说**。
+ *
+ * 旧版对"看不清"完全沉默 —— 模型只能从 286×118 这个数字自己推断，
+ * 而它没有像素尺（不知道该多大才读得清），于是把糊图当成了片子本身的画质。
+ *
+ * 建议必须可执行：减格数 / 加预算 / 换工具，三条都写清代价。
+ */
+export function readabilityAdvice(plan) {
+  if (!plan?.cell) return null;
+  const { w, h } = plan.cell;
+  // 以真实像素为准重算一次：清单里存的 readability 可能是别的调用方写进来的，
+  // 拿它当判据会出现"像素明明够、却因为字段过期一直报警"。
+  const readability = readabilityOf(w, h);
+  const need = plan.need ?? 'scene';
+  const tier = NEED_TIERS[need];
+  if (!tier) return null;
+  const RANK = { composition: 0, shot: 1, scene: 2, text: 3 };
+  if ((RANK[readability] ?? 0) >= (RANK[need] ?? 2)) return null;
+  // 用同一套推导（含布局保守系数），不要在清单里另写一份算术 —— 两处一定会走样。
+  const cellsForNeed = maxCellsForNeed(plan.budget ?? 1_200_000, 16 / 9, need);
+  const nextBudget = (plan.budget ?? 1_200_000) < 1_650_000 ? 1_650_000
+    : Math.round((plan.budget ?? 1_200_000) * 1.5);
+  const cost = readability === 'composition'
+    ? 'You will see colour blocks, not content.'
+    : `You will see ${readability}-level detail, but not the ${need}-level detail you asked for ` +
+      '(small text and fine detail will be lost).';
+  return `!! cells are ${w}x${h} — that is "${readability}", below what you asked for (${need}: ` +
+    `${tier.minCellW}x${tier.minCellH}, ${tier.label}). ${cost} ` +
+    `Fix it one of three ways: cells:${cellsForNeed} on this same budget (fewer, bigger cells, same tokens), ` +
+    `budget:${nextBudget} (bigger image, more token per image — and the host may downscale it back), ` +
+    `or video_zoom on the 1-2 cells that matter (one short window, one image).`;
 }
 
 /**
@@ -336,10 +408,12 @@ export function formatManifest(result, {
 
   const cellAttr = hasSheets && Number.isFinite(sheet0?.cellW) && Number.isFinite(sheet0?.cellH)
     ? ` cell="${sheet0.cellW}x${sheet0.cellH}"` : '';
-  // 384 是**按 DSH 宿主的图片计费**估的（每图约 384 token）。走 API 按像素算会差几倍，
-  // 所以这里必须写清口径，否则读者只能猜。真实尺寸在同行的 image=/cell= 里。
+  // **按实际像素算**，不再写死 384：384 只对 640k 的图成立，默认预算 1.2M 时一张图约 700 token。
+  // 报小了，模型会以为"多要几张也不贵"；报大了，它会为了省 token 把格子压糊。
+  // 口径写在括号里：DSH 按 42px 网格计价，API 宿主按像素计价。
+  const perImage = hasSheets ? imageTokens(sheet0.width, sheet0.height) : 0;
   const tokensAttr = hasSheets
-    ? ` tokens="${result.sheets.length * 384} (est@384/img, DSH host billing; an API host bills by pixels)"`
+    ? ` tokens="${perImage * result.sheets.length} (est@${perImage}/img, DSH 42px grid; an API host bills by pixels)"`
     : '';
   // 头一行必须写**实际出了多少格**。原来写的是 `plan.cells`，多张时那只是"每张多少格"
   // （64 格 4 张会写成 "16 cells x 4 image(s)"），单张时又可能在 minGap 卡住后虚报
@@ -369,6 +443,60 @@ export function formatManifest(result, {
   ];
   const planLine = formatPlanLine(result.plan);
   if (planLine) lines.push(planLine);
+  // **要了多少、出了多少、为什么少**：旧版只写一个数，模型以为 16 格都看到了。
+  // 少给通常不是 bug（窗口里只有 8 个镜头，再多就是重复帧），但必须说出来并给改法。
+  {
+    const askedTotal = result.plan?.requested?.cells ?? null;
+    if (askedTotal !== null && producedCells < askedTotal) {
+      const shots = result.plan?.inputs?.cuts !== undefined
+        ? Number(result.plan.inputs.cuts) + 1 : null;
+      const gap = Number(result.plan?.minGap);
+      const gapNote = Number.isFinite(gap) && gap >= 1
+        ? ` and minGap ${gap}s forbids re-sampling one shot` : '';
+      lines.push(`cells: asked ${askedTotal}, produced ${producedCells}` +
+        (shots ? ` — the window has ~${shots} distinct shots` : '') + gapNote +
+        '. Extra cells would be repeats of the same shot. Ask for fewer cells, ' +
+        'widen the window (more shots), or lower minGap to 0.4-0.6 if the shots are long.');
+    }
+  }
+  // 格子小到看不清时**主动说**，并给三条可执行的改法（旧版对"看不清"完全沉默）
+  const advice = readabilityAdvice(result.plan);
+  if (advice) lines.push(advice);
+  // 成本只报两件事：图数×token、ASR 秒数。CPU 秒数对模型没有决策价值。
+  {
+    const cost = [];
+    if (hasSheets) {
+      cost.push(`${result.sheets.length} image(s) × ~${perImage} = ` +
+        `~${perImage * result.sheets.length} vision tokens (DSH grid)`);
+    }
+    const tr = result.transcript;
+    if (tr?.asrSeconds !== undefined) {
+      cost.push(tr.asrCached ? 'transcript reused from cache (0 s)' : `ASR ${tr.asrSeconds} s`);
+    } else if (tr?.source === 'subtitle') {
+      cost.push('transcript from the subtitle track (0 s)');
+    } else if (tr?.source === 'off') {
+      cost.push('transcript skipped by request');
+    }
+    if (cost.length) lines.push(`cost: ${cost.join(' · ')}`);
+    // 一次买很多张 = 一次把整片摊开。对叙事内容是反模式（剧透 + 贵），要提醒换 SEQUENCE。
+    if (result.sheets?.length > 8) {
+      lines.push(`wide pass: ${result.sheets.length} images in one call. For a film/episode, ` +
+        'SEQUENCE (`from` + `segment`) is cheaper and does not put later scenes on screen early.');
+    }
+  }
+  // SEQUENCE 的进度：不用调用方自己记时间，也不容易停在中途就忘。
+  if (result.segment) {
+    const sg = result.segment;
+    const totalDur = result.info?.duration ?? 0;
+    const pct = totalDur > 0 ? Math.min(100, Math.round((sg.watchedSec / totalDur) * 100)) : 0;
+    const leftMin = Math.round(sg.leftSec / 60);
+    const next = sg.index < sg.total
+      ? `next: from=${Math.round(sg.watchedSec + sg.sec)} (segment ${sg.index + 1}/${sg.total}), ` +
+        `pass the same segment:${sg.sec}`
+      : 'this was the last segment';
+    lines.push(`segment ${sg.index}/${sg.total} · ${pct}% watched · ${leftMin} min left · ${next}` +
+      (sg.auto ? ' · window was auto-sized from `from` (no `to` given)' : ''));
+  }
   const suspect = result.transcript?.suspectInjection;
   if (suspect?.length) {
     lines.push(`untrusted transcript: ${suspect.length} segment(s) contain instruction-like text — ` +
@@ -570,6 +698,10 @@ export function formatManifest(result, {
   if (result.transcript?.source === 'asr-empty') {
     lines.push('transcript: ASR ran and found no speech here — treat this as a video with no dialogue ' +
       '(this is different from a subtitle-track failure). Read the pictures and the audio strip.');
+  }
+  if (result.transcript?.source === 'off') {
+    lines.push('transcript: skipped because transcript:"off" was requested — this is NOT "the video has no speech". ' +
+      'Nothing was listened to; re-run without transcript:"off" (or pass transcriptFile) if you need the words.');
   }
   if (result.transcript?.source === 'no-audio') {
     // 区分"源本来没声音"和"这次下载的副本没声音" —— 后者能修（换成带 cookies 或本地文件）。

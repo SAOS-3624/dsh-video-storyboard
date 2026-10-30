@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   bestLayout, canvasAspect, cellSize, fillLayout, groupByCount, groupByDuration, planTotal,
   planWindows, snapCells, suggest, validatePlan, COVERAGE, IMAGE_TOKEN_CAP, MIN_CELL_H, MIN_CELL_W,
+  cellPixels, imageTokens, maxCellsForNeed, readabilityOf, NEED_TIERS,
 } from '../src/storyboard/plan.js';
 
 const L = 16 / 9;
@@ -419,4 +420,36 @@ test('planWindows: 切点太远就不吸附', () => {
   const p = planWindows(92, 30, { boundaries: [45], maxWindows: 99 });
   assert.equal(p.snapped, 0);
   assert.ok(!p.windows.map((w) => w.from).includes(45));
+});
+
+
+/* ------------------------------------------------- 可读性：格数由"要看多清"反推 */
+
+test('cellPixels: 预算 / 格数 决定每格大小，格数越多越小', () => {
+  const a = cellPixels(9, L, 1_200_000);
+  const b = cellPixels(16, L, 1_200_000);
+  assert.ok(a.w > b.w && a.h > b.h, '9 格必须比 16 格大');
+  assert.ok(Math.abs(a.h / a.w - 1 / L) < 0.01, '保持源比例');
+});
+
+test('maxCellsForNeed: 预算是硬约束，档位决定上限（旧版 small 允许 16 格是反的）', () => {
+  assert.equal(maxCellsForNeed(640_000, L, 'shot'), 16, '只要分辨镜头，16 格也够');
+  assert.equal(maxCellsForNeed(640_000, L, 'scene'), 9, '640k + scene 只能 9 格（331×184）');
+  assert.equal(maxCellsForNeed(640_000, L, 'text'), 4, '640k 要读字只能 4 格');
+  assert.equal(maxCellsForNeed(1_200_000, L, 'scene'), 16, '预算翻倍才能上 16 格');
+  assert.equal(maxCellsForNeed(1_200_000, L, 'text'), 6, '1.2M 要读字只能 6 格（实际 555×348）');
+  assert.ok(maxCellsForNeed(1_200_000, L, 'text') <= maxCellsForNeed(1_200_000, L, 'scene'));
+});
+
+test('readabilityOf: 说出"能读到哪一档"，含糊的数字没有用', () => {
+  assert.equal(readabilityOf(480, 270), 'text');
+  assert.equal(readabilityOf(340, 191), 'scene');
+  assert.equal(readabilityOf(200, 112), 'shot');
+  assert.equal(readabilityOf(120, 68), 'composition');
+});
+
+test('imageTokens: 按宿主的 42px 网格算，不是常数 384', () => {
+  assert.equal(imageTokens(1064, 600), 418);
+  assert.ok(imageTokens(1461, 822) > 700, '1.2M 的图约 700 token');
+  assert.equal(NEED_TIERS.text.minCellH, 270);
 });

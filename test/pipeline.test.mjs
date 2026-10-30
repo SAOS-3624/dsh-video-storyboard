@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { runStoryboard, formatManifest, saveStoryboards } from '../src/storyboard/pipeline.js';
+import { lookupCell } from '../src/storyboard/cells.js';
 import { DEFAULT_FFMPEG } from '../src/storyboard/probe.js';
 
 const run = promisify(execFile);
@@ -59,7 +60,8 @@ test('e2e: runStoryboard 出一张图 + 完整清单', async (t) => {
 
   const text = formatManifest(r);
   assert.match(text, new RegExp(`cell="${sheet.cellW}x${sheet.cellH}"`));
-  assert.match(text, /tokens="384 \(est@384\/img[^"]*\)"/, '要写清 384 是按什么口径估的');
+  assert.match(text, /tokens="418 \(est@418\/img, DSH 42px grid[^"]*\)"/,
+    '要按实际像素算 token（1066x600 → 418）');
   assert.match(text, /ffmpeg="[^"]+"/);
   assert.match(text, /sha256="[0-9a-f]{64}"/);
   assert.match(text, /plan: explicit 4 cells/);
@@ -477,7 +479,7 @@ test('chooseSubGrid: 镜头少到不值得摊时保持整格', async () => {
   assert.equal(chooseSubGrid({ shots: 2, dur: 1, cellW: 499, cellH: 278 }), 1);
 });
 
-test('e2e: 平铺格不写 t_frame，清单也不出现 frame@', async (t) => {
+test('e2e: cells:1 就真的给一帧 —— 不摊 2×2，清单也不说谎', async (t) => {
   if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
   const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -487,9 +489,28 @@ test('e2e: 平铺格不写 t_frame，清单也不出现 frame@', async (t) => {
     input: file, from: 0, to: 2, cells: 1, encode: false,
     precomputed: { cuts, summary: { p90: 50 }, threshold: 5 },
   });
+  assert.equal(r.sheets[0].cells.length, 1, '只要 1 格就只出 1 格');
   const cell = r.sheets[0].cells[0];
-  assert.ok(cell.sub >= 2, '这一格应被摊开');
-  assert.equal(cell.t_frame, undefined, '平铺格没有单一取帧时刻');
+  assert.equal(cell.sub, undefined, 'cells:1 是"就要这一帧"，不该在格内拼 2×2');
+  assert.ok(Number.isFinite(cell.t_frame), '单帧必须给 frame@');
+  const text = formatManifest(r);
+  assert.match(text, /grid="1 cells x 1 image\(s\)"/);
+  assert.ok(!/frames \(2×2\)/.test(text), '清单不能一边说 1 格一边画 4 帧');
+});
+
+test('e2e: 平铺格仍然不写 t_frame，清单也不出现 frame@', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeFixture(dir);
+  const cuts = Array.from({ length: 9 }, (_, i) => ({ t: 0.2 + i * 0.2, score: 50 }));
+  const r = await runStoryboard({
+    input: file, from: 0, to: 2, cells: 6, encode: false,
+    precomputed: { cuts, summary: { p90: 50 }, threshold: 5 },
+  });
+  const tiled = r.sheets.flatMap((s) => s.cells).find((c) => c.sub >= 2);
+  assert.ok(tiled, '这一格应被摊开');
+  assert.equal(tiled.t_frame, undefined, '平铺格没有单一取帧时刻');
   const text = formatManifest(r);
   assert.ok(!/frame@/.test(text), '平铺格不该写 frame@');
 });
@@ -556,4 +577,43 @@ test('e2e 不变量: 切张后时间覆盖与顺序原样不变', async (t) => {
   for (let i = 1; i < cells.length; i++) {
     assert.ok(Math.abs(cells[i].t_start - cells[i - 1].t_end) < 1e-6, `第 ${i} 格与前一格不连续`);
   }
+});
+
+test('e2e: 只传 from + segment 就自动推窗，并在结果里回显进度', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeFixture(dir);
+  const r = await runStoryboard({
+    input: file, from: 1, segment: 4, cells: 4, encode: false,
+  });
+  assert.equal(r.window.from, 1);
+  assert.ok(r.window.to <= 5.01, `segment 4 应该在第 5 秒结束，实得 ${r.window.to}`);
+  assert.equal(r.segment.sec, 4);
+  assert.equal(r.segment.index, 1);
+  assert.equal(r.segment.total, 2);
+  const text = formatManifest(r);
+  assert.match(text, /segment 1\/2 · \d+% watched/);
+  assert.match(text, /next: from=5/);
+});
+
+
+test('e2e: from>0 时 cell 表存绝对时间，不重复加窗口起点（issue #37）', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
+  const prev = process.env.DSH_VIDEO_CACHE_DIR;
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  t.after(async () => {
+    if (prev === undefined) delete process.env.DSH_VIDEO_CACHE_DIR;
+    else process.env.DSH_VIDEO_CACHE_DIR = prev;
+    await rm(dir, { recursive: true, force: true });
+  });
+  const file = await makeFixture(dir);
+  const r = await runStoryboard({ input: file, from: 2, to: 4, cells: 2, encode: false });
+  const cell = r.sheets[0].cells[0];
+  assert.ok(cell.t_start >= 1.9 && cell.t_start < 2.2,
+    `t_start 应该是绝对的 2s，实得 ${cell.t_start}（说明窗口起点被加了两次）`);
+  const hit = await lookupCell(file, 1);
+  assert.ok(hit, 'cell 表应已写入');
+  assert.equal(hit.from, cell.t_start, 'cell 表的值必须等于 t_start，不能再加一次 from');
 });
