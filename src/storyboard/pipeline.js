@@ -113,6 +113,8 @@ export async function runStoryboard(opts) {
     // 默认取核数一半、上限 8 —— 弱机或机械盘上不会把 IO 打死。
     frameConcurrency = Math.min(8, Math.max(2, Math.floor(cpus().length / 2))),
     adaptive = true,
+    // 摊开优先：少几格、每格更大，好让 2×2 / 3×3 排得下（见 plan.suggest 里的 tileFirst）
+    tileFirst = false,
     pick = 'sharp',
     burn = 'index',
     transcript = 'auto',
@@ -483,6 +485,7 @@ export async function runStoryboard(opts) {
       hasSubtitle: info.hasSubtitle,
       hasSpeech,
       rhythm,
+      tileFirst,
       meanLufs: audio?.mean,
       ...(planThresholds ? { thresholds: planThresholds } : {}),
     });
@@ -511,6 +514,7 @@ export async function runStoryboard(opts) {
   // 本次实际输入 + 生效阈值。只记录，不做成十几个可配置旋钮。
   const planInfo = {
     cells, sheets, adaptive, pick, burn, minGap,
+    ...(tileFirst ? { tileFirst: true } : {}),
     ...(filledFrom ? { filledFrom } : {}),
     reason: suggestion?.reason ?? 'explicit',
     auto: autoPlan,

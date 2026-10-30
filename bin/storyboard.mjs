@@ -148,6 +148,7 @@ const r = await runStoryboard({
   badgeRatio: opt.badge === undefined ? 0.15 : Number(opt.badge),
   transcript: String(opt.transcript),
   adaptive,
+  tileFirst: process.argv.includes('--tile-first'),
   textOnly,
 });
 

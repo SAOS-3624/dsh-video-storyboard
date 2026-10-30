@@ -231,6 +231,15 @@ export function suggest(meta) {
   const byShots = Math.round(shots / TARGET_SHOTS_PER_CELL);
   const bySeconds = Math.min(Math.round(duration / MAX_CELL_SECONDS), shots);
   let totalCells = Math.max(4, byShots, bySeconds);
+  if (meta.tileFirst) {
+    // **摊开优先**：宁可少几格，把画布让给"每格摊 2×2 / 3×3"。
+    // 起因（2026-10-30）：记管 MAD02 是 16 格 4×4，单格 247×137，摊 2×2 只剩 123×68 ——
+    // 低于"能分辨镜头"的 110×56 那条线，165 个镜头只看到 32 个。
+    // 降到 9 格（3×3 布局）单格 331×184，摊 3×3 是 110×61、摊 2×2 是 165×92，都成立。
+    // 9 是硬下限：再少就排成 2×2（4 格），92 秒的片子每格 23 秒，那不是"细看"是"抽帧"。
+    // 仍然保留 bySeconds —— 66 分钟讲座该 44 格还是 44 格，这条只管短视频。
+    totalCells = Math.max(9, Math.round(shots / 18), bySeconds);
+  }
   if (!musicDriven && (hasSubtitle || speechRate > 0) && speechRate > T.speechRateCut) {
     // 台词承担信息，图只做锚点 —— 但**不能锚到 90 秒才一张**：
     // 降档之后再拿 bySeconds 兜一次底，否则 66 分钟讲座会被降成 24 格（每格 165 秒）。

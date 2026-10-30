@@ -100,6 +100,14 @@ export function storyboardToolSpec() {
           'more cells than a static one. Set false for evenly spaced cells across the window — more ' +
           'predictable when you want to compare two windows cell-by-cell.',
       },
+      tileFirst: {
+        type: 'boolean',
+        description: 'Default false. Trade cells for resolution: fewer, bigger cells so each one can be ' +
+          'tiled 2×2/3×3 instead of staying a single frame. A 4×4 layout gives 247×137 per cell, and ' +
+          '2×2 of that is 123×68 — too small to read. With 9 cells (3×3 layout) each cell is 331×184 ' +
+          'and tiles to 165×92 or 110×61. Use this when the video is fast-cut and you care more about ' +
+          '"how many different shots did I see" than "can I read the on-screen text".',
+      },
       transcript: {
         type: 'string',
         enum: ['auto', 'off'],
