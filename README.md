@@ -178,7 +178,10 @@ video_storyboard({ input: "D:/video/xxx.mp4" })
 
 > 完整步骤（含格式示例、验证顺序、故障对照）见 **[docs/SETUP.zh.md §3](docs/SETUP.zh.md)**。
 
-## 一起看电影（`video_watch`）
+## 一起看电影 · `dsh watch together`（`video_watch`）
+
+> 这一块将来会单独成一个插件，名字定的是 **`dsh watch together`**（小写）。
+> 现在还在同一个包里，代码已经按 `src/watch/` 分好层了 —— 见下面的「代码结构」。
 
 > **想让它准到毫秒、并且自动认出你在看什么？** 先配一次调试端口，见 [docs/WATCH.zh.md](docs/WATCH.zh.md)。
 
@@ -335,7 +338,7 @@ src/
   storyboard/   视频识别策略 —— 取流、扫描、转写、出图、清单
     tool-spec.js   四个工具的 schema ＋ 兜底校验
     register.js    四个工具的注册入口
-  watch/        陪看 —— 位置、节奏、台词、聊天、声音接口
+  watch/        陪看 dsh watch together —— 位置、节奏、台词、聊天、声音接口
     tool-spec.js   video_watch 的 schema ＋ 兜底校验
     handler.js     video_watch 的 execute
     register.js    video_watch 的注册入口
