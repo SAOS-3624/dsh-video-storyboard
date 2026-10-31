@@ -295,6 +295,11 @@ function formatPlanLine(plan) {
   if (plan.cell) {
     geo.push(`cell=${plan.cell.w}x${plan.cell.h} (${plan.cell.readability})`);
   }
+  // 摊开之后的真实尺寸：`cell=` 说的是"一个大格"，一格 2×2 时实际给模型看的是 4 张更小的图。
+  // 只报 cell，模型会按大格的可读性去描述画面 —— 那个描述就是编的。
+  if (plan.sub) {
+    geo.push(`sub=${plan.sub.w}x${plan.sub.h} x${plan.sub.k * plan.sub.k} (${plan.sub.readability})`);
+  }
   if (plan.need) geo.push(`need=${plan.need}`);
   if (plan.maxPerSheet) geo.push(`maxPerSheet=${plan.maxPerSheet}`);
   // 静默改格数是旧版最招人恨的一条：要 16 给 8、要 5 给 6，清单里却只有一个数。
@@ -325,7 +330,11 @@ function formatPlanLine(plan) {
  */
 export function readabilityAdvice(plan) {
   if (!plan?.cell) return null;
-  const { w, h } = plan.cell;
+  // **摊开的格子要按子帧判**。cell 341×189 是 "scene"，可一格摊 2×2 之后每张只有 170×94（"shot"）——
+  // 模型看到 cell 达标就不再怀疑，实际连脸都认不出。旧版只判 cell，所以 320 张 170×94
+  // 摆在它面前，清单还是写着"scene"。这一条是"AI 说根本看不清楚"最直接的来源。
+  const box = plan.sub ?? plan.cell;
+  const { w, h } = box;
   // 以真实像素为准重算一次：清单里存的 readability 可能是别的调用方写进来的，
   // 拿它当判据会出现"像素明明够、却因为字段过期一直报警"。
   const readability = readabilityOf(w, h);
@@ -342,11 +351,26 @@ export function readabilityAdvice(plan) {
     ? 'You will see colour blocks, not content.'
     : `You will see ${readability}-level detail, but not the ${need}-level detail you asked for ` +
       '(small text and fine detail will be lost).';
-  return `!! cells are ${w}x${h} — that is "${readability}", below what you asked for (${need}: ` +
-    `${tier.minCellW}x${tier.minCellH}, ${tier.label}). ${cost} ` +
-    `Fix it one of three ways: cells:${cellsForNeed} on this same budget (fewer, bigger cells, same tokens), ` +
-    `budget:${nextBudget} (bigger image, more token per image — and the host may downscale it back), ` +
-    `or video_zoom on the 1-2 cells that matter (one short window, one image).`;
+  // 报警的主体要说清是"整格"还是"子帧"。说错了模型会去调 cells，而问题其实是摊开。
+  const subject = plan.sub
+    ? `each cell is split ${plan.sub.k}x${plan.sub.k}, so the pictures you actually see are ${w}x${h}`
+    : `cells are ${w}x${h}`;
+  const tilingNote = plan.sub
+    ? ` The cell itself is fine — the tiling is what shrank them; tiling trades pixels for more ` +
+      'instants, and at this size that trade is a loss.'
+    : '';
+  // **建议要分情况**：整格太小 → 减格数有用；子帧太小 → 减格数基本没用。
+  // 子帧 = cellW / k，想让 3×3 的子帧达到 scene（320×180）需要 cell 960×540，
+  // 一图预算 1.2M 只够放 2 格 —— 那不是"少几格"能解决的。这时候 zoom 才是真解。
+  const fixes = plan.sub
+    ? `Fix it: video_zoom on the 1-2 cells that matter (one short window, one image — the direct fix), ` +
+      `or budget:${nextBudget} (bigger image, more tokens per image). Fewer cells will not help much here: ` +
+      `the sub-frames are small because the cell was split ${plan.sub.k}x${plan.sub.k}.`
+    : `Fix it one of three ways: cells:${cellsForNeed} on this same budget (fewer, bigger cells, same tokens), ` +
+      `budget:${nextBudget} (bigger image, more token per image — and the host may downscale it back), ` +
+      `or video_zoom on the 1-2 cells that matter (one short window, one image).`;
+  return `!! ${subject} — that is "${readability}", below what you asked for (${need}: ` +
+    `${tier.minCellW}x${tier.minCellH}, ${tier.label}). ${cost}${tilingNote} ${fixes}`;
 }
 
 /**
@@ -682,7 +706,11 @@ export function formatManifest(result, {
           `${basis}: ${result.ocr.changes.map((c) => `${c.from.toFixed(1)}s "${c.was}"→"${c.now}"`).join(' · ')}`);
       }
     } else {
-      lines.push(`on-screen subtitle correction skipped (${result.ocr.reason ?? result.ocr.status}) — ` +
+      const reason = String(result.ocr.reason ?? result.ocr.status);
+      // 环境问题 ≠ 片子没有字幕。分不清时模型会照着"这片没字幕"往下编（#39 的代价之一）。
+      const setup = /^(bridge-|interpreter-|no-python)/.test(reason);
+      lines.push(`on-screen subtitle correction skipped (${reason}) — ` +
+        (setup ? 'the OCR bridge is unusable on this machine (setup problem, NOT a property of the video); ' : '') +
         'transcript is ASR only.');
     }
   }

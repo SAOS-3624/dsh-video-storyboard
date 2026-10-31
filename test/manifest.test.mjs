@@ -462,6 +462,27 @@ test('看不清时清单必须主动说，并给三条可执行的改法', () =>
   assert.ok(!/!! cells are/.test(formatManifest(r, { maxChars: 200_000 })));
 });
 
+test('sub= 报出摊开之后的真实尺寸：cell 够、子帧不够时也要报警', () => {
+  // 112 分钟片子实测：cell 341×189 是 "scene"，但一格摊 2×2 之后每张只有 170×94（"shot"）。
+  // 旧清单只报 cell，模型看到 scene 就不再怀疑 —— 这正是"AI 说根本看不清楚"的来源。
+  const r = makeResult({ cells: 16 });
+  r.plan = {
+    ...r.plan, budget: 1_200_000, need: 'scene',
+    // formatPlanLine 需要 inputs 才渲染几何段
+    inputs: { meanLufs: -20, speechRate: 0, motion: 3, cuts: 99, scanThreshold: 39 },
+    cell: { w: 341, h: 189, readability: 'scene' },
+    sub: { k: 2, w: 170, h: 94, readability: 'shot' },
+  };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /sub=170x94 x4 \(shot\)/, '几何段要报子帧尺寸');
+  assert.match(text, /each cell is split 2x2/, '报警要说清是摊开导致的');
+  assert.match(text, /the tiling is what shrank them/, '要指出问题不在 cell 而在摊开');
+  assert.match(text, /video_zoom/);
+  // 子帧够用时不要唠叨
+  r.plan = { ...r.plan, sub: { k: 2, w: 341, h: 191, readability: 'scene' } };
+  assert.ok(!/!!/.test(formatManifest(r, { maxChars: 200_000 })));
+});
+
 test('成本按"图数 x token + ASR 秒数"报，不报 CPU', () => {
   const r = makeResult({ cells: 16 });
   r.transcript = { ...r.transcript, source: 'asr', asrSeconds: 192.4, asrCached: false };

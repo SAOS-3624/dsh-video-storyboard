@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { measureGroup } from '../src/storyboard/measure.js';
+import { frameDiversityOf, measureGroup } from '../src/storyboard/measure.js';
 import { layoutCanvas } from '../src/storyboard/sheet.js';
 import { bestLayout } from '../src/storyboard/plan.js';
 
@@ -81,23 +81,30 @@ test('measureGroup: 布局与 bestLayout 一致（不自己另算一套）', () 
   }
 });
 
-test('子帧下限按内容分流：音乐驱动 110×56，其余 200×112', async () => {
-  const { subFloorFor } = await import('../src/storyboard/measure.js');
-  assert.deepEqual(subFloorFor(true), { minSubW: 110, minSubH: 56 });
-  assert.deepEqual(subFloorFor(false), { minSubW: 200, minSubH: 112 });
+test('子帧下限跟着 need 走（不再按整片是不是音乐驱动一刀切）', async () => {
+  const { subFloorForNeed } = await import('../src/storyboard/measure.js');
+  // 语义：整帧给你 need 这一档，摊开允许降一档（至少还能分辨"是不是不同镜头"）
+  assert.deepEqual(subFloorForNeed('scene'), { minSubW: 160, minSubH: 90 });
+  assert.deepEqual(subFloorForNeed('text'), { minSubW: 320, minSubH: 180 });
+  // shot 已经是最低档，不再往下
+  assert.deepEqual(subFloorForNeed('shot'), { minSubW: 160, minSubH: 90 });
+  // 未知档位退回 scene
+  assert.deepEqual(subFloorForNeed('nonsense'), { minSubW: 160, minSubH: 90 });
 
-  // 3×3（350×194）：音乐驱动下能摊，但 **k 封在 2**（2026-10-30 起）。
-  // 3×3 摊出来只有 110×61，而 3 秒一格里的 8 个镜头本来就长得像 ——
-  // 9 张糊的重复帧不如 4 张 165×92。普通素材一格都摊不动。
   const r9 = rangesOf(9, 10);
   const cuts9 = Array.from({ length: 90 }, (_, i) => ({ t: i, score: 50 }));
-  // 预算给够（默认 48 只够 6 格 3×3，这里要看的是"能不能摊"，不是"预算够不够"）
+  // 3×3 布局的 350×194：160×90 门槛下 2×2（175×97）成立，3×3（116×64）被挡
   const plain9 = measureGroup(r9, { aspect: 16 / 9, cuts: cuts9, musicDriven: false });
-  const music9 = measureGroup(r9, { aspect: 16 / 9, cuts: cuts9, musicDriven: true, subBudget: 96 });
-  assert.equal(plain9.frameCount, 9, '普通素材 3×3 不该摊');
-  assert.ok(music9.cells.every((c) => c.k >= 2), '音乐驱动下每格都该摊开（3×3 在快的地方仍然保留）');
-
-  // 4×4（261×145）：160×90 过不了的一档（摊 2×2 得 130×72 < 160×90），110×56 必须放过去
+  assert.ok(plain9.cells.every((c) => c.k === 2), 'scene 档下每格最多 2×2');
+  // need=text 时子帧要 320×180，350×194 连 2×2 都放不下 → 整帧
+  const text9 = measureGroup(r9, { aspect: 16 / 9, cuts: cuts9, need: 'text' });
+  assert.equal(text9.frameCount, 9, 'need=text 时该退成整帧');
+  // 音乐驱动用例外档 110×56，能到 3×3
+  const music9 = measureGroup(r9, {
+    aspect: 16 / 9, cuts: cuts9, musicDriven: true, subBudget: 96,
+  });
+  assert.ok(music9.cells.every((c) => c.k >= 2), '音乐驱动每格都该摊开');
+  // 4×4（261×145）：160×90 过不了那一档（摊 2×2 得 130×72 < 160×90），110×56 必须放过去
   const r16 = rangesOf(16, 8);
   const cuts16 = Array.from({ length: 128 }, (_, i) => ({ t: i, score: 50 }));
   const plain16 = measureGroup(r16, { aspect: 16 / 9, cuts: cuts16, musicDriven: false });
@@ -116,4 +123,59 @@ test('allocateIntegerBudget: 总和精确、每份不低于下限', async () => 
   // 配额不够保底时也不能超发
   const tight = allocateIntegerBudget(2, [5, 5, 5], { min: 1 });
   assert.equal(tight.reduce((a, b) => a + b, 0), 2);
+});
+
+// ---------------- 指纹差（frameDiv）：直接量"摊开的 4 张像不像" ----------------
+//
+// 扫描时每帧都算 16×9 灰度指纹（scan.prints），原来只给 tagCuts 识别闪光。
+// 用它复刻 subTileTimes 的取帧时刻、再两两比差，就是"这一格摊成 2×2 会看到什么"。
+
+test('frameDiversityOf: 按 subTileTimes 的时刻取指纹、两两平均差', () => {
+  const fp = (v) => new Uint8Array(144).fill(v);
+  // fps=2，格 0–4s，无切点 → 取 0.5/1.5/2.5/3.5 → 指纹下标 1/3/5/7
+  const prints = [fp(0), fp(0), fp(0), fp(0), fp(0), fp(100), fp(0), fp(100)];
+  const d = frameDiversityOf({ from: 0, to: 4 }, [], prints, 2, 0, 2);
+  // 4 张 = [0,0,100,100] → 6 对里 4 对差 100 → 400/6 ≈ 66.7
+  assert.equal(d, 66.7);
+});
+
+test('frameDiversityOf: offset 把绝对时间换成指纹下标（窗口起点）', () => {
+  const fp = (v) => new Uint8Array(144).fill(v);
+  // 指纹从窗口 100s 开始；格 100–104s 与上例同构
+  const prints = [fp(0), fp(0), fp(0), fp(0), fp(0), fp(100), fp(0), fp(100)];
+  assert.equal(frameDiversityOf({ from: 100, to: 104 }, [], prints, 2, 100, 2), 66.7);
+});
+
+test('frameDiversityOf: 四张一模一样时返回 0（这一格不该摊）', () => {
+  const fp = (v) => new Uint8Array(144).fill(v);
+  const prints = Array.from({ length: 8 }, () => fp(50));
+  assert.equal(frameDiversityOf({ from: 0, to: 4 }, [], prints, 2, 0, 2), 0);
+});
+
+test('frameDiversityOf: 拿不到指纹时返回 null（判据要能退回 meanMotion）', () => {
+  assert.equal(frameDiversityOf({ from: 0, to: 4 }, [], null, 30, 0, 2), null);
+  assert.equal(frameDiversityOf({ from: 0, to: 4 }, [], [], 30, 0, 2), null);
+  // fps 未知也算拿不到
+  assert.equal(frameDiversityOf({ from: 0, to: 4 }, [], [new Uint8Array(144)], 0, 0, 2), null);
+});
+
+test('frameDiversityOf: 下标越界时返回 null，不瞎猜', () => {
+  const fp = (v) => new Uint8Array(144).fill(v);
+  const prints = [fp(0), fp(0)];   // 只有 2 帧，但需要到下标 7
+  assert.equal(frameDiversityOf({ from: 0, to: 4 }, [], prints, 2, 0, 2), null);
+});
+
+test('measureGroup: 有指纹时 frameDiv 进 cells、并影响 k', () => {
+  const fp = (v) => new Uint8Array(144).fill(v);
+  const ranges = rangesOf(4, 10);      // 4 格 × 10s，2×2 布局
+  const cuts = [2, 4, 6, 8, 12, 14, 16, 18, 22, 24, 26, 28, 32, 34, 36, 38]
+    .map((t) => ({ t, score: 50 }));
+  // 一半帧是 0、一半是 200 → 任何时刻组合都有明显差异
+  const prints = Array.from({ length: 160 }, (_, i) => fp(i % 2 ? 200 : 0));
+  const withFp = measureGroup(ranges, { aspect: 16 / 9, cuts, prints, fps: 4, printOffset: 0 });
+  assert.ok(withFp.cells.every((c) => typeof c.frameDiv === 'number'),
+    '每格都应带 frameDiv');
+  const noFp = measureGroup(ranges, { aspect: 16 / 9, cuts });
+  assert.ok(noFp.cells.every((c) => c.frameDiv === undefined),
+    '没有指纹时不该凭空造这个字段');
 });

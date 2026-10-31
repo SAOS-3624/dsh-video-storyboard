@@ -16,7 +16,10 @@ import { cpus } from 'node:os';
 import { probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
 import { resolveInput } from './fetch.js';
 import { loadTranscriptFile } from './transcript-file.js';
-import { detectDarkRuns, refineCutsByWindow, scanShots, spikeCuts, suppressClose } from './scan.js';
+import {
+  detectDarkRuns, packPrints, packedFps, refineCutsByWindow, scanShots, spikeCuts,
+  suppressClose, unpackPrints,
+} from './scan.js';
 import { tagCuts } from './flash.js';
 import { rememberSegments } from './locate.js';
 import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
@@ -397,6 +400,9 @@ export async function runStoryboard(opts) {
   // 所以缓存命中 / precomputed 时它们是 null，tagCuts 会退化成不打标签。
   let scanMeans = null;
   let scanPrints = null;
+  // 指纹序列的**实际帧率**：真扫时是 info.fps，从缓存读回的是抽稀后的（info.fps / step）。
+  // 这根数直接决定"时刻 → 下标"的换算，算错整条时间轴就偏了。
+  let printFps = 0;
   const scan = precomputed
     ? {
       cuts: (precomputed.cuts ?? []).filter((c) => c.t >= winStart && c.t < winStart + winDur),
@@ -404,6 +410,8 @@ export async function runStoryboard(opts) {
       threshold: precomputed.threshold ?? threshold,
       cached: false,
       reused: true,
+      // batch 模式下 precomputed 是 scanShots 的完整返回，指纹就在里面（整片坐标，offset=0）
+      ...(Array.isArray(precomputed.prints) ? { printsRaw: precomputed.prints } : {}),
     }
     : await withCache(key, async () => {
       const s = await scanShots({
@@ -415,17 +423,27 @@ export async function runStoryboard(opts) {
       // **逐帧的 means / prints 不进缓存**：级联缓存走的是 JSON.stringify，
       // 而 prints 是 7500 个 Uint8Array —— 序列化后会变成 {"0":12,"1":34,…}，
       // 60 分钟片子直接几十 MB，而且读回来类型也丢了（判据会拿到坏数据）。
-      // 它们只在本次调用里给 tagCuts 用，缓存命中时没有就算了（退化成不打标签）。
-      // 但**黑场段要单独存下来**：means 只在扫描那一次存在，不存的话"黑场独占一格"
-      // 只在第一次跑生效，第二次（命中缓存）黑场又并回内容格里 —— 同一支片子两次出图不一样。
+      // 但**抽稀版要存**（8fps + base64，see scan.packPrints）：`frameDiv` 判据全靠它，
+      // 不存就会"第一次跑和第二次跑摊开方式不一样"，而清单上看不出来。
       scanMeans = s.means;
       scanPrints = s.prints;
       return {
         cuts: s.cuts, stats: s.stats, frames: s.frames,
         threshold: s.threshold, degraded: s.degraded, summary: s.summary,
         darkRuns: detectDarkRuns(s.means, { fps: info.fps }),
+        printPack: s.prints?.length ? packPrints(s.prints, info.fps) : null,
       };
     }, { enabled: cache });
+  // 三个来源收口成一份：真扫（内存里已有）> 缓存读回（解包）> precomputed（batch，整片坐标）
+  if (scanPrints?.length) {
+    printFps = info.fps;
+  } else if (scan.printPack) {
+    scanPrints = unpackPrints(scan.printPack);
+    printFps = packedFps(scan.printPack, info.fps);
+  } else if (scan.printsRaw) {
+    scanPrints = scan.printsRaw;
+    printFps = info.fps;
+  }
   if (cache && !scan.cached && !precomputed) await pruneStorage();
   mark('scan');
 
@@ -797,6 +815,12 @@ export async function runStoryboard(opts) {
   // 真切点和积分采样点都算镜头边界 —— 摊开时它们一视同仁。
   const shotsTotal = cuts.length + sampleMarks.length;
   const budgetFor = (n) => subBudgetFor({ cuts: shotsTotal, cells: n });
+  // **逐帧指纹的上下文**：`scanPrints` 只在"这一趟真的扫了"时才有（不进缓存，
+  // 见上面 415 行的说明），缓存命中 / precomputed 时是 null —— measure 会自动退回 meanMotion。
+  // offset 必须是窗口起点：prints[0] 对应 winStart，而 cell 的 from/to 是绝对时间。
+  // fps 必须用 printFps（抽稀后可能是 info.fps/3）—— 用原 fps 去寻址抽稀序列会越界，
+  // frameDiv 会整片变成 null，而现象是"判据悄悄失效"，很难查。
+  const printCtx = { prints: scanPrints, fps: printFps || info.fps, printOffset: winStart };
   const splitSheets = (ranges) => {
     if (Number(opts.sheets) > 0) {
       // 调用方显式指定了张数（测试、批量脚本）就尊重它，仍按格数均分
@@ -811,6 +835,7 @@ export async function runStoryboard(opts) {
     const measured = measureGroup(ranges, {
       aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
       subBudget: budgetFor(Math.min(16, ranges.length)), cuts, sampleMarks, stats: scan.stats ?? [],
+      need, ...printCtx,
       ...(noTiling ? { maxK: 1 } : {}),
     });
     // frameBudget 卡的是**渲染时间**，不是 token：一张图 9 格摊满 3×3 是 81 帧，
@@ -864,10 +889,15 @@ export async function runStoryboard(opts) {
   // **planner 认为会出多少帧**。渲染时必须与这个数一致（同一个 measureGroup 得出的），
   // 所以它是一个可验收的量：清单里 Σ(cell.sub²) 应该正好等于它。
   planInfo.requested = requested;
+  // 指纹拿不到（缓存命中 / precomputed）时，`frameDiv` 那几条判据会自动退回 meanMotion。
+  // **必须写出来**：否则同一支片子第一次跑和第二次跑（命中缓存）摊开方式不同，
+  // 而清单上看不出任何区别 —— 这正是"两次出图不一样"最难查的那种。
+  if (!scanPrints) trace.push('no-prints:frameDiv-off');
   planInfo.trace = trace;
   planInfo.frames = groups.reduce((n, g) => n + measureGroup(g, {
     aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
     subBudget: budgetFor(g.length), cuts, sampleMarks, stats: scan.stats ?? [],
+    need, ...printCtx,
     ...(noTiling ? { maxK: 1 } : {}),
   }).frameCount, 0);
 
@@ -927,6 +957,7 @@ export async function runStoryboard(opts) {
     const measured = measureGroup(group, {
       aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
       subBudget: budgetFor(group.length), cuts, sampleMarks, stats: scan.stats ?? [],
+      need, ...printCtx,
       ...(noTiling ? { maxK: 1 } : {}),
     });
     // cellBudget 也要用 measure 那个：composeSheet 与 layoutCanvas 必须是同一个预算，
@@ -978,6 +1009,11 @@ export async function runStoryboard(opts) {
         // 格内平均画面变化（0–255 的分数）：诊断"为什么这格摊 3×3 而那格只摊 2×2"
         ...(Number.isFinite(measured.cells[gi]?.meanMotion)
           ? { meanMotion: measured.cells[gi].meanMotion } : {}),
+        // **摊开的 4 张到底差多少**（16×9 指纹两两平均差）。这是"该不该摊"的直接证据，
+        // 比 meanMotion 可信（后者测的是段内运动，方向常相反）。不报的话，
+        // 模型看到一格只给整帧会以为是漏采，实际上是因为那 4 张本来就一样。
+        ...(Number.isFinite(measured.cells[gi]?.frameDiv)
+          ? { frameDiv: measured.cells[gi].frameDiv } : {}),
         ...(frame.sharp !== undefined ? { sharp: +frame.sharp.toFixed(1) } : {}),
         ...(text?.text ? { text: text.text, charsPerSec: text.charsPerSec } : {}),
       });
@@ -1074,6 +1110,17 @@ export async function runStoryboard(opts) {
           w: out[0].cellW, h: out[0].cellH,
           readability: readabilityOf(out[0].cellW, out[0].cellH),
         },
+        // **摊开之后的真实尺寸**。`cell=` 报的是"一个大格"，模型看到 341×189 就默认能认脸；
+        // 可一格摊 2×2 时，它真正看到的是 4 张 170×94 —— 那只能分辨"是不是同一个镜头"。
+        // 不报这个数，模型会按 cell 的高估去描述画面，说出来的东西就是编的。
+        // 取该张里**最大**的 k，即最坏情况：一张图里有 2×2 也有 3×3 时，按 3×3 报。
+        ...(() => {
+          const maxK = Math.max(1, ...(out[0].cells ?? []).map((c) => c.sub ?? 1));
+          if (maxK <= 1) return {};
+          const sw = Math.floor(out[0].cellW / maxK);
+          const sh = Math.floor(out[0].cellH / maxK);
+          return { sub: { k: maxK, w: sw, h: sh, readability: readabilityOf(sw, sh) } };
+        })(),
       } : {}),
       // 实际出片格数：minGap 会把"要 16 格"压成 8 格，清单必须两个数都给，
       // 否则首行写 16、末尾写 total 8，读起来像是出错了。

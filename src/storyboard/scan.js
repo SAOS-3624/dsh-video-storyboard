@@ -93,6 +93,53 @@ export function scorePair(prev, cur) {
   return sum / ((cur.length / 3) * totalWeight);
 }
 
+/** 逐帧指纹存进缓存时要抽稀到这么多 fps。0.125s 一帧 = 最短格子（0.5s）里也够分 4 张。 */
+export const PRINT_FPS = 8;
+
+/**
+ * 把逐帧指纹压成**稀疏序列 + base64**，供缓存。
+ *
+ * 为什么要压：原样存 7500 个 `Uint8Array`，`JSON.stringify` 会写成 `{"0":12,"1":34,…}`，
+ * 60 分钟片子几十 MB 且读回来类型全丢（缓存注释里记过）。抽稀到 8fps 之后：
+ * 144 B × 8fps × 7200s ≈ 8 MB 原始、base64 后 11 MB —— 而它是 `frameDiv` 判据的唯一来源，
+ * **不存就等于"第一次跑和第二次跑摊开方式不一样"**，那种 bug 最难查。
+ *
+ * @param {Uint8Array[]} prints 逐帧 16×9
+ * @param {number} fps 原视频帧率
+ */
+export function packPrints(prints, fps) {
+  if (!Array.isArray(prints) || prints.length === 0) return null;
+  const step = Math.max(1, Math.round((fps || 25) / PRINT_FPS));
+  const kept = [];
+  for (let i = 0; i < prints.length; i += step) {
+    if (prints[i]?.length === FP_W * FP_H) kept.push(prints[i]);
+  }
+  if (kept.length === 0) return null;
+  const buf = Buffer.alloc(kept.length * FP_W * FP_H);
+  kept.forEach((p, i) => buf.set(p, i * FP_W * FP_H));
+  // step 要**真的**记下来：解包后 fps = 原 fps / step，算错一位整条时间轴就偏了。
+  return { step, fps: +(fps || 25).toFixed(3), data: buf.toString('base64') };
+}
+
+/** 解回 `Uint8Array[]`（抽稀后的版本，实际帧率 = packed.fps / packed.step）。 */
+export function unpackPrints(packed) {
+  if (!packed?.data) return null;
+  const buf = Buffer.from(String(packed.data), 'base64');
+  const size = FP_W * FP_H;
+  const n = Math.floor(buf.length / size);
+  if (n === 0) return null;
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) out[i] = new Uint8Array(buf.subarray(i * size, (i + 1) * size));
+  return out;
+}
+
+/** 抽稀后的实际帧率（给 frameDiversityOf 的时间→下标换算用） */
+export function packedFps(packed, fallback = 0) {
+  if (!packed) return fallback;
+  const step = Math.max(1, Number(packed.step) || 1);
+  return (Number(packed.fps) || fallback) / step;
+}
+
 /**
  * 按"相对本地基线"找切点：分数（= 相邻两帧的画面变化百分比）突然**比它附近的常态高很多**才算一刀。
  *
