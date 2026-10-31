@@ -11,11 +11,46 @@ import { existsSync } from 'node:fs';
 import {
   OCR_BRIDGE, OCR_MAX_ITEMS, detectSubtitleBand, ocrPython, readBand, shouldReplace, similarity,
 } from '../src/storyboard/ocr.js';
+import { applyOcrSamples, planOcrSamples } from '../src/storyboard/ocr-subs.js';
 
 test('similarity: 忽略标点，按字符算', () => {
   assert.equal(similarity('你好，世界', '你好世界'), 1);
   assert.ok(similarity('他也忘记', '你连也要忘记吗') > 0.3);
   assert.equal(similarity('', 'abc'), 0);
+});
+
+test('planOcrSamples: 取转录段的绝对中点，不再叠加 winStart（#45）', () => {
+  const samples = planOcrSamples([{ from: 269.1, to: 270.1, text: '一句' }], {
+    winStart: 261.5, winDur: 82.5,
+  });
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0].idx, 0);
+  // 旧实现是 winStart + (from + to) / 2 = 531.1，直接 seek 到片尾之外。
+  assert.ok(Math.abs(samples[0].at - 269.6) < 1e-9, `at=${samples[0].at}`);
+});
+
+test('planOcrSamples: 越出窗口的中点夹到窗口边界', () => {
+  const samples = planOcrSamples([{ from: 340, to: 350, text: '越界' }], {
+    winStart: 261.5, winDur: 82.5,
+  });
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0].at, 344);
+});
+
+test('applyOcrSamples: 替换写回被抽样的那一条，不误伤别的 segment', () => {
+  const segments = [
+    { from: 269.1, to: 270.1, text: '他也忘记。' },
+    { from: 300.0, to: 301.0, text: '他也忘记。' },
+  ];
+  const { segments: out, changes } = applyOcrSamples(
+    segments,
+    [{ idx: 1, at: 300.5 }],
+    [{ text: '你连，也要忘记吗', conf: 0.72 }],
+  );
+  assert.equal(out[0].text, '他也忘记。', '第 0 条没被抽样，不能改');
+  assert.match(out[1].text, /也要忘记/);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].from, 300.0);
 });
 
 test('shouldReplace: 接受"ASR 漏字、OCR 完整"的那一类', () => {

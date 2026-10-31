@@ -27,6 +27,46 @@ const runFile = promisify(execFile);
  * 只有三条都成立才替换（见 shouldReplace）：OCR 置信度够、长度差不多、相似度落在 0.2–0.9。
  * 剩下的情况一律保留 ASR 原文 —— 宁可留一个已知的错字，也不要引入一个来源不明的句子。
  */
+export function planOcrSamples(segments, { winStart = 0, winDur = Infinity, max = OCR_MAX_ITEMS } = {}) {
+  const list = Array.isArray(segments) ? segments : [];
+  const n = Math.min(Math.max(0, Math.round(Number(max) || 0)), list.length);
+  if (n === 0) return [];
+  const step = list.length / n;
+  const limit = Number.isFinite(winDur) ? Math.max(0, winStart + winDur) : Infinity;
+  const samples = [];
+  for (let i = 0; i < n; i += 1) {
+    const idx = Math.floor(i * step);
+    const from = Number(list[idx]?.from);
+    const to = Number(list[idx]?.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) continue;
+    const mid = (from + to) / 2;
+    // 转录段的 from/to 已经是**整条视频的绝对时间**；这里不能再加 winStart，
+    // 否则窗口从 261.5s 开始时会把 269.6s 的帧 seek 到 531.1s（#45）。
+    samples.push({ idx, at: Math.min(Math.max(0, mid), limit) });
+  }
+  return samples;
+}
+
+export function applyOcrSamples(segments, samples, items) {
+  const out = segments.map((x) => ({ ...x }));
+  const changes = [];
+  for (const [k, sample] of samples.entries()) {
+    const seg = segments[sample.idx];
+    const ocrText = (items[k]?.text ?? '').replace(/\s+/g, '');
+    const verdict = shouldReplace({ asr: seg.text, ocr: ocrText, conf: items[k]?.conf ?? 0 });
+    if (process.env.DSH_OCR_DEBUG) {
+      console.error('[ocr]', seg.from.toFixed(1), JSON.stringify(seg.text), '| ocr:', JSON.stringify(ocrText),
+        '| conf', items[k]?.conf, '|', verdict.reason, verdict.cover ?? '');
+    }
+    if (verdict.replace) {
+      const fixedText = verdict.text ?? ocrText;
+      changes.push({ from: seg.from, was: seg.text, now: fixedText, cover: verdict.cover });
+      out[sample.idx] = { ...seg, text: fixedText };
+    }
+  }
+  return { segments: out, changes };
+}
+
 export async function correctByOnScreenSubs({
   input, winStart, winDur, ffmpegPath, segments, remoteFrame, sourceCopyHeight = null,
 }) {
@@ -60,49 +100,29 @@ export async function correctByOnScreenSubs({
     const crop = `crop=iw:ih*${(y1 - y0).toFixed(4)}:0:ih*${y0.toFixed(4)},scale=1280:-1`;
 
     // ② 均匀抽样若干条台词（不取全部，成本与收益不成正比）
-    const picks = [];
-    const n = Math.min(OCR_MAX_ITEMS, segments.length);
-    const step = segments.length / n;
-    for (let i = 0; i < n; i += 1) picks.push(Math.floor(i * step));
+    const samples = planOcrSamples(segments, { winStart, winDur });
 
     const images = [];
-    for (const [k, idx] of picks.entries()) {
-      const seg = segments[idx];
-      const mid = winStart + (seg.from + seg.to) / 2;
-      images.push(await grab(mid, `band${k}.jpg`, crop));
+    for (const [k, sample] of samples.entries()) {
+      images.push(await grab(sample.at, `band${k}.jpg`, crop));
     }
     const read = await readBand({ python, images });
     if (!read.ok) return { status: 'failed', reason: read.kind, detail: read.message };
     const items = read.items;
 
-    const out = segments.map((x) => ({ ...x }));
-    const changes = [];
-    for (const [k, idx] of picks.entries()) {
-      const seg = segments[idx];
-      const ocrText = (items[k]?.text ?? '').replace(/\s+/g, '');
-      const verdict = shouldReplace({ asr: seg.text, ocr: ocrText, conf: items[k]?.conf ?? 0 });
-      if (process.env.DSH_OCR_DEBUG) {
-        console.error('[ocr]', seg.from.toFixed(1), JSON.stringify(seg.text), '| ocr:', JSON.stringify(ocrText),
-          '| conf', items[k]?.conf, '|', verdict.reason, verdict.cover ?? '');
-      }
-      if (verdict.replace) {
-        const fixedText = verdict.text ?? ocrText;
-        changes.push({ from: seg.from, was: seg.text, now: fixedText, cover: verdict.cover });
-        out[idx] = { ...seg, text: fixedText };
-      }
-    }
+    const applied = applyOcrSamples(segments, samples, items);
     return {
       status: 'applied',
-      fixed: changes.length,
-      checked: picks.length,
+      fixed: applied.changes.length,
+      checked: samples.length,
       band: { y0: +y0.toFixed(3), y1: +y1.toFixed(3), detected: det.detected },
       // URL 模式下跑的是下载的扫描副本：字幕本身就糊，校正的可信度低于本地高清文件。
       // 这个事实必须传到清单，否则读起来像"原片台词已核对"。
       ...(sourceCopyHeight
         ? { basedOn: 'low-res-copy', copyHeight: sourceCopyHeight }
         : { basedOn: 'source' }),
-      changes: changes.slice(0, 5),
-      segments: out,
+      changes: applied.changes.slice(0, 5),
+      segments: applied.segments,
     };
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
