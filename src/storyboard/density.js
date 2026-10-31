@@ -276,55 +276,6 @@ export function planCellRanges({
   return ranges;
 }
 
-/**
- * 按**镜头数**均分时间段，而不是按时间或密度积分。
- *
- * 为什么比"密度积分等分"更对：
- *   密度积分保证每格承载相同的"变化量"，但慢镜头的变化量低，
- *   于是一段 3 分钟的慢戏可能只分到 1 格 —— 里面全是"几乎一样的画面"，
- *   而一段 20 秒的快剪分到 2 格。观众想看的恰恰是慢戏里的细节。
- *
- * 按镜头数均分则是：**每格装同样多的镜头**。
- *   慢段：10 个镜头要 50 秒 → 这一段就占 50 秒
- *   快段：10 个镜头只要 5 秒 → 这一段就占 5 秒
- * 段长天然与镜头密度成反比，不需要再调参。
- *
- * 每段内部再由 chooseSubGrid 决定摊开几张：镜头多的段摊 3×3/4×4，
- * 镜头少的段（1~2 个）整格一张 —— 慢镜头因此拿到"格内最大"的画面。
- *
- * @param {{cuts:number[], duration:number, cells:number}} opts
- * @returns {Array<{from:number,to:number,dur:number,shots:number}>}
- */
-export function planByShotCount({ cuts = [], duration, cells } = {}) {
-  if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
-  if (!Number.isInteger(cells) || cells < 1) throw new RangeError(`cells must be a positive integer, got ${cells}`);
-
-  // 镜头边界：[0, ...切点..., duration]
-  const marks = [0, ...cuts.filter((c) => c > 0 && c < duration).sort((a, b) => a - b), duration];
-  const shots = marks.length - 1;
-  if (shots <= cells) {
-    // 镜头比格子还少：一个镜头一格，多出来的格子不硬塞（调用方按实际长度处理）
-    return marks.slice(0, -1).map((from, i) => ({
-      from, to: marks[i + 1], dur: marks[i + 1] - from, shots: 1,
-      density: +(1 / Math.max(0.1, marks[i + 1] - from)).toFixed(2),
-    }));
-  }
-
-  // 每格 targetShots 个镜头；除不尽的把余数摊到前面几格
-  const base = Math.floor(shots / cells);
-  const extra = shots % cells;
-  const out = [];
-  let k = 0;
-  for (let i = 0; i < cells; i++) {
-    const n = base + (i < extra ? 1 : 0);
-    if (n <= 0) continue;
-    const from = marks[k];
-    const to = marks[k + n];
-    out.push({ from, to, dur: to - from, shots: n, density: +(n / Math.max(0.1, to - from)).toFixed(2) });
-    k += n;
-  }
-  return out;
-}
 
 /**
  * **rodt 函数** —— 每格长度 = 常数 ÷ 该处的切点密度。
@@ -397,39 +348,6 @@ export function planByRodt({
 }
 
 /**
- * **sheet 的边界直接由切点决定** —— 这是"按密度积分"最直接的写法。
- *
- * 思路：沿时间轴走，每累积 `shotsPerWindow` 个切点就划一张图。
- * 因为密度高的地方攒够 N 个切点用的时间短，密度低的地方用得长，
- * 所以每张覆盖的时长自动就是 B = K / A（A 是局部切点密度），不用再单独算。
- *
- * 边界不落在切点上，而是取**相邻两个切点的加权平均**：
- * 直接切在切点上会把一个镜头劈成两半（前一张尾巴、后一张开头各半截），
- * 取中间位置能保证每张都以完整镜头开始和结束。
- *
- * @param {{cuts:number[], duration:number, shotsPerWindow?:number}} opts
- * @returns {Array<{from:number, to:number}>}
- */
-export function planSheetWindows({ cuts = [], duration, shotsPerWindow = 40 } = {}) {
-  if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
-  const marks = [...cuts].filter((c) => c > 0 && c < duration).sort((a, b) => a - b);
-  if (marks.length < shotsPerWindow) return [{ from: 0, to: duration }];
-
-  const windows = [];
-  let start = 0;
-  for (let i = shotsPerWindow - 1; i < marks.length; i += shotsPerWindow) {
-    const a = marks[i];
-    const b = marks[i + 1] ?? duration;
-    const mid = a + (b - a) * 0.5;      // 加权平均，避开转场正中
-    if (mid <= start || mid >= duration) continue;
-    windows.push({ from: start, to: mid });
-    start = mid;
-  }
-  if (start < duration) windows.push({ from: start, to: duration });
-  return windows;
-}
-
-/**
  * **按「累计画面帧数」切 sheet** —— 流程的最后一步。
  *
  * 为什么不能用"时间"或"格数"来切：
@@ -452,36 +370,53 @@ export function planSheetsByFrames(cells, { frameBudget = 64, maxCellsPerSheet =
   if (cells.length === 0) return [];
   const framesOf = (c) => Math.max(1, (c.k ?? 1) ** 2);
   const totalFrames = cells.reduce((n, c) => n + framesOf(c), 0);
+  const cap = Math.max(1, Math.round(Number(maxCellsPerSheet)) || 16);
 
-  // **先算要几张，再把帧数均摊。**
-  // 旧写法是"装满再切"（贪心），最后一张常常只剩一两格：实测 250 秒素材跑出
-  // 第 1 张 16 格、第 2 张 2 格 → 2 格按 bestLayout 排成 1×2（715×843 的竖长条），
-  // 两个格子各占 707×396，等于两张图只看了两个画面。
-  // 均摊之后每张的帧数接近，张数不变但形状正常。
-  const count = Math.max(
-    1,
-    Math.ceil(totalFrames / Math.max(1, frameBudget)),
-    Math.ceil(cells.length / Math.max(1, maxCellsPerSheet)),
+  // **先算要几张，再按帧数比例分格**（2026-10-31 二审：原来是"装满再切"的贪心）。
+  //
+  // 旧写法两个毛病：
+  //  1. **张数会超出这个公式**：`acc + frames > target*1.1` 一到就 flush，没有"剩余格数还够不够
+  //     填满剩余张数"的兜底。实测 25 格 / cap 9：公式 3 张，实际切出 4 张（9+8+6+2）；
+  //     真实素材更难看 —— 18 格 / cap 9 切出 **9+8+1**，最后一张是 1377×771 的单格巨图。
+  //  2. flush 的时机取决于**下一格有多重**，于是同样的格数换个 k 分布就换一种切法。
+  //
+  // 现在：count 定死，每张在"给后面留够格数"的前提下，取**帧数最接近剩余均值**的那一刀。
+  // 于是每张帧数接近、张数恒等于 count、不会出现只剩 1 格的尾巴。
+  const count = Math.min(
+    cells.length,
+    Math.max(
+      1,
+      Math.ceil(totalFrames / Math.max(1, frameBudget)),
+      Math.ceil(cells.length / cap),
+    ),
   );
-  const target = totalFrames / count;
+  const prefix = new Array(cells.length + 1);
+  prefix[0] = 0;
+  for (let i = 0; i < cells.length; i += 1) prefix[i + 1] = prefix[i] + framesOf(cells[i]);
 
   const sheets = [];
-  let cur = [];
-  let acc = 0;
-  const flush = () => { if (cur.length) { sheets.push(cur); cur = []; acc = 0; } };
-
-  for (let i = 0; i < cells.length; i++) {
-    const frames = framesOf(cells[i]);
-    const left = count - sheets.length;     // 还差几张（含正在装的这张）
-    const rest = cells.length - i;          // 还没装进去的格数（含当前这一格）
-    // 这一格塞进去会明显超过本张的目标，且剩下的格数还够后面每张至少分一格 → 切。
-    // 10% 的余量是给"一格 16 帧、目标是 12"这种整数边界留的，不然会切得太碎。
-    const over = acc + frames > target * 1.1;
-    if (cur.length > 0 && rest >= left && (over || cur.length >= maxCellsPerSheet)) flush();
-    cur.push(cells[i]);
-    acc += frames;
+  let start = 0;
+  for (let s = 0; s < count; s += 1) {
+    const left = count - s;              // 含正在装的这张
+    const rest = cells.length - start;   // 还没装进去的格数（含当前这一格）
+    if (left === 1) {
+      // 最后一张把剩下的全收下（它一定 ≤ cap，因为 count 是向上取整来的）
+      sheets.push(cells.slice(start));
+      break;
+    }
+    // 本张能装几格：后面每张至少留 1 格、至多留 cap 格
+    const minTake = Math.max(1, rest - (left - 1) * cap);
+    const maxTake = Math.min(cap, rest - (left - 1));
+    const target = (prefix[cells.length] - prefix[start]) / left;
+    let take = minTake;
+    let bestErr = Infinity;
+    for (let n = minTake; n <= maxTake; n += 1) {
+      const err = Math.abs(prefix[start + n] - prefix[start] - target);
+      if (err < bestErr) { bestErr = err; take = n; }
+    }
+    sheets.push(cells.slice(start, start + take));
+    start += take;
   }
-  flush();
   return sheets;
 }
 

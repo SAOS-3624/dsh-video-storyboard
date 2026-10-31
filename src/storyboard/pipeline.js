@@ -24,17 +24,14 @@ import { tagCuts } from './flash.js';
 import { rememberSegments } from './locate.js';
 import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import { cachedTranscript, rememberTranscript } from './transcript-cache.js';
-import { fitSegments, segmentsFromCuts } from './segments.js';
-import {
-  allocateIntegerBudget, fillLayout, musicDrivenVerdict, readabilityOf, suggest, PLAN_THRESHOLDS,
-} from './plan.js';
-import {
-  densityFromScore, findBursts, integralMarks, planByRodt, planByShotCount, planCellRanges, planSheetsByFrames,
-} from './density.js';
-// 一张图会产生多少帧，切张与渲染共用同一个答案（见 measure.js 顶部说明）
-import { measureGroup } from './measure.js';
+import { musicDrivenVerdict, readabilityOf, suggest, PLAN_THRESHOLDS } from './plan.js';
+import { findBursts, integralMarks } from './density.js';
+// 一张图会产生多少帧，切张与渲染共用同一个答案（见 measure.js 顶部说明）。
+// 现在这个"答案"由 layout.planLayout() 一次量好并随 groups 一起返回，pipeline 不再自己调。
+// 排布决策（几张 / 每张几格 / 时间轴怎么切）已经独立成 layout.js：纯算术、可单测。
+import { planLayout } from './layout.js';
 import { remember } from './memory.js';
-import { analyzeAudio, analyzeRhythm, describeAudio, detectOnsets } from './audio.js';
+import { analyzeAudio, analyzeRhythm, describeAudio, detectOnsets, hasAudibleSamples } from './audio.js';
 import {
   alignCells, applyTermMap, asrBackendId, canTranscribe, describeAsrTarget, explainFetchError,
   extractSubtitleTrack, filterSuspectSegments, resolveAsrConfig, speechCurve, transcribeLong,
@@ -45,7 +42,7 @@ import { pruneStorage } from './storage.js';
 import { saveCells } from './cells.js';
 import { ffmpegVersion, sha256File } from './provenance.js';
 import { findInjection } from './injection.js';
-import { addAudioStrip, composeSheet, encodePngBuffer } from './sheet.js';
+import { addAudioStrip, addSheetHeader, clock, composeSheet, encodePngBuffer } from './sheet.js';
 import { extractFrameWithFallback, extractSubTile, mapPool } from './frames.js';
 import { correctByOnScreenSubs } from './ocr-subs.js';
 import { countTextInSilence } from './format.js';
@@ -54,36 +51,9 @@ export const PICK_MODES = ['sharp', 'mid', 'thumb'];// 只有两种：时间码�
 // （历史上 `index+time` 在参数表里但从没实现过，等于一个会静默失效的选项。）
 export const BURN_MODES = ['index', 'none'];
 
-/**
- * 一张图最少摊出多少子帧（k²−1 的预算）。
- *
- * 原来是固定 48。问题是它跟"这一张里有几个镜头"无关：
- * 90 秒 51 刀的 PV 分 9 格，每格约 6 个镜头，全摊 3×3 要 **72** 个额外帧；
- * 48 只够 6 格，剩下 3 格被降档 —— 实测第 1 格（24 秒、8 个镜头）只拿到 4 帧，
- * 用户的原话是"1 和 2 之间漏了特别多"。
- *
- * 现在按每张实际的镜头数算（见 subBudgetFor），48 只是下限。
- */
-export const SUB_BUDGET = 48;
-/** 上限：再多就是拿时间换覆盖，收益递减（240 帧 ≈ 240 次 ffmpeg）。 */
-export const SUB_BUDGET_MAX = 240;
-
-/**
- * 这一张图该给多少子帧预算。
- *
- * 每格想要 k²−1 个额外帧，k = ceil(sqrt(格内镜头数))。
- * 这里只用总镜头数 ÷ 格数估一下，宁可多给 —— 多给的代价是几次 ffmpeg，
- * 少给的代价是**画面直接不出现**。
- *
- * @param {{cuts?:number, cells?:number}} o cuts 含真切点与积分采样点
- */
-export function subBudgetFor({ cuts = 0, cells = 1 } = {}) {
-  const n = Math.max(1, Math.round(Number(cuts) || 0));
-  const c = Math.max(1, Math.round(Number(cells) || 1));
-  const perCell = n / c;
-  const k = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(perCell + 1))));
-  return Math.min(SUB_BUDGET_MAX, Math.max(SUB_BUDGET, Math.round(c * (k * k - 1))));
-}
+// 子帧预算的算法随"量帧数"一起搬到了 measure.js（切张与渲染共用同一个口径）。
+// 这里只做兼容再导出：`./pipeline` 是公开子路径，老调用方可能还在直接 import 它们。
+export { SUB_BUDGET, SUB_BUDGET_MAX, subBudgetFor } from './measure.js';
 
 /**
  * @param {object} opts
@@ -150,7 +120,10 @@ export async function runStoryboard(opts) {
     // 出图几何：像素预算 / 每张格数上限 / 目标可读性（need 只影响自动排格的上限）。
     // 三个值由 board.js 的 boardGeometry() 算好传进来，管线不再自己解释 size 档位。
     budget = 640_000,
-    maxPerSheet = 16,
+    // **0 = 交给 layout 按 budget + need 推**（和 boardGeometry 走同一个 plan.maxCellsForNeed）。
+    // 以前这里写死 16：于是"直接调 runStoryboard"和"走 CLI / DSH 工具"对同一个 budget
+    // 给出两种几何（32 格 341×189 vs 24 格 394×220）—— 同一件事两个口径，正是要收掉的。
+    maxPerSheet = 0,
     need = 'scene',
     // 只传 from 时自动推下一段：segment 秒。0 = 看到片尾（短片默认）。
     segment = 0,
@@ -396,8 +369,10 @@ export async function runStoryboard(opts) {
   const key = cache ? await cacheKey({ input, start: winStart, end: winStart + winDur, threshold }) : null;
   // precomputed：批量模式下全片已经扫过一次，窗口直接复用那份切点与摘要，
   // 不再为每个窗口重新解码一遍（2 小时的片子能省掉 24 次重复扫描）。
-  // 逐帧指纹只在"真的扫了"的那一次里拿得到（缓存存不下 Uint8Array），
-  // 所以缓存命中 / precomputed 时它们是 null，tagCuts 会退化成不打标签。
+  // **逐帧的 means 不进缓存**（级联缓存走 JSON.stringify，塞不下也别扭），
+  // 所以 `tagCuts` 只有"这一趟真的扫了"才会打标签。
+  // prints 则**会**进缓存，但存的是 `printPack`（8 fps 抽稀 + base64，见 scan.packPrints）——
+  // 于是缓存命中时 `frameDiv` 判据照跑，只是采样率与冷跑不同（交接文档 §9.1 有实测差异）。
   let scanMeans = null;
   let scanPrints = null;
   // 指纹序列的**实际帧率**：真扫时是 info.fps，从缓存读回的是抽稀后的（info.fps / step）。
@@ -423,8 +398,9 @@ export async function runStoryboard(opts) {
       // **逐帧的 means / prints 不进缓存**：级联缓存走的是 JSON.stringify，
       // 而 prints 是 7500 个 Uint8Array —— 序列化后会变成 {"0":12,"1":34,…}，
       // 60 分钟片子直接几十 MB，而且读回来类型也丢了（判据会拿到坏数据）。
-      // 但**抽稀版要存**（8fps + base64，see scan.packPrints）：`frameDiv` 判据全靠它，
-      // 不存就会"第一次跑和第二次跑摊开方式不一样"，而清单上看不出来。
+      // **抽稀版要存**（8fps + base64，see scan.packPrints）：`frameDiv` 判据全靠它。
+      // 但它只解决了"有没有"，没解决"一样不一样"：逐帧 vs 8fps 会给出不同的 frameDiv，
+      // 所以冷跑和缓存命中仍可能摊出不同的 k（交接文档 §9.1，实测 PV 28 帧 vs 23 帧）。
       scanMeans = s.means;
       scanPrints = s.prints;
       return {
@@ -443,6 +419,24 @@ export async function runStoryboard(opts) {
   } else if (scan.printsRaw) {
     scanPrints = scan.printsRaw;
     printFps = info.fps;
+  }
+  // **统一采样率：三条来路必须落到同一份指纹上。**
+  // 真扫 / precomputed 拿到的是**逐帧**（fps = info.fps），缓存读回的是 `packPrints` 的 **8 fps**。
+  // `frameDiversityOf` 用 `round((t-offset)*fps)` 寻址，两者算出的下标最多差 1.5 帧 ——
+  // 快剪段里差一帧，`frameDiv` 就能从 76 掉到 52（跨过 `FRAME_DIV_MID=70`）→ k 从 3 变 2。
+  // 实测（记管MAD02 / 概念 PV）：冷跑 126 帧 `{1:3,2:15,3:7}`、缓存命中 121 帧 `{1:3,2:16,3:6}`；
+  // PV 28 帧 vs 23 帧。**同一部片、同一组参数，第一次跑和第二次跑出图不同。**
+  //
+  // 修法：真扫这边**当场按缓存的口径抽稀一遍再解回来**，两条路从此逐字节一致。
+  // 为什么以 8 fps 为准（而不是把缓存提到逐帧）：PRINT_FPS=8 是为了缓存体积（见 scan.packPrints），
+  // 而 0.125 s 一帧在最短格（0.5 s）里也还分得开 4 张 —— 精度够，体积不炸。
+  if (scanPrints?.length) {
+    const packed = packPrints(scanPrints, printFps || info.fps);
+    const unpacked = packed ? unpackPrints(packed) : null;
+    if (unpacked?.length) {
+      scanPrints = unpacked;
+      printFps = packedFps(packed, printFps || info.fps);
+    }
   }
   if (cache && !scan.cached && !precomputed) await pruneStorage();
   mark('scan');
@@ -543,9 +537,9 @@ export async function runStoryboard(opts) {
     : [];
 
   // ---- 格数：放在台词与音频之后，是为了让"口播多不多 / 是不是音乐驱动"参与决策
-  let cells = Math.max(0, Number(opts.cells) || 0);
-  let sheets = Math.max(0, Number(opts.sheets) || 0);
-  const autoPlan = cells === 0;
+  // 显式给了格数就不问 suggest()（它的建议只在自动档用）。
+  const explicitCells = Math.max(0, Number(opts.cells) || 0);
+  const explicitSheets = Math.max(0, Number(opts.sheets) || 0);
   // 和 suggest() 用同一个口径；下面写进 plan.inputs，方便复现判定。
   const speechRate = winDur > 0 ? transcriptChars / winDur : 0;
   // 「有没有台词」是**有没有拿到转写结果**，不是"转出来几个字"：
@@ -562,7 +556,7 @@ export async function runStoryboard(opts) {
     meanLufs: audio?.mean, speechRate, hasSpeech, rhythm, thresholds: planThresholds ?? {},
   });
   let suggestion;
-  if (cells === 0) {
+  if (explicitCells === 0) {
     suggestion = suggest({
       duration: winDur,
       cuts: cuts.length,
@@ -579,61 +573,14 @@ export async function runStoryboard(opts) {
       meanLufs: audio?.mean,
       ...(planThresholds ? { thresholds: planThresholds } : {}),
     });
-    cells = suggestion.cells;
-    sheets = sheets || suggestion.sheets;
   }
   // 音乐驱动**只影响取帧**，不影响格数（格数走 rodt）。音乐片的信息全在画面上，
   // 所以把"摊开"的触发门槛压低：同样的段更容易摊、摊得更细。
   // 用 verdict 而不是只读 suggestion —— 显式指定 cells 时 suggestion 是空的，
   // 但"音乐片取帧更密"跟格数从哪来无关。
   const musicDriven = suggestion?.musicDriven === true || verdict.musicDriven;
-  sheets = sheets || 1;
-  // ---- 格数**往上补满**
-  // 5 格会排成 2×3（容量 6），右下留一个空格。空格和画面占的是同一张画布、同样的 token，
-  // 所以空着是纯损失 —— 把每张图的格数补到布局容量，再按补后的数去取帧。
-  // 往上补不往下砍：少一格等于少看一个瞬间，多一格只是多花一次取帧（约 0.3 s）。
-  // 记录"你原本要了什么"，和最终生效值分开 —— 否则事后没法判断
-  // "9 格"是用户要的、还是算法补出来的（planInfo.cells 现在是补完的值）。
-  const requested = { cells: cells * Math.max(1, sheets), sheets: Math.max(1, sheets) };
+  // 排布过程的"为什么变成这样"：由 layout.planLayout() 逐条追加（补满、裁暗场、并尾、重切）。
   const trace = [];
-  const fitted = fillLayout(cells, info.aspect);
-  // 补过之后要能看出"你其实要了 5 格"：清单里两个数都给，否则模型会以为自己看的是 5 格。
-  const filledFrom = fitted.cells > cells ? cells : null;
-  if (filledFrom) trace.push(`cells-filled:${filledFrom}->${fitted.cells}`);
-  cells = fitted.cells;
-  // **cells:1 就真的给一帧**。旧版即使只要 1 格，格内摊开逻辑也会把它拼成 2×2
-  // （一格 4 个瞬间），清单却写"1 cell" —— 模型以为看到的是一帧，其实是四帧拼图。
-  const noTiling = noTile === true || (cells === 1 && sheets === 1);
-  // 本次实际输入 + 生效阈值。只记录，不做成十几个可配置旋钮。
-  const planInfo = {
-    cells, sheets, adaptive, pick, burn, minGap,
-    // 几何：清单据此报"每格多大、能看清到什么程度、这一张多少钱"
-    budget, need, maxPerSheet,
-    ...(noTiling ? { noTiling: true } : {}),
-    ...(tileFirst ? { tileFirst: true } : {}),
-    ...(filledFrom ? { filledFrom } : {}),
-    reason: suggestion?.reason ?? 'explicit',
-    auto: autoPlan,
-    // **判定的依据也交出去**。只给一个 musicDriven:true/false，模型没法判断该不该信；
-    // 给到"因为包络主导 4 Hz"或"因为 0.12 字/秒"，它就能自己复核。
-    musicDriven,
-    musicBasis: verdict.basis,
-    musicDetail: verdict.detail,
-    inputs: {
-      duration: +winDur.toFixed(2),
-      scanThreshold: scan.threshold,
-      meanLufs: Number.isFinite(audio?.mean) ? +audio.mean.toFixed(1) : null,
-      speechRate: +speechRate.toFixed(2),
-      hasSpeech,
-      rhythm: rhythm && Number.isFinite(rhythm.peakHz)
-        ? { peakHz: rhythm.peakHz, rhythmRatio: rhythm.rhythmRatio, windows: rhythm.windows }
-        : null,
-      motion: +(Number(scan.summary?.p90) || 0).toFixed(1),
-      cuts: cuts.length,
-      hasSubtitle: Boolean(info.hasSubtitle),
-    },
-    thresholds: { ...PLAN_THRESHOLDS, ...(planThresholds ?? {}) },
-  };
 
   // 两条路：自适应按密度分配格位（快切区多给格），否则退回"并段到 k 格"
   mark('transcript');
@@ -655,251 +602,87 @@ export async function runStoryboard(opts) {
       equivSeconds: musicDriven ? 8 : 6,
     })
     : [];
-  planInfo.sampleMarks = sampleMarks.length;
   // 让 video_locate 能直接复用这次的转写，省掉一次 ASR
   if (transcriptInfo?.segments?.length) rememberSegments(input, transcriptInfo.segments);
   // 黑场段（≥2s）在预算里**额外占格**，所以要先数清楚：算"内容格数"时必须把它扣掉，
   // 否则 12 内容 + 1 黑场 = 13 格 → 排成 4×4 会空 3 个黑位（实测「中国剑」就是这样）。
   const darkRuns = (Array.isArray(scan.darkRuns) ? scan.darkRuns : [])
     .filter((r) => r.to - r.from >= 2 && r.from < winDur);
-  // 按给定总格数排一遍 → 返回 [{from,to,density,dark}]。抽成函数是为了能"补满后重排一次"。
-  const planRanges = (total) => {
-    // **近乎静止的素材不吃"变化量"这套**。
-    // rodt / 积分采样点的前提是"变化多的地方更值得看"，可当整片 p90 < 1（讲义、监控、
-    // 固定机位口播）时，切点集中在少数几页翻页动画上，按密度分格就会把格位堆在那几页，
-    // 出来一堆几乎一样的幻灯片（2026-10-30 实测：66 分钟讲座 16 格里有 6 格是同一页的
-    // 不同配色，盲评覆盖/代表各掉 1~2 分）。这种素材没有任何"更值得看"的区域，
-    // 均匀铺开才是对的 —— 退回按时间等分。p90 ≥ 1 的照旧走密度。
-    const nearStatic = (Number(scan.summary?.p90) || 0) < 1;
-    if (adaptive && relCuts.length > 0 && !nearStatic) {
-      let segRanges;
-      if (darkRunsKept.length > 0) {
-        // **黑场单独成段**：黑屏在分数上几乎是 0（前后都黑，没有"变化"），永远不会被当成切点，
-        // 于是它和后面的 logo/正片挤在同一格里，而那一格取中点数 —— 正好落在黑里，整格纯黑。
-        // 实测概念PV：片头 0–5.7s 全黑（亮度 1），0–37.6s 那一格的中点 18.8s 亮度是 0。
-        // 黑场段是扫描时算好存进缓存的（见上面 darkRuns），不依赖本次有没有 means。
-        const parts = [];
-        let cursor = 0;
-        for (const d of darkRunsKept) {
-          if (d.from > cursor + 0.5) parts.push({ from: cursor, to: d.from, dark: false });
-          parts.push({ from: d.from, to: Math.min(d.to, winDur), dark: true });
-          cursor = Math.min(d.to, winDur);
-        }
-        if (cursor < winDur - 0.5) parts.push({ from: cursor, to: winDur, dark: false });
 
-        // 黑场**额外占格**，不从内容格数里扣 —— 否则 4 段黑场就把 4 格吃光，
-        // 剩下 65 秒的内容挤成一格（实测踩过）。
-        // 多出来的格由调用方"补满到布局容量"吸收（见下面的 sheets-refilled），
-        // 所以这里**不能**把内容压成 total − 黑场数：那会让 PV 这种 3 段黑场的片子
-        // 从 9 格掉到 6 格（内容只剩 3 格看 90 秒），是净损失。
-        const contentTotal = Math.max(1, total);
-        const countIn = (p2) => relCuts.filter((c) => c >= p2.from && c < p2.to).length;
-        // **各段配额必须精确加总到 contentTotal**。以前每段各自 round + max(1)，
-        // 一段一段往上报，总和可以超出（实测轴承 24 格算出 25 段，只能靠后面补满兜住）——
-        // 用最大余额法一次分完，段数就恒等于总格数。
-        const contentParts = parts.filter((x) => !x.dark);
-        const shares = allocateIntegerBudget(contentTotal, contentParts.map(countIn), { min: 1 });
-        let ci = 0;
+  // ---- 排布：几张图、每张几格、时间轴怎么切。
+  // 整段决策（黑场占格 / 补满布局 / 按帧切张 / 再补满）已经搬到 layout.js —— 那是纯算术，
+  // 可以单独单测；这里只负责把"已经算好的输入"交过去，再把结果接回来。
+  const layout = planLayout({
+    winStart, winDur, relCuts,
+    p90: Number(scan.summary?.p90) || 0,
+    darkRuns,
+    stats: scan.stats ?? [],
+    adaptive, minGap,
+    cellsIn: opts.cells, sheetsIn: opts.sheets, maxPerSheet,
+    suggestion,
+    aspect: info.aspect, budget, need,
+    audioStrip: Boolean(stripAudio), musicDriven,
+    cuts, sampleMarks,
+    // **逐帧指纹的上下文**：`scanPrints` 有三个来源（见上面 438-446 行）——
+    // 真扫（逐帧）、缓存命中（`printPack` 解出来的 **8 fps 抽稀版**）、precomputed（整片坐标）。
+    // 三者的 fps 不同，所以必须带 `printFps`，不能一律用 `info.fps`：
+    // offset 是窗口起点（prints[0] 对应 winStart）；拿原 fps 去寻址抽稀序列会越界，
+    // frameDiv 整片变 null，而现象只是"判据悄悄失效"。
+    printCtx: { prints: scanPrints, fps: printFps || info.fps, printOffset: winStart },
+    noTile, trace,
+  });
+  const { cellRanges, groups, noTiling } = layout;
 
-        segRanges = [];
-        for (const p2 of parts) {
-          if (p2.dark) {
-            segRanges.push({ from: p2.from, to: p2.to, density: 0, dark: true });
-            continue;
-          }
-          // 内容区按各自占的刀数比例分格，内部仍用 rodt
-          const share = shares[ci++] ?? 1;
-          const rs = planByRodt({
-            duration: p2.to - p2.from,
-            cuts: relCuts.filter((c) => c >= p2.from && c < p2.to).map((c) => c - p2.from),
-            cells: share,
-          });
-          segRanges.push(...rs.map((r) => ({ from: r.from + p2.from, to: r.to + p2.from, density: r.density })));
-        }
-        segRanges.sort((a, b) => a.from - b.from);
-      } else {
-        // **rodt**：每格长度 = 常数 ÷ 该处的切点密度（B = K/A）。
-        // 一分钟切 70 刀的地方一格 5 秒，一分钟才 18 刀的地方一格 24 秒 —— 实测相差 4.6~5.5 倍。
-        // 而且因为用"累积切点等分"实现，每格的镜头数也顺带均匀（6~10 个），不用再单独约束。
-        segRanges = planByRodt({ duration: winDur, cuts: relCuts, cells: total });
-      }
-      // 黑场是从"内容格数"里抠出来的（每段独占一格），所以总段数会比原计划多。
-      // 布局按格数分组，容量不够就会丢格 —— 这里把 cells 抬到实际段数。
-      const mapped = segRanges
-        .map((r) => ({ from: r.from + winStart, to: r.to + winStart, density: r.density, dark: r.dark === true }));
-      return mapped;
-    }
-    const segs = segmentsFromCuts(winDur, relCuts, 0.4, winStart);
-    return fitSegments(segs, total, { minGap })
-      .map(([a, b]) => ({ from: a, to: b, density: 1 }));
-  };
-  // `planRanges(contentCells)` 返回的段数 = contentCells + 黑场格数（只有走密度且真有 ≥2s 黑场时才多）。
-  // 所以"要多少格"和"要多少内容格"差一个常量 extraDark —— 补满时必须按后者换算，
-  // 否则每补一轮都会多出黑场那几格，越补越涨（实测把中国剑补成 25 格 2 张、轴承补成 33 格 3 张）。
-  // **黑场格要封顶**：一格纯黑几乎不带信息，却和真帧占同样的画布和 token。
-  // 实测概念 PV（90 秒）有 6 段 ≥2 秒黑场，不封顶就要拿 6 格去画黑屏 —— 整张图一半是黑的，
-  // 盲评"代表/冗余"直接掉分（对比测试报告里 PV 暗格 44% 那条）。封顶 25%（至少 1 格、最多 4 格），
-  // 多出来的黑场并入相邻内容格（它们本来就是 ≥2 秒的过渡，和前后画面同格并不冤）。
-  const darkCap = Math.min(4, Math.max(1, Math.floor(Math.max(1, cells * sheets) * 0.25)));
-  const darkRunsKept = darkRuns.slice(0, darkCap);
-  const extraDark = (adaptive && relCuts.length > 0 && (Number(scan.summary?.p90) || 0) >= 1)
-    ? darkRunsKept.length : 0;
-  const planToCapacity = (cap) => planRanges(Math.max(1, cap - extraDark));
+  // 指纹完全拿不到时（precomputed 没带 prints / 旧缓存没有 printPack），`frameDiv` 那几条判据
+  // 会自动退回 meanMotion。**必须写出来**：否则摊开方式的差异在清单上完全看不出来。
+  // 注意：**缓存命中时不算"拿不到"** —— 它会给出 8 fps 的抽稀指纹，判据照跑，
+  // 但数值与冷跑（逐帧）不同，同一部片两次跑可能给出不同的 k（见交接文档 §9.1）。
+  // 放在 planLayout 之后 push：trace 的顺序就是"补满 → 裁暗场 → 并尾 → 重切"的真实顺序。
+  if (!scanPrints) trace.push('no-prints:frameDiv-off');
 
-  const plannedCells = cells * sheets;
-  let cellRanges = planRanges(plannedCells);
-  // 黑场格是"额外占格"，但**不能因为多一格就多买一张图**：
-  // 48 格 3 张（每张 16）本来是满的，多一个黑场格就变成 49 格 → 4 张 → 多花 384 图像 token，
-  // 只为了画一块黑屏。这种情况把内容让出一格（内容 47 + 黑场 1 = 48），张数不变。
-  // 判据用 16（maxCellsPerSheet）而不是实际切张结果——切张本身要按帧数算，这里只是防边界。
-  // **必须用调用方的 maxPerSheet**，不能写死 16：写死的话 size/budget 推出的上限
-  // 只影响"建议格数"，真正切张仍然 16 格一张 —— 参数看着生效了，其实没有。
-  // **显式 cells 不能被这个上限切碎**：调用方说"一张 16 格"，就不能因为默认上限是 9
-  // 而把它拆成两张各 8 格 —— 那是另一个决定，必须由调用方自己做。
-  const perSheetCap = Math.max(
-    1,
-    Math.min(16, Math.max(Number(maxPerSheet) || 16, Number(opts.cells) || 0)),
-  );
-  const sheetsAt = (n) => Math.ceil(Math.max(1, n) / perSheetCap);
-  if (extraDark > 0 && sheetsAt(cellRanges.length) > sheetsAt(plannedCells)) {
-    const trimmed = planRanges(Math.max(1, plannedCells - extraDark));
-    if (sheetsAt(trimmed.length) <= sheetsAt(plannedCells)) {
-      trace.push(`dark-trimmed:${cellRanges.length}->${trimmed.length}`);
-      cellRanges = trimmed;
-    }
-  }
-  // 还有另一种溢出：`fitSegments` 在极短尾段上会多给一格（讲座 48 → 49），
-  // 49 格就跨过了 16 的边界 → 4 张。多一张图 = 多 384 token，而多出来的那一格只覆盖零点几秒。
-  // 把末尾两格并成一格即可（时间覆盖不变，只是少一次取样）。
-  if (!(Number(opts.sheets) > 0)) {
-    let merged = 0;
-    while (cellRanges.length > plannedCells
-      && sheetsAt(cellRanges.length) > sheetsAt(plannedCells)
-      && cellRanges.length >= 2) {
-      const a = cellRanges[cellRanges.length - 2];
-      const b = cellRanges[cellRanges.length - 1];
-      cellRanges.splice(-2, 2, {
-        from: a.from, to: b.to,
-        density: (a.density + b.density) / 2,
-        ...(a.dark && b.dark ? { dark: true } : {}),
-      });
-      merged += 1;
-    }
-    if (merged > 0) trace.push(`tail-merged:${merged}`);
-  }
-  // ---- 把"因为取整而空出来的格位"填成真帧
-  // 总格数不一定落在布局容量上：13 格排 4×4 空 3 个黑位、10 格排 3×4 空 2 个。
-  // 空格和真帧占的是同一张画布、同样的 token —— 空着是纯损失（黑块还拉低整图的信噪比）。
-  // 所以按实际段数**往上补满容量**再排一次。只对自动张数生效：显式 `--sheets` 要精确张数。
-  if (!(Number(opts.sheets) > 0) && cellRanges.length > 0) {
-    const cap = fillLayout(cellRanges.length, info.aspect).cells;
-    if (cap > cellRanges.length) {
-      const retried = planToCapacity(cap);
-      // 补满**不得把格数顶过一张图的边界**：48 格 3 张是满的，补成 49 就要第 4 张，
-      // 多 384 图像 token 只为填 1 个空位 —— 不划算，直接放弃这次补满。
-      if (retried.length > cellRanges.length
-        && sheetsAt(retried.length) <= sheetsAt(plannedCells)) {
-        cellRanges = retried;
-      } else if (retried.length > cellRanges.length) {
-        trace.push(`skip-fill-would-add-sheet:${cellRanges.length}->${retried.length}`);
-      }
-    }
-  }
-  if (cellRanges.length !== plannedCells) trace.push(`ranges:${plannedCells}->${cellRanges.length}`);
-  if (cellRanges.length > cells * sheets) cells = Math.ceil(cellRanges.length / sheets);
-  // **先排好画面，再按累计帧数切 sheet**（流程的最后一步）。
-  // 一格不摊是 1 帧、摊 3×3 是 9 帧，格数一样但信息量差 9 倍，
-  // 所以只能按"这一格贡献多少帧"来切，不能按格数均分。
-  // 切的是格点边界（= 切点），上一张末尾切点就是下一张起点，天然衔接不断裂。
-  // 每张图的子帧预算按"这一张有多少个镜头"算，不用固定 48（见 subBudgetFor）。
-  // 真切点和积分采样点都算镜头边界 —— 摊开时它们一视同仁。
-  const shotsTotal = cuts.length + sampleMarks.length;
-  const budgetFor = (n) => subBudgetFor({ cuts: shotsTotal, cells: n });
-  // **逐帧指纹的上下文**：`scanPrints` 只在"这一趟真的扫了"时才有（不进缓存，
-  // 见上面 415 行的说明），缓存命中 / precomputed 时是 null —— measure 会自动退回 meanMotion。
-  // offset 必须是窗口起点：prints[0] 对应 winStart，而 cell 的 from/to 是绝对时间。
-  // fps 必须用 printFps（抽稀后可能是 info.fps/3）—— 用原 fps 去寻址抽稀序列会越界，
-  // frameDiv 会整片变成 null，而现象是"判据悄悄失效"，很难查。
-  const printCtx = { prints: scanPrints, fps: printFps || info.fps, printOffset: winStart };
-  const splitSheets = (ranges) => {
-    if (Number(opts.sheets) > 0) {
-      // 调用方显式指定了张数（测试、批量脚本）就尊重它，仍按格数均分
-      const out = [];
-      for (let i = 0; i < sheets; i++) out.push(ranges.slice(i * cells, (i + 1) * cells));
-      return out;
-    }
-    // 调用方没指定张数 → 按累计帧数切（自适应）
-    // **必须先真量一遍**：每格产生几帧取决于它真实的格子像素（layoutCanvas），
-    // 用 250×140 这种假尺寸估出来的 k 与渲染时不一致 —— 那是"按错的帧数切张"。
-    // 见 measure.js 顶部的说明。
-    const measured = measureGroup(ranges, {
-      aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
-      subBudget: budgetFor(Math.min(16, ranges.length)), cuts, sampleMarks, stats: scan.stats ?? [],
-      need, ...printCtx,
-      ...(noTiling ? { maxK: 1 } : {}),
-    });
-    // frameBudget 卡的是**渲染时间**，不是 token：一张图 9 格摊满 3×3 是 81 帧，
-    // 而 token 还是 384（图像按张算）。原来设 64，于是"9 格全摊开"被判定成要 2 张 ——
-    // 补满逻辑再把 2 张压成 12 格 1 张，格子从 331×184 缩到 286×159，
-    // 反而摊不动 3×3（95×53 < 110），最该细看的那档全丢了。
-    // 96 让常见的 9 格 / 12 格满摊都留在同一张里。
-    return planSheetsByFrames(measured.cells, { frameBudget: 96, maxCellsPerSheet: perSheetCap });
-  };
-  let groups = splitSheets(cellRanges);
-  // ---- 每张图也要**补满布局容量**
-  // 切张是按帧预算均分的，均分出来常是 13 格 → 排 4×4 空 3 个黑位。
-  // 黑位和真帧占同一张画布、扣同一份 token，空着就是白扔（黑块还会拉低整图信噪比）。
-  // 所以按"本组格数补满后的容量"重新排一次总格数，再切一次。最多两轮、只往上补。
-  // 素材太短/镜头太少导致排不出这么多段时保持原样（那是几何上给不出，不是浪费）。
-  if (!(Number(opts.sheets) > 0) && groups.length > 0) {
-    for (let pass = 0; pass < 2; pass += 1) {
-      const short = groups.some((g) => g.length > 0 && g.length < fillLayout(g.length, info.aspect).cells);
-      if (!short) break;
-      const cap = Math.max(...groups.map((g) => fillLayout(Math.max(1, g.length), info.aspect).cells));
-      const total = cap * groups.length;
-      if (total <= cellRanges.length) break;
-      const re = planToCapacity(total);
-      if (re.length < total) break;
-      const nextGroups = splitSheets(re);
-      if (nextGroups.some((g) => g.length === 0)) break;
-      // **补满空格不得新增 sheet**：多一张图就是多 384 图像 token，
-      // 那不是"同 token 优化"，是偷偷加预算（讲座 48 格 3 张 → 64 格 4 张就是这种）。
-      if (nextGroups.length > groups.length) {
-        trace.push(`skip-refill-would-add-sheet:${groups.length}->${nextGroups.length}`);
-        break;
-      }
-      trace.push(`sheets-refilled:${cellRanges.length}->${re.length}`);
-      cellRanges = re;
-      groups = nextGroups;
-    }
-  }
-  sheets = groups.length;
-  if (cellRanges.length > cells * sheets) cells = Math.ceil(cellRanges.length / sheets);
-  // 建议是"4 格 × 3 张"，按帧预算切张后可能变成"6 格 × 2 张" —— 两个都写进 trace，
-  // 否则 reason 里的数字和首行对不上，模型会以为哪里出错了。
-  if (requested.sheets !== sheets) trace.push(`sheets:${requested.sheets}->${sheets}`);
-  // planInfo 是在分格之前建的，那时还不知道"黑场占格 / 补满布局 / 按帧切张"会把它改成什么样。
-  // 这里的两个数是**最终生效值**，清单和 manifest 读的是它们 —— 不刷就会报 12 格 1 张、
+  // 本次实际输入 + 生效阈值。只记录，不做成十几个可配置旋钮。
+  // 格数/张数用的是**最终生效值**：清单和 manifest 读的是它们 —— 不刷就会报 12 格 1 张、
   // 而实际出了 25 格 2 张（2026-10-30 对比测试踩到，报告里对不上账）。
   // 多张时取"最多那张的格数"（真正的每张格数在 sheets[].cells 里，这里只给个量级）。
-  planInfo.cells = groups.length > 1
-    ? Math.max(...groups.map((g) => g.length))
-    : cellRanges.length;
-  planInfo.sheets = groups.length;
-  // **planner 认为会出多少帧**。渲染时必须与这个数一致（同一个 measureGroup 得出的），
-  // 所以它是一个可验收的量：清单里 Σ(cell.sub²) 应该正好等于它。
-  planInfo.requested = requested;
-  // 指纹拿不到（缓存命中 / precomputed）时，`frameDiv` 那几条判据会自动退回 meanMotion。
-  // **必须写出来**：否则同一支片子第一次跑和第二次跑（命中缓存）摊开方式不同，
-  // 而清单上看不出任何区别 —— 这正是"两次出图不一样"最难查的那种。
-  if (!scanPrints) trace.push('no-prints:frameDiv-off');
-  planInfo.trace = trace;
-  planInfo.frames = groups.reduce((n, g) => n + measureGroup(g, {
-    aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
-    subBudget: budgetFor(g.length), cuts, sampleMarks, stats: scan.stats ?? [],
-    need, ...printCtx,
-    ...(noTiling ? { maxK: 1 } : {}),
-  }).frameCount, 0);
+  const planInfo = {
+    cells: groups.length > 1 ? Math.max(...groups.map((g) => g.length)) : cellRanges.length,
+    sheets: groups.length,
+    adaptive, pick, burn, minGap,
+    // 几何：清单据此报"每格多大、能看清到什么程度、这一张多少钱"。
+    // `maxPerSheet` 报**实际生效的上限**（调用方没指定时是按 budget+need 推出来的那个），
+    // 否则清单里会写一个没被用上的数。
+    budget, need, maxPerSheet: layout.perSheetCap,
+    ...(noTiling ? { noTiling: true } : {}),
+    ...(tileFirst ? { tileFirst: true } : {}),
+    ...(layout.filledFrom ? { filledFrom: layout.filledFrom } : {}),
+    reason: suggestion?.reason ?? 'explicit',
+    auto: layout.autoPlan,
+    // **判定的依据也交出去**。只给一个 musicDriven:true/false，模型没法判断该不该信；
+    // 给到"因为包络主导 4 Hz"或"因为 0.12 字/秒"，它就能自己复核。
+    musicDriven,
+    musicBasis: verdict.basis,
+    musicDetail: verdict.detail,
+    inputs: {
+      duration: +winDur.toFixed(2),
+      scanThreshold: scan.threshold,
+      meanLufs: Number.isFinite(audio?.mean) ? +audio.mean.toFixed(1) : null,
+      speechRate: +speechRate.toFixed(2),
+      hasSpeech,
+      rhythm: rhythm && Number.isFinite(rhythm.peakHz)
+        ? { peakHz: rhythm.peakHz, rhythmRatio: rhythm.rhythmRatio, windows: rhythm.windows }
+        : null,
+      motion: +(Number(scan.summary?.p90) || 0).toFixed(1),
+      cuts: cuts.length,
+      hasSubtitle: Boolean(info.hasSubtitle),
+    },
+    thresholds: { ...PLAN_THRESHOLDS, ...(planThresholds ?? {}) },
+    sampleMarks: sampleMarks.length,
+    requested: layout.requested,
+    trace,
+    // **planner 认为会出多少帧**。渲染时必须与这个数一致（同一个 measureGroup 得出的），
+    // 所以它是一个可验收的量：清单里 Σ(cell.sub²) 应该正好等于它。
+    frames: layout.frames,
+  };
 
   // textOnly：只重算"格 → 时间段 → 台词"，一帧都不解、一张图都不拼。
   // 用途：总览文本被宿主截断后，按 cellRange 分批把剩下的台词取回来（第二次调用命中缓存，几乎瞬时）。
@@ -951,15 +734,10 @@ export async function runStoryboard(opts) {
   let fallbacks = 0;
   for (const [si, group] of groups.entries()) {
     if (group.length === 0) continue;
-    // **同一份测量**：布局、每格的 k、总帧数都由 measureGroup() 给。
-    // 以前这里是"渲染时用真实 cellW/cellH 再算一次 k"，而切张时用的是 250×140 ——
-    // 两次答案不同，`planSheetsByFrames()` 就按错的帧数切张（见 measure.js）。
-    const measured = measureGroup(group, {
-      aspect: info.aspect, budget, audioStrip: stripAudio, musicDriven,
-      subBudget: budgetFor(group.length), cuts, sampleMarks, stats: scan.stats ?? [],
-      need, ...printCtx,
-      ...(noTiling ? { maxK: 1 } : {}),
-    });
+    // **同一份测量**：布局、每格的 k、总帧数都是 planLayout 里量过的那一份，直接取。
+    // 以前这里是"算 frames 时量一遍、渲染前再量一遍"，参数一模一样 —— 纯白算；
+    // 而一旦两处参数漂移（漏传 printCtx / need），切张的 k 就和渲染的 k 不同。
+    const measured = layout.measurements[si];
     // cellBudget 也要用 measure 那个：composeSheet 与 layoutCanvas 必须是同一个预算，
     // 差 10% 会让取帧尺寸和拼图尺寸不一致（图会变成斜条纹）。
     const { cols, rows, width, height, cellW, cellH, cellBudget } = measured;
@@ -1021,7 +799,18 @@ export async function runStoryboard(opts) {
     let sheet = composeSheet({
       frames, cols, rows, cellAspect: info.aspect, budget: cellBudget, burn, badgeRatio,
     });
-    if (stripAudio) {
+    // 抬头：这张覆盖哪一段、一共几张。多张图时模型很容易把它们串成一条时间轴，
+    // 而格子里只有全局递增的序号（第 12 格像"一张长图的第 12 格"）。烧在图上最省 token。
+    const sheetFrom = group[0]?.from ?? winStart;
+    const sheetTo = group.at(-1)?.to ?? winStart + winDur;
+    sheet = addSheetHeader(sheet, {
+      text: `${clock(sheetFrom)}-${clock(sheetTo)} ${si + 1}/${groups.length}`,
+    });
+    // 条带只在**有东西可画**时才画：整段静音 / 响度测不出来时，它就是一块空白，
+    // 白占一条 71px 的画布（圆圈不卷反馈"没台词时那条 strip 是空的"）。
+    // 判据用响度本身，而不是"有没有台词"—— 没配 ASR 但有对白的片子，波形仍然有用。
+    const stripHasSignal = hasAudibleSamples(stripAudio);
+    if (stripHasSignal) {
       // 条带高度按"宽的 5.5%"会在大长条上失控（2476px 宽 → 136px 高，占掉 37% 画面），
       // 所以同时受格高的 40% 约束。
       const stripH = Math.max(24, Math.min(Math.round(width * 0.055), Math.round(cellH * 0.28)));
@@ -1029,10 +818,14 @@ export async function runStoryboard(opts) {
         loudness: stripAudio, silences: stripAudio.silences, cuts: cuts.map((c) => c.t),
         window: { from: winStart, to: winStart + winDur }, stripH,
       });
+    } else if (stripAudio) {
+      // 说清楚"为什么没有条带"，免得被当成渲染失败
+      trace.push('strip:skipped (no audible samples)');
     }
     out.push({
       sheet: si + 1, cols, rows, cellW, cellH,
       width: sheet.width, height: sheet.height, buffer: sheet.buffer, cells: cellMeta,
+      ...(sheet.headerH ? { headerH: sheet.headerH } : {}),
       ...(sheet.stripH ? { stripH: sheet.stripH } : {}),
       ...(encode ? { png: await encodePngBuffer(sheet.buffer, sheet.width, sheet.height, { ffmpegPath }) } : {}),
     });
@@ -1113,13 +906,26 @@ export async function runStoryboard(opts) {
         // **摊开之后的真实尺寸**。`cell=` 报的是"一个大格"，模型看到 341×189 就默认能认脸；
         // 可一格摊 2×2 时，它真正看到的是 4 张 170×94 —— 那只能分辨"是不是同一个镜头"。
         // 不报这个数，模型会按 cell 的高估去描述画面，说出来的东西就是编的。
-        // 取该张里**最大**的 k，即最坏情况：一张图里有 2×2 也有 3×3 时，按 3×3 报。
+        //
+        // **必须跨所有张取最坏**，不能只看 out[0]：多张时第一张常是最"密"的那张，
+        // 而第二/第三张格子更大、更容易摊到 3×3 / 4×4。实测 1.2M + maxPerSheet 12：
+        // 第 1 张全是 2×2（197×110），第 2 张有 4 格 3×3（131×73）—— 只报第一张的话，
+        // 清单会写"197×110 能分辨镜头"，而模型手上那 4 格其实是 131×73 的色块。
         ...(() => {
-          const maxK = Math.max(1, ...(out[0].cells ?? []).map((c) => c.sub ?? 1));
-          if (maxK <= 1) return {};
-          const sw = Math.floor(out[0].cellW / maxK);
-          const sh = Math.floor(out[0].cellH / maxK);
-          return { sub: { k: maxK, w: sw, h: sh, readability: readabilityOf(sw, sh) } };
+          let worst = null;
+          for (const s of out) {
+            for (const c of s.cells ?? []) {
+              const k = c.sub ?? 1;
+              if (k <= 1) continue;
+              const w = Math.floor(s.cellW / k);
+              const h = Math.floor(s.cellH / k);
+              if (!worst || w * h < worst.w * worst.h) worst = { k, w, h };
+            }
+          }
+          if (!worst) return {};
+          return {
+            sub: { k: worst.k, w: worst.w, h: worst.h, readability: readabilityOf(worst.w, worst.h) },
+          };
         })(),
       } : {}),
       // 实际出片格数：minGap 会把"要 16 格"压成 8 格，清单必须两个数都给，

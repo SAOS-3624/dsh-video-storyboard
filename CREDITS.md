@@ -57,13 +57,13 @@
 | [@dugu951](https://github.com/dugu951) | 指出"没配 ASR 后端时长视频仍自称 `transcript=\"asr\"`"，并给出修复 | PR #3，合并于 `22546db`；合并后补了单窗口分支与"没跑"vs"跑了没结果"的区分 |
 | [@ggfgfgf-on](https://github.com/ggfgfgf-on) | [issue #1](https://github.com/SAOS-3624/dsh-video-storyboard/issues/1) 的 10 条诊断（色相非环形、低饱和假切点、<0.4s 崩溃、`index+time` 未实现、VFR/SAR 等）；[PR #7](https://github.com/SAOS-3624/dsh-video-storyboard/pull/7) 的 ffmpeg/ffprobe 宿主目录发现、manifest provenance（`cell`/`tokens`/`ffmpeg`/可选 `sha256`）、以及 `transcriptFile` + `from/to` 时 chars 窗口口径的修复；[PR #8](https://github.com/SAOS-3624/dsh-video-storyboard/pull/8) 的 DASH 文件名收敛与 `suspectInjection` 扫描 | issue #1 中 4 条以重写形式落地（`819b8d2`、`04d318a`、`018b7ea`、`38df7a0`）；PR #7 **完整合入**（`0a0e96f`），代码由他编写；PR #8 **完整合入**（0.3.2），并补了"只有音频轨"的拒绝与标题扫描 |
 | [@canyueY](https://github.com/canyueY) | 结构调整方向（analyze/plan/render 拆分）、可选富化侧车（说话人分离、远程镜头检测）、`video_zoom.mode`、抽样扫描（`scan-sampled`）与感知哈希（`fingerprints`）的提出 | 已吸收 `fast cuts`（爆点与镜头数）与 `seen before`（`src/memory.js`）。[PR #6](https://github.com/SAOS-3624/dsh-video-storyboard/pull/6) 未整体合入——实测拆分为三个模块会让清单 +49%、热路径慢 2.3×，收益是结构好看，对"模型能不能看懂"没有帮助。其中的 `extras/dsh-video-enrichment/` 是独立 Python 侧车，不污染主包，欢迎单独提 PR |
-| [@xingyueDanYang](https://github.com/xingyueDanYang) | [issue #4](https://github.com/SAOS-3624/dsh-video-storyboard/issues/4) 的 5 条接入建议（转写层接受已有 JSON/SRT、ffmpeg 宿主发现、阈值可配置化、成本口径显式、cell 引用契约）；同 thread 后续的**提示词注入**预警（外部文本伪装成命令，附四步处置法）与 **B站 URL 直读失败**的完整复现（`unexpected container: video.f100022.mp4`） | 第 1 条 `transcriptFile` 已在 0.3.0 独立实现；第 2 条与第 3 条的"记录本次生效阈值"已在 0.3.1 通过 PR #7 落地；第 4 条的 `cell="WxH"` + `tokens="… (DSH estimate)"` 已落地；第 5 条的 `ffmpeg` 版本与可选 `sha256` 已落地，`cellId` 暂不做；注入预警落成 `manifest.transcript.suspectInjection`（0.3.2），B站 那条由 PR #8 修复并有真实链接回归验证 |
+| [@xingyueDanYang](https://github.com/xingyueDanYang) | [issue #4](https://github.com/SAOS-3624/dsh-video-storyboard/issues/4) 的 5 条接入建议（转写层接受已有 JSON/SRT、ffmpeg 宿主发现、阈值可配置化、成本口径显式、cell 引用契约）；同 thread 后续的**提示词注入**预警（外部文本伪装成命令，附四步处置法）与 **C站 URL 直读失败**的完整复现（`unexpected container: video.f100022.mp4`） | 第 1 条 `transcriptFile` 已在 0.3.0 独立实现；第 2 条与第 3 条的"记录本次生效阈值"已在 0.3.1 通过 PR #7 落地；第 4 条的 `cell="WxH"` + `tokens="… (DSH estimate)"` 已落地；第 5 条的 `ffmpeg` 版本与可选 `sha256` 已落地，`cellId` 暂不做；注入预警落成 `manifest.transcript.suspectInjection`（0.3.2），C站 那条由 PR #8 修复并有真实链接回归验证 |
 
 > 这份表只记"提出并推动了什么"，不区分代码是否被逐行采用——诊断、复现和反例同样计入。
 
 ## 4.5 测试素材的作者
 
-跨类型调参用了十支公开视频，全部是 B 站创作者的公开作品。**只用来看、没有分发**，但素材就是他们的劳动成果，
+跨类型调参用了十支公开视频，全部是 C站创作者的公开作品。**只用来看、没有分发**，但素材就是他们的劳动成果，
 该写名字：
 
 | 用途 | 创作者 | 视频 |

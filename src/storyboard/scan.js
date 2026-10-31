@@ -23,6 +23,27 @@ export const HUE_WEIGHT = 1;
 export const SAT_WEIGHT = 1;
 export const VAL_WEIGHT = 1;
 
+/**
+ * 分数归一的亮度参考（0–255）。
+ *
+ * `scorePair` 算的是**绝对** HSV 差：一次剪辑在亮画面上是 25 分，在夜戏里只有 5 分，
+ * 而门槛 12 是常数 —— 于是暗场/低对比素材必然全漏（实测暗场 8 段硬切 0/7，分值 3.9–5.6）。
+ * 这里按"画面有多亮"把分数放大回去，让 12 分在暗场和亮场里指的是同一件事。
+ * 取 160 是因为常见影视/网课素材的 V（max 通道）均值落在 140–180，正常片子增益≈1，不动。
+ */
+export const REF_V = 160;
+/** 放大上限：再暗也不超过 3 倍，否则纯黑画面里的编码噪声会被一起放大成刀 */
+export const GAIN_MAX = 3;
+/** 参考亮度的下限：V 均值低于它不再继续放大 */
+export const V_FLOOR = 40;
+/** 黑边判定：整窗每行的 V 均值 < BAR_MEAN，且该行从没亮过（< BAR_MAX） */
+export const BAR_MEAN = 16;
+export const BAR_MAX = 24;
+/** 黑边占比上限：超过它多半是"整段黑场"，不做补偿 */
+export const BAR_CAP = 0.35;
+/** 长时差窗口（秒）。相邻帧差看不见渐变转场（叠化/淡入淡出），隔这么久看才看得见 */
+export const LONG_SEC = 0.4;
+
 /** RGB(0-255) → HSV，各通道归一到 0-255（H 由角度缩放到 0-255） */
 export function rgbToHsv(r, g, b) {
   const rn = r / 255;
@@ -91,6 +112,62 @@ export function scorePair(prev, cur) {
   }
   const totalWeight = HUE_WEIGHT + SAT_WEIGHT + VAL_WEIGHT;
   return sum / ((cur.length / 3) * totalWeight);
+}
+
+/**
+ * 黑边占比：整窗里"一直是黑的"顶部/底部行占多少。
+ *
+ * 为什么需要：分数是在**整帧** 2304 个像素上取均值的，2.39:1 的片子上下各有 12% 的黑边，
+ * 这两块永远差 0，等于把分母里塞了 25% 的常数 —— 实测同样内容加黑边后，
+ * 9 个硬切从 9/9 掉到 7/9（最弱的两刀从 12.2 掉到 11.8，正好跌到下限 12 以下）。
+ *
+ * 判据要"一直是黑的"而不只是"这一帧是黑的"：`fadeclips` 那种片头黑场里每一行都黑，
+ * 但它后来亮了，所以不会被当成黑边（累计均值会被拉高、峰值会超过 BAR_MAX）。
+ *
+ * @param {{rowV:Float64Array|number[], rowVMax:Float64Array|number[], frames:number}} o
+ *   逐行 V 累加值 / 逐行 V 峰值 / 帧数
+ * @returns {number} 黑边占整帧高度的比例（0–BAR_CAP），不做补偿时返回 0
+ */
+export function barFraction({ rowV, rowVMax, frames, cap = BAR_CAP } = {}) {
+  if (!rowV || !rowVMax || !(frames > 0)) return 0;
+  const h = rowV.length;
+  const dark = (y) => rowV[y] / frames < BAR_MEAN && rowVMax[y] < BAR_MAX;
+  let top = 0;
+  while (top < h && dark(top)) top += 1;
+  let bottom = 0;
+  while (bottom < h - top && dark(h - 1 - bottom)) bottom += 1;
+  const frac = (top + bottom) / h;
+  // 整帧都黑（片尾黑场）时 top+bottom 会吃满，这时"补偿"没有意义
+  return frac >= cap || frac >= 0.999 ? 0 : +frac.toFixed(3);
+}
+
+/**
+ * 把绝对差分数换成"同等亮度下的分数"。
+ *
+ * 两个补偿都是纯乘法，各自的依据不同：
+ *  - **亮度**：`gain = clamp(REF_V / V均值, 1, 3)`。暗场 5 分 ×3 → 15 分，才够得上门槛 12。
+ *    只在 V 均值低于 REF_V 时放大，亮画面（常见素材）增益 = 1，分数与老版本逐位相同。
+ *  - **黑边**：`/(1 - 黑边占比)`。黑边上的差恒为 0，等于把真变化按占比打折，除回来即可。
+ *
+ * `stats[i]` 是"第 i+1 帧相对第 i 帧"的分数（见 scanShots 的 push 时机），
+ * 所以亮度取 `means[i + 1]` —— 取错一帧在快剪处能差出一个刀。
+ *
+ * @param {Array<{t:number, score:number}>} stats
+ * @param {number[]} [means] 逐帧 V 均值（帧下标）
+ * @param {{barFrac?:number, refV?:number, gainMax?:number, vFloor?:number, offset?:number}} [opts]
+ */
+export function normalizeScores(stats, means, {
+  barFrac = 0, refV = REF_V, gainMax = GAIN_MAX, vFloor = V_FLOOR, offset = 1,
+} = {}) {
+  if (!Array.isArray(stats) || stats.length === 0) return [];
+  const content = Math.max(0.05, 1 - (barFrac || 0));
+  const hasMeans = Array.isArray(means) && means.length > 0;
+  return stats.map((s, i) => {
+    const v = hasMeans ? (means[i + offset] ?? means[i]) : NaN;
+    const gain = Number.isFinite(v) ? Math.min(gainMax, Math.max(1, refV / Math.max(vFloor, v))) : 1;
+    if (gain === 1 && content === 1) return s;
+    return { ...s, score: (s.score * gain) / content, gain: +gain.toFixed(2) };
+  });
 }
 
 /** 逐帧指纹存进缓存时要抽稀到这么多 fps。0.125s 一帧 = 最短格子（0.5s）里也够分 4 张。 */
@@ -197,6 +274,39 @@ export function suppressClose(cuts, minGap = 0.35) {
 }
 
 /**
+ * "这条片子该有多少刀、刀之间至少隔多久" —— 速率法的预算。
+ *
+ * 抽出来是因为它有两个消费者：`autoThreshold` 用它定分位点，
+ * `decideCuts` 用它做"超过预算就只留最狠的若干个"的上限。
+ * 以前上限那行读的是 `autoThreshold(...).target`，而它返回的是 number
+ * （`undefined.target` → 上限恒为 Infinity），等于从来没生效过。
+ *
+ * @param {number[]} scores
+ * @param {{duration?:number, minGap?:number}} opts
+ * @returns {{target:number, gap:number, total:number}}
+ */
+export function cutBudget(scores, { duration, minGap } = {}) {
+  const n = Array.isArray(scores) ? scores.length : 0;
+  const total = duration > 0 ? duration : n / 25;
+  // 短片要有更细的粒度：5s 的片子按 1.5s 一个切点只剩 3 个名额，会砍掉真实的快切
+  const gap = typeof minGap === 'number' ? minGap : Math.min(1.5, Math.max(0.5, total / 60));
+  const target = Math.max(1, Math.min(n * 0.25, total / gap));   // 上限 25% 的帧
+  return { target, gap, total };
+}
+
+/** 升序数组里第一个 > v 的下标 */
+function upperBound(arr, v) {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] <= v) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
  * 自适应阈值：按"每秒大约多少个切点"反推，而不是按分数倍数。
  *
  * 为什么换掉"3×p95"（用 6 条真实视频打脸过）：
@@ -216,13 +326,58 @@ export function autoThreshold(scores, { duration, minGap, floor = 12 } = {}) {
   if (!Array.isArray(scores) || scores.length === 0) return floor;
   const sorted = [...scores].sort((a, b) => a - b);
   const n = sorted.length;
-  const total = duration > 0 ? duration : n / 25;
-  // 短片要有更细的粒度：5s 的片子按 1.5s 一个切点只剩 3 个名额，会砍掉真实的快切
-  const gap = typeof minGap === 'number' ? minGap : Math.min(1.5, Math.max(0.5, total / 60));
-  const target = Math.max(1, Math.min(n * 0.25, total / gap));   // 上限 25% 的帧
+  const { target } = cutBudget(scores, { duration, minGap });
   const idx = Math.max(0, Math.min(n - 1, Math.floor(n - target)));
   // 取整朝下：宁可多报一个切点（后续会合并），也不要因为四舍五入丢掉真切镜
-  return Math.max(floor, Math.floor(sorted[idx]));
+  let v = Math.floor(sorted[idx]);
+  // **并列段的坑**：分位点常常正好落在"刀带的那个分数"上（尤其是静止素材/循环素材，
+  // 一大批帧同分），而判据是**严格大于** —— 于是整批刀被一起挡掉。
+  // 实测：100 帧里 1/3 是 40 分、其余 2 分 → 阈值算出 40 → 切点 0。
+  // 退到严格更小的那个值，因为分数是浮点均值，退一步只会多报一个，不会泛滥。
+  if (n - upperBound(sorted, v) === 0 && idx > 0) {
+    let j = upperBound(sorted, v) - 1;
+    while (j > 0 && sorted[j - 1] === sorted[j]) j -= 1;
+    v = sorted[Math.max(0, j - 1)];
+  }
+  return Math.max(floor, v);
+}
+
+/**
+ * 把"超阈值的连续帧"并成一个个**事件**，再按间隔抑制。
+ *
+ * 两个旧问题都出在这里：
+ *  1. 一次硬切常常横跨 2 帧（换场那两帧都在阈值之上），按时间窗抑制时它们互相挤，
+ *     分数高的留下、低的那帧被删 —— 位置对，但"同一刀算两次"的隐患一直在；
+ *  2. 真正的快剪（0.3s 一个镜头）里，**每一刀都合法**，可固定 0.35s 的窗口会把它们
+ *     成对合并，留下隔一刀算一刀的结果。实测 12 镜 0.32s 的快剪只数出 5 刀，
+ *     而且位置正好是 0.64 / 1.28 / 1.92 / 2.56 / 3.52 —— 规律的减半，不是随机漏。
+ *
+ * 所以：先按"帧间隔小于 1.5 帧"聚类成一刀（取该簇最高分与最高分所在时刻），
+ * 再看这批事件的**典型间隔**——如果它比调用方给的 minGap 还密，说明 minGap 假设错了
+ * （内容确实是快剪），把半径收到 0.8×典型间隔，让每一刀都留下。
+ *
+ * @param {Array<{t:number, score:number}>} above 超阈值的帧（按时间升序）
+ * @param {number} step 相邻帧的时间间隔（= 1/fps）
+ * @param {{minGap?:number, adaptive?:boolean}} opts
+ */
+export function cutsFromEvents(above, step, { minGap = 0.35, adaptive = true } = {}) {
+  if (!Array.isArray(above) || above.length === 0) return [];
+  const dt = step > 0 ? step : 0.04;
+  const events = [];
+  let lastT = -Infinity;
+  for (const s of above) {
+    if (s.t - lastT > dt * 1.5) events.push({ ...s });
+    else if (s.score > events[events.length - 1].score) events[events.length - 1] = { ...s };
+    lastT = s.t;
+  }
+  // 少于 6 刀时"典型间隔"没有统计意义，别拿它推翻调用方的 minGap
+  if (events.length < 6 || !(minGap > 0) || !adaptive) return suppressClose(events, minGap);
+  const gaps = events.slice(1).map((e, i) => e.t - events[i].t).sort((a, b) => a - b);
+  // 取 25% 分位而不是中位数：正常片子里偶尔的"闪白对"会给出两个很近的间隔，
+  // 中位数会被这两刀拉低；而真正的快剪素材是**所有**间隔都密，25% 分位一定也密。
+  const typical = gaps[Math.floor(gaps.length * 0.25)];
+  const effGap = typical > 0 && typical < minGap ? Math.max(dt * 1.2, typical * 0.8) : minGap;
+  return suppressClose(events, effGap);
 }
 
 /** 分数分布的摘要，供 suggest() 判断"内容有多密" */
@@ -233,9 +388,12 @@ export function autoThreshold(scores, { duration, minGap, floor = 12 } = {}) {
  * 重新判定只是换一组阈值/间隔，零 IO。
  *
  * @param {Array<{t:number, score:number}>} stats 逐帧分数
- * @param {{threshold?:number|'auto'|'auto-low', minGap?:number, duration?:number}} opts
+ * @param {{threshold?:number|'auto'|'auto-low', minGap?:number, duration?:number,
+ *          adaptiveGap?:boolean}} opts
  */
-export function decideCuts(stats, { threshold = 'auto', minGap = 0.35, duration } = {}) {
+export function decideCuts(stats, {
+  threshold = 'auto', minGap = 0.35, duration, adaptiveGap = true,
+} = {}) {
   const scores = stats.map((s) => s.score);
   const used = threshold === 'auto'
     ? autoThreshold(scores, { duration })
@@ -244,12 +402,15 @@ export function decideCuts(stats, { threshold = 'auto', minGap = 0.35, duration 
       : threshold;
   const eps = 1e-6;
   const above = stats.filter((s) => s.score > used + eps);
-  // 上限只对 auto 生效：显式阈值是调用方的明确意图
-  const cap = threshold === 'auto' ? autoThreshold(scores, { duration }).target : Infinity;
-  const picked = Number.isFinite(cap) && cap > 0 && above.length > cap
+  // 上限只对 auto 生效：显式阈值是调用方的明确意图。
+  // 修过一次老 bug：这里以前读 `autoThreshold(...).target`，而它返回 number → 永远是 Infinity。
+  const cap = threshold === 'auto' ? cutBudget(scores, { duration }).target : Infinity;
+  // 只在"超过预算一倍"时才裁，别把压线的那批顺手砍掉
+  const picked = Number.isFinite(cap) && cap > 0 && above.length > cap * 2
     ? [...above].sort((a, b) => b.score - a.score).slice(0, cap).sort((a, b) => a.t - b.t)
     : above;
-  const cuts = suppressClose(picked.map((s) => ({ ...s })), minGap);
+  const step = stats.length > 1 ? stats[1].t - stats[0].t : 0.04;
+  const cuts = cutsFromEvents(picked, step, { minGap, adaptive: adaptiveGap });
   const hotRatio = stats.length > 0 ? above.length / stats.length : 0;
   // 分数序列的变异系数：区分"每帧一剪"和"匀速运镜"
   const mean = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
@@ -321,6 +482,9 @@ export function scanShots(opts) {
     height = SCAN_H,
     threshold = 'auto',
     minGap = 0.35,
+    // 长时差窗口（秒）。0.4s 是"叠化/淡入淡出"的主场（影视剧里 0.5–1.5s），
+    // 调大能看见更慢的转场，但运镜的分数也会一起变大 —— 改之前先跑合成素材对比。
+    longSec = LONG_SEC,
     start = 0,
     end,
     signal,
@@ -354,6 +518,18 @@ export function scanShots(opts) {
     // 实测代价：解码占 95–98%，这两样只占 1–2%。
     const means = [];
     const prints = [];
+    // 逐行 V 累加/峰值：黑边检测用（见 barFraction）。黑边那几行的均值永远很低、
+    // 峰值也永远不高，和"这一帧恰好是黑的"能分开。
+    const rowV = new Float64Array(height);
+    const rowVMax = new Float64Array(height);
+    // 长时差：相邻帧差看不见叠化（1s 的变化摊到 25 帧上只有 1.6 分/帧），
+    // 但隔着 0.4s 看，一次完整换场仍然是满格差。环形缓冲只占 lag×9KB，
+    // 每帧多算一次 scorePair（约等于打分成本 ×2，占总耗时 1–2%）。
+    const lag = Math.max(1, Math.round((longSec > 0 ? longSec : LONG_SEC) * fps));
+    const ring = Array.from({ length: lag }, () => new Float32Array(n * 3));
+    let ringIdx = 0;
+    let ringWarm = 0;
+    const longStats = [];
     let stderr = '';
 
     child.stdout.on('data', (chunk) => {
@@ -362,23 +538,38 @@ export function scanShots(opts) {
         const slice = pending.subarray(0, frameBytes);
         pending = pending.subarray(frameBytes);
         frameToHsv(slice, cur);
+        const t = start + frame / fps;
         if (hasPrev) {
-          stats.push({ t: start + frame / fps, score: scorePair(prev, cur) });
+          stats.push({ t, score: scorePair(prev, cur) });
         }
+        // 长时差：ring[ringIdx] 里躺着 lag 帧之前那一帧
+        if (ringWarm >= lag) {
+          longStats.push({ t, score: scorePair(ring[ringIdx], cur) });
+        } else {
+          ringWarm += 1;
+        }
+        ring[ringIdx].set(cur);
+        ringIdx = (ringIdx + 1) % lag;
         {
           let sum = 0;
           const acc = new Float64Array(FP_W * FP_H);
           const cnt = new Uint16Array(FP_W * FP_H);
           for (let y = 0; y < height; y++) {
             const by = Math.min(FP_H - 1, Math.floor((y * FP_H) / height));
+            let rowSum = 0;
+            let rowMax = 0;
             for (let x = 0; x < width; x++) {
               const i = (y * width + x) * 3;
               const v = Math.max(slice[i], slice[i + 1], slice[i + 2]);
               sum += v;
+              rowSum += v;
+              if (v > rowMax) rowMax = v;
               const bi = by * FP_W + Math.min(FP_W - 1, Math.floor((x * FP_W) / width));
               acc[bi] += v;
               cnt[bi] += 1;
             }
+            rowV[y] += rowSum / width;
+            if (rowMax > rowVMax[y]) rowVMax[y] = rowMax;
           }
           const fp = new Uint8Array(FP_W * FP_H);
           for (let i = 0; i < FP_W * FP_H; i++) fp[i] = Math.round(acc[i] / (cnt[i] || 1));
@@ -405,15 +596,37 @@ export function scanShots(opts) {
         return;
       }
       const span = end !== undefined ? end - start : frame / fps;
-      const decided = decideCuts(stats, { threshold, minGap, duration: span });
-      const cuts = decided.cuts;
+      // ---- 归一化：把"绝对差"换成"同等亮度下的差"，再补掉黑边占掉的分母。
+      // 必须在下判定之前做 —— 否则暗场/黑边的片子会被常数门槛 12 系统性漏掉。
+      const bar = barFraction({ rowV, rowVMax, frames: frame });
+      const normMeans = bar > 0 ? means.map((m) => m / (1 - bar)) : means;
+      const normStats = normalizeScores(stats, means, { barFrac: bar });
+      const normLong = normalizeScores(longStats, means, { barFrac: bar, offset: lag });
+      const decided = decideCuts(normStats, { threshold, minGap, duration: span });
+      // ---- 渐变转场（叠化/淡入淡出）：补在切点列表里，只补"没有切点的地方"
+      const gradual = detectGradual(normLong, normStats, {
+        threshold: decided.threshold,
+        lagSec: lag / Math.max(1, fps),
+        cuts: decided.cuts.map((c) => c.t),
+      });
+      const merged = gradual.length
+        ? [...decided.cuts, ...gradual].sort((a, b) => a.t - b.t)
+        : decided.cuts;
 
       resolve({
-        cuts, stats, frames: frame, threshold: decided.threshold, degraded: decided.degraded,
-        summary: scanSummary(stats.map((s) => s.score)),
+        cuts: merged,
+        stats: normStats,
+        longStats: normLong,
+        frames: frame,
+        threshold: decided.threshold,
+        degraded: decided.degraded,
+        summary: scanSummary(normStats.map((s) => s.score)),
         // 逐帧的亮度均值与 16×9 指纹（供 flash.js / 转场分类用）。
         // 老调用方不读它们也不会受影响。
-        means, prints,
+        means: normMeans,
+        prints,
+        // 黑边占比（0 = 没检测到）。清单能据此说明"这是 2.39:1 的遮幅片"
+        bars: bar,
       });
     });
   });
@@ -470,9 +683,16 @@ export function refineCutsByWindow({
     if (perFrame) finalGap = Math.min(finalGap, gap);
     const fine = decideCuts(windowStats, { threshold: 'auto-low', minGap: gap, duration: to - from });
     const mean = fine.cuts.reduce((a, c) => a + (c.score ?? 0), 0) / Math.max(1, fine.cuts.length);
+    // 采纳门槛要**相对本窗**，不能是常数 25：
+    // 暗场/低对比的快剪，刀均分只有 18–19（实测 0.32s 快剪窗内 19.3），
+    // 而被它甩开的"窗内常态"只有 4.1 —— 4.7 倍的落差明明是刀，绝对门槛 25 却把它挡了，
+    // 于是 `refined: []`，细判白跑，快剪镜头数只能靠 0.35s 粗间隔数，结果是对半。
+    // 3×窗内中位分是"这是不是一次跳变"的相对判据；minScore 仍然是硬上限（亮素材不放宽）。
+    const med = quantile(windowStats.map((s) => s.score), 0.5);
+    const need = Math.max(6, Math.min(minScore, med * 3));
     const adopt = fine.cuts.length > coarse.length
       && fine.degraded !== 'motion'
-      && mean >= minScore;
+      && mean >= need;
 
     if (adopt) {
       out.push(...fine.cuts);
@@ -498,6 +718,115 @@ export function refineCutsByWindow({
       from: +r.from.toFixed(2), to: +r.to.toFixed(2), coarse: r.coarse, fine: r.fine,
     })),
   };
+}
+
+/**
+ * 渐变转场（叠化 / 淡入淡出 / 划像）—— 相邻帧差**结构上**看不见的那一类。
+ *
+ * 为什么单靠 `stats` 永远抓不到：1 秒的叠化把"整整一次换场"摊到 25 帧上，
+ * 每帧只有 1.6 分，而同镜头内运动的中位分就有 2.3 —— 倍数 1.3×，任何阈值都分不开
+ * （实测：3 个 1s 叠化，相邻帧判据 0/3，`spikeCuts` 降到 k=2 也只捞回 1 个）。
+ *
+ * 长时差（`scanShots` 里同时算的 `score(i, i-lag)`，lag≈0.4s）就分得开：
+ * 跨过转场时它满格，镜头内运动再快，0.4s 内的差也远小于一次换场。
+ *
+ * 判据四条 AND（前三条排除"运镜"这个主要伪影）：
+ *  1. long ≥ 门槛（和帧判据同一个门槛，不开小灶）
+ *  2. long ≥ RATIO × 同一时刻的帧差 —— 变化是"积累出来的"而不是"一直在变"
+ *  3. 前后 0.25s 都要**安静**：转场是"两个稳定状态之间的一段过渡"，
+ *     而甩镜/匀速运镜在它前后同样吵 —— 这条是区分两者的关键，只看 1、2 会被甩镜骗
+ *  4. 附近 dedupe 秒内没有已判定的切点（硬切已经报了，别重复）
+ *
+ * @param {Array<{t:number, score:number}>} longStats 长时差序列
+ * @param {Array<{t:number, score:number}>} frameStats 相邻帧差序列（"安静"与"积累"都用它）
+ * @param {{threshold?:number, lagSec?:number, ratio?:number, quiet?:number, margin?:number,
+ *          dedupe?:number, cuts?:number[]}} opts
+ * @returns {Array<{t:number, score:number, kind:'gradual', width:number}>}
+ */
+export function detectGradual(longStats, frameStats, {
+  threshold = 12, lagSec = LONG_SEC, ratio = 2, quiet, margin = 0.25, dedupe = 0.6, cuts = [],
+} = {}) {
+  if (!Array.isArray(longStats) || longStats.length < 4) return [];
+  if (!Array.isArray(frameStats) || frameStats.length === 0) return [];
+  // 长时差曲线的**基线随内容变**：暗场归一化后被放大了 3 倍，它自己的抖动就能摸到 12。
+  // 所以门槛取"绝对门槛"和"1.5×本片长时差中位数"里更严的那个（和 spikeCuts 同思路）。
+  const baseLong = quantile(longStats.map((s) => s.score), 0.5);
+  const longThr = Math.max(8, threshold, baseLong * 1.5);
+  const quietMax = quiet ?? Math.max(3, threshold * 0.55);
+  const step = longStats.length > 1 ? longStats[1].t - longStats[0].t : 0.04;
+  const at = (t) => {
+    const i = Math.round((t - frameStats[0].t) / step);
+    return i >= 0 && i < frameStats.length ? frameStats[i].score : null;
+  };
+  const med = (from, to) => {
+    const vals = [];
+    for (let t = from; t <= to + 1e-9; t += step) {
+      const v = at(t);
+      if (Number.isFinite(v)) vals.push(v);
+    }
+    if (vals.length === 0) return null;
+    vals.sort((a, b) => a - b);
+    return vals[Math.floor(vals.length / 2)];
+  };
+
+  const out = [];
+  let run = null;
+  const flush = () => {
+    if (!run) return;
+    const { from, to, peak } = run;
+    run = null;
+    const width = to - from + step;
+    // ① 至少两帧宽。单帧尖峰是"某一帧抖了一下"，不是过渡过程 ——
+    //    实测没有这条时，匀速运镜会报出 5 个假转场（每个 0.04s 宽）。
+    if (width < step * 1.5) return;
+    if (width > Math.max(2.5, lagSec * 4)) return;        // 太宽：持续运动，不是一次转场
+    const before = med(from - margin - step, from - step);
+    const after = med(to + step, to + margin + step);
+    const here = med(from, to);
+    if (before === null || after === null || here === null) return;
+    // ② 前后都要安静（±0.25s）。这是区分"转场"和"甩镜/匀速运镜"的主判据：
+    //    运镜在过渡期间和过渡前后一样吵，转场则是"两个静止状态之间的一段过渡"。
+    if (before > quietMax || after > quietMax) return;
+    // ③ 过渡期间相邻帧差必须**低**（< 0.45×门槛）。叠化 3–5 分，运镜 9–15 分。
+    //    只看"长时差大"会被运镜骗：0.4s 的位移在两种情况下都很大。
+    if (here > Math.max(3, threshold * 0.45)) return;
+    // ④ 长时差要明显高于这里自己的帧差 —— 变化是"攒出来的"
+    if (peak < ratio * Math.max(1.5, here)) return;
+    // 短转场（宽度≈lag）的区间中心比转场中心晚半个 lag，长转场同理
+    // （run ≈ [a, a+d+lag] → 中心 = a+d/2 + lag/2，恒减半个 lag 就回到转场中心）
+    const center = (from + to) / 2 - lagSec / 2;
+    const wide = width > lagSec * 1.6;                    // 宽 = 渐变；窄 = 分数偏低的硬切
+    out.push({
+      t: +center.toFixed(3), score: +peak.toFixed(1),
+      kind: wide ? 'gradual' : 'cut', width: +width.toFixed(2),
+    });
+  };
+  for (const s of longStats) {
+    if (s.score >= longThr) {
+      if (run && s.t - run.to <= step * 1.5) {
+        run.to = s.t;
+        run.peak = Math.max(run.peak, s.score);
+      } else {
+        flush();
+        run = { from: s.t, to: s.t, peak: s.score };
+      }
+    } else if (run) {
+      flush();
+    }
+  }
+  flush();
+  if (out.length === 0) return [];
+  // 和已报切点重合的丢掉（硬切在长时差曲线上也是一次"转场"），
+  // 自己之间也按 0.4s 去重（同一个转场被噪声切成两段时只留最狠的那个）
+  const kept = out.filter((g) => !cuts.some((c) => Math.abs(c - g.t) <= dedupe));
+  const out2 = [];
+  for (const g of kept.sort((a, b) => a.t - b.t)) {
+    const last = out2[out2.length - 1];
+    if (last && g.t - last.t < 0.4) {
+      if (g.score > last.score) out2[out2.length - 1] = g;
+    } else out2.push(g);
+  }
+  return out2;
 }
 
 

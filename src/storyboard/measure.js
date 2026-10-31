@@ -18,7 +18,7 @@
  * 它不取像素、不写盘 —— 只做算术，所以能单测。
  */
 
-import { NEED_TIERS, bestLayout } from './plan.js';
+import { NEED_TIERS, bestLayout, subFloorForNeed } from './plan.js';
 import { layoutCanvas } from './sheet.js';
 import {
   BUSY_MOTION, FRAME_DIV_MID, TILE_MOTION, chooseSubGrid, subTileTimes,
@@ -79,23 +79,18 @@ export function frameDiversityOf(range, cutTimes, prints, fps, offset = 0, k = 2
 /**
  * **子帧像素下限 = `need` 的下一档。**
  *
- * 以前这里是另一套数（200×112 / 110×56），和 `NEED_TIERS`（160×90 / 320×180 / 480×270）
- * 完全不相干 —— 结果 need=scene 的图摊成 3×3 之后每张 113×63，比 `shot` 档（160×90）还低，
- * 模型看到清单上写着 `cell=341×189 (scene)`，实际看到的是色块。这就是"两套口径"。
+ * 实现已经搬到 plan.js（那里才有 `NEED_TIERS`，而且 `maxCellsForNeed` 也要用它判断
+ * "16 格这一档摊开之后还剩多少余量"）。这里 re-export，老的
+ * `import { subFloorForNeed } from './measure.js'` 继续可用。
  *
- * 现在的语义是：**整帧给你 need 这一档，摊开给你低一档**（至少还能分辨"是不是不同镜头"）。
+ * 语义：**整帧给你 need 这一档，摊开允许降一档**（至少还能分辨"是不是不同镜头"）。
  *   need=scene(320×180) → 子帧门槛 160×90 → 341×189 的格子最多 2×2（170×94）
  *   need=text (480×270) → 子帧门槛 320×180 → 456×254 的格子只能整帧
  *   need=shot (160×90 ) → 子帧门槛 160×90（已经最底，不再降）
  *
  * 例外见 `TINY_FLOOR`：指纹证明"又动又确实不一样"的格子，仍允许用 110×56 换更多帧。
  */
-const NEED_ORDER = ['shot', 'scene', 'text'];
-export function subFloorForNeed(need = 'scene') {
-  const i = Math.max(0, NEED_ORDER.indexOf(need));
-  const lower = NEED_TIERS[NEED_ORDER[Math.max(0, i - 1)]] ?? NEED_TIERS.shot;
-  return { minSubW: lower.minCellW, minSubH: lower.minCellH };
-}
+export { subFloorForNeed };
 
 /**
  * **例外档**：110×56，只给"真的值得"的格子。
@@ -130,13 +125,47 @@ function cellSignals(range, { cuts, sampleMarks, stats, prints, fps, printOffset
  * 这里只在整张图的总帧预算（subBudget）不够时往下降。放在 measure 里是因为
  * 它直接决定"实际会产生多少帧"—— 切张要用这个数，渲染也必须用同一个结果。
  */
+/**
+ * 按「损失最小」分配子帧预算，不够就降档。
+ *
+ * 这是"预算削减"，不是"重新决策"：k 的**愿望值**由 chooseSubGrid 定（它看 frameDiv / 镜头数 /
+ * 运动量 / 像素下限），这里只在整张图的额度不够时往下削。
+ *
+ * 三条规则（2026-10-31 定的，原来三条都不是这样）：
+ *
+ * 1. **按"愿望值"排队，不按刀/秒**。原来按 `rate` 降序发额度，可 `rate` 和 chooseSubGrid 用的
+ *    根本不是同一个统计量 —— 而且方向可疑：快剪格 `rate` 最高，被排在最前面"先满足"，
+ *    听起来对；但额度一紧，被削的恰恰是排在**最后**的长镜头格，而那些格往往已经在 k=1。
+ *    现在改成按 `want` 降序：想要得多的先拿，削的时候也是它们损失最大，符合"损失最小"。
+ * 2. **保底 2，不许掉到 1**。1 的语义是"这格就别看过程了"——它是断崖，不是降档。
+ *    原来的 `while (s > 1 && s*s-1 > left) s -= 1` 在额度只够 2 的时候会一路削到 1
+ *    （实测 9 格 / 预算 48 → 3 格直接不摊）。现在先给所有 want≥2 的格子保住 2，
+ *    再用剩下的额度按 want 从大到小一档一档往上加。
+ * 3. **额度连保底都不够时**（只会发生在调用方传了一个不讲道理的 subBudget，比如 0），
+ *    才让格子退回 1 —— 这时候已经不是"削"，是"没米下锅"。
+ */
 function shrinkToBudget(cells, subBudget) {
-  let left = subBudget;
-  for (const c of [...cells].sort((x, y) => y.rate - x.rate)) {
-    let s = c.want;
-    while (s > 1 && s * s - 1 > left) s -= 1;
-    if (s > 1) left -= s * s - 1;
-    c.k = s;
+  const cost = (k) => Math.max(0, k * k - 1);
+  const FLOOR_K = 2;          // 摊开的最小档位
+  // 愿望值大的先拿额度；同愿望时刀/秒高的先拿（只是 tie-break，不再当主排序）
+  const ordered = [...cells].sort((a, b) => (b.want - a.want) || (b.rate - a.rate));
+  let left = Math.max(0, Math.round(Number(subBudget) || 0));
+
+  // 第一轮：保底
+  for (const c of ordered) {
+    const base = Math.min(c.want, FLOOR_K);
+    const k = cost(base) <= left ? base : 1;
+    c.k = k;
+    left -= cost(k);
+  }
+  // 第二轮：按 want 从大到小逐档升级（3→4 这一步的成本是 7，不是 15）
+  for (const c of ordered) {
+    while (c.k < c.want) {
+      const step = cost(c.k + 1) - cost(c.k);
+      if (step > left) break;
+      left -= step;
+      c.k += 1;
+    }
   }
   return cells;
 }
@@ -212,4 +241,39 @@ export function measureGroup(ranges, {
   shrinkToBudget(cells, subBudget);
   const frameCount = cells.reduce((sum, c) => sum + c.k * c.k, 0);
   return { cols, rows, width, height, cellW, cellH, cellBudget, cells, frameCount };
+}
+
+/* ---------------------------------------------------------------- 子帧预算 */
+
+/**
+ * 一张图的子帧预算**下限**：小图（1~3 格）也要给够，别让单格摊不开。
+ * 语义已经从"固定值"变成"下限"，见 `subBudgetFor`。
+ */
+export const SUB_BUDGET = 48;
+/** 上限：再多就是拿时间换覆盖，收益递减（240 帧 ≈ 240 次 ffmpeg，还要看机械盘）。 */
+export const SUB_BUDGET_MAX = 240;
+/** chooseSubGrid 的 maxK 默认值（这里镜像一份，只用来算"几何上最多能给多少"）。 */
+const SUB_K_MAX = 4;
+
+/**
+ * 这一张图该给多少子帧预算 = **这张图的几何上限**，再夹到 [SUB_BUDGET, SUB_BUDGET_MAX]。
+ *
+ * 2026-10-31 改了算法。原来是 `cuts/cells` 反推 k、再算 `cells × (k²−1)` ——
+ * 那是**第三个统计量**：`chooseSubGrid` 看 frameDiv/镜头数/运动量，`shrinkToBudget` 看刀/秒，
+ * 而预算又用"平均每格几刀"猜一遍 k。同一个格子，三处三种口气。
+ *
+ * 现在不猜了：每格几何上最多摊 `maxK²` 帧（k 受像素下限约束，不会超过它），
+ * 所以"这张图需要的额度上界"就是 `cells × (maxK²−1)`。至于实际摊几×几，仍然由
+ * `chooseSubGrid` 按格内证据决定 —— 预算只负责**不该成为瓶颈**。
+ *
+ * 于是 `shrinkToBudget` 只在一种情况下生效：调用方显式给了更小的 subBudget
+ * （或以后要给"一张图最多渲染 N 帧"设硬指标）。默认路径下它一次都不会触发，
+ * 这点是有意的：**k 只由画面证据决定**。
+ *
+ * @param {{cells?:number, maxK?:number}} o
+ */
+export function subBudgetFor({ cells = 1, maxK = SUB_K_MAX } = {}) {
+  const c = Math.max(1, Math.round(Number(cells) || 1));
+  const k = Math.min(SUB_K_MAX, Math.max(1, Math.round(Number(maxK) || SUB_K_MAX)));
+  return Math.min(SUB_BUDGET_MAX, Math.max(SUB_BUDGET, c * (k * k - 1)));
 }

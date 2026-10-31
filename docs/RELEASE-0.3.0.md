@@ -6,10 +6,10 @@
 
 ## 一、这次变了什么
 
-以前只能喂本地文件。现在可以直接给一条 B 站（或任何 yt-dlp 支持的站点）链接：
+以前只能喂本地文件。现在可以直接给一条 C站（或任何 yt-dlp 支持的站点）链接：
 
 ```js
-video_storyboard({ input: "https://www.bilibili.com/video/BV1fq4y1u7nC" })
+video_storyboard({ input: "https://example.com/video/BV1fq4y1u7nC" })
 ```
 
 三个新能力：
@@ -42,7 +42,7 @@ pip install --user yt-dlp
 ```
 
 1. 浏览器装扩展 **Cookie-Editor**
-2. 登录 bilibili.com → 点扩展 → Export → 选 **Netscape**
+2. 登录站点 → 点扩展 → Export → 选 **Netscape**
 3. 存成 `bili-cookies.txt`，放到仓库外（比如 `~/.secrets/`）
 
 > **为什么不能直接读浏览器**：Chromium 127+ 把 `SESSDATA` 用 App-Bound Encryption（`v20`）加密，

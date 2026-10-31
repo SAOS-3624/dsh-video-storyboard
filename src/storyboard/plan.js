@@ -14,6 +14,12 @@ export const IMAGE_TOKEN_CAP = 384;
 export const MIN_CELL_W = 240;
 export const MIN_CELL_H = 135;
 export const MAX_SHEETS = 99;   // 不封顶：片长决定张数（每 5 分钟一张），token 随片长线性增长
+/**
+ * **宁可挤一挤，也不为几格多开一张图。** 一张图 ~700 token，
+ * 总格数只比单张容量多一点点（≤15%）时，塞进一张、少看两三格，比多一张划算。
+ * 用在 `shapeFromTotal` 里。
+ */
+const OVERFLOW_TOLERANCE = 0.15;
 export const DEFAULT_ASPECT = 16 / 9;
 
 /**
@@ -66,16 +72,47 @@ export function readabilityOf(cellW, cellH) {
 }
 
 /**
+ * **子帧像素下限 = `need` 的下一档。**
+ *
+ * 语义：**整帧给你 need 这一档，摊开允许降一档**（至少还能分辨"是不是不同镜头"）。
+ *   need=scene(320×180) → 子帧门槛 160×90 → 341×189 的格子最多 2×2（170×94）
+ *   need=text (480×270) → 子帧门槛 320×180 → 456×254 的格子只能整帧
+ *   need=shot (160×90 ) → 子帧门槛 160×90（已经最底，不再降）
+ *
+ * 放在 plan.js 而不是 measure.js：它只依赖 `NEED_TIERS`，而 `maxCellsForNeed`（同在本文件）
+ * 也要用它判断"16 格这一档摊开之后还剩多少余量"。measure 那边 re-export 一次保持原调用点不变。
+ */
+const NEED_ORDER = ['shot', 'scene', 'text'];
+export function subFloorForNeed(need = DEFAULT_NEED) {
+  const i = Math.max(0, NEED_ORDER.indexOf(need));
+  const lower = NEED_TIERS[NEED_ORDER[Math.max(0, i - 1)]] ?? NEED_TIERS.shot;
+  return { minSubW: lower.minCellW, minSubH: lower.minCellH };
+}
+
+/**
  * 在给定像素预算下，为了达到 need 档可读性，一张图最多放几格。
  *
  * 从大到小试，返回**布局友好的整数**（4/6/9/12/16 的子集）。
- * 640k + scene → 9；1.2M + scene → 16；1.2M + text → 9；640k + text → 4。
+ * 1.2M + scene → 12（见下）；1.65M + scene → 16；1.2M + text → 6；640k + text → 4。
+ *
+ * **16 格是"满铺"档，要额外的余量**：只有在摊成 2×2 之后、子帧仍比 need 的下一档高 15% 以上
+ * 才给这一档。理由是实测（250 s / 1.2M / scene）：
+ *   16 格 → cell 341×189 → 摊 2×2 = 170×94，只比 shot(160×90) 高 6% —— 一压缩就掉档；
+ *   12 格 → cell 394×220 → 摊 2×2 = 197×110，余量 23%，且 token 几乎不变（1396 vs 1393）。
+ * 代价是每张少 4 格（覆盖变粗一档），换来的是"摊开之后还认得出"。
+ * `need:'shot'` 不受这条约束 —— 那个档位本来就不指望看清内容，铺满更重要。
  */
 export function maxCellsForNeed(budget = PIXEL_BUDGET, aspect = DEFAULT_ASPECT, need = DEFAULT_NEED) {
   const tier = NEED_TIERS[need] ?? NEED_TIERS[DEFAULT_NEED];
+  const subFloor = subFloorForNeed(need);
+  const SUB_FRAME_MARGIN = 1.15;
   for (const n of [16, 12, 9, 6, 4, 2, 1]) {
     const c = cellPixels(n, aspect, budget);
-    if (c.w * CELL_FIT_SLACK >= tier.minCellW && c.h * CELL_FIT_SLACK >= tier.minCellH) return n;
+    if (c.w * CELL_FIT_SLACK < tier.minCellW || c.h * CELL_FIT_SLACK < tier.minCellH) continue;
+    if (n === 16 && need !== 'shot'
+      && (c.w / 2 < subFloor.minSubW * SUB_FRAME_MARGIN
+        || c.h / 2 < subFloor.minSubH * SUB_FRAME_MARGIN)) continue;
+    return n;
   }
   return 1;
 }
@@ -228,7 +265,7 @@ export function isMusicDriven(opts = {}) {
 /**
  * 从廉价元数据推导建议：多少格、几张。
  *
- * 依据实测（B站 5 分钟镜头密集素材，1920×1080）：
+ * 依据实测（C站 5 分钟镜头密集素材，1920×1080）：
  *  - 9 格（33s/格）大量重复的草地镜头；16 格（19s/格）才把产品、人物、采访都覆盖到
  *  - 所以格数不该按"时长÷固定值"硬算，而是按"每格看多少秒"反推，且不超过镜头数
  *  - 镜头密集（均镜头 <4s）时每格 15s，否则 40s
@@ -261,18 +298,6 @@ export function suggest(meta) {
     return pick('overview', 4, 1, `${duration.toFixed(0)}s、${shots} 个镜头 → 4 帧足够概览`);
   }
 
-  // 每格多少秒，只看**画面变化 p90**。
-  // 曾经试过再叠加一个"剪辑密度（刀/秒）取更密者"，想让快剪 PV 拿到更多格 ——
-  // 实测反而更差：概念 PV 会被推到 12 格，每格只剩 3~4 个镜头，摊开也覆盖不住，
-  // 一张图只能展示 36 个画面；而 9 格（每格 4~5 镜）配摊开能做到 41/41 全覆盖。
-  // **格数多 ≠ 看到的多**：格数是"把时间切成几段"，摊开才是"每段看几张"。
-  // 每格秒数随画面变化 p90 **连续**下降，不再三档硬切。
-  // 旧的 `motion>=15?12:motion>=5?20:40` 在 13.2 和 17.1 之间划了一刀：
-  // 两支几乎同长的 PV，一个 4 格一个 9 格，纯属跨不跨这条线的运气。
-  // 经验式：p90 每高 1 分，每格少 1 秒，夹在 [8, 45] —— 画面越"忙"，越该细看。
-  const perCell = typeof motion === 'number'
-    ? Math.max(8, Math.min(45, 40 - motion))
-    : (avgShot < 4 ? 15 : 40);
   // 内容类型分流（判据见 musicDrivenVerdict）：只影响取帧密度，不影响下面算出的格数。
   const musicDriven = isMusicDriven({
     meanLufs,
@@ -282,66 +307,74 @@ export function suggest(meta) {
     thresholds: meta.thresholds,
   });
 
-  // **总格数直接由「切点总数」决定 —— 这就是对整片密度做积分。**
-  //
-  // 切点总数 = ∫(局部密度)dt，是全片"热闹程度"的精确总量。
-  // 原来用 p90（全片第 90 百分位）当代理指标，它只反映"平时多热闹"，
-  // 快慢混杂的片子会被平均掉：前 5 分钟狂切、后面 30 分钟长镜头，p90 只看到中间值。
-  //
-  // 现在：**每格装 TARGET_SHOTS 个镜头**，格数 = 镜头数 ÷ TARGET_SHOTS。
-  // 每格 12 个镜头 → 摊 3×3 或 4×4 刚好，也不至于一格塞十几个看不清。
+  // **格数多 ≠ 看到的多**：格数是"把时间切成几段"，摊开才是"每段看几张"。
+  // 曾经试过再叠加"剪辑密度（刀/秒）取更密者"想让快剪 PV 拿到更多格，实测反而更差 ——
+  // 概念 PV 被推到 12 格，每格只剩 3~4 个镜头，摊开也覆盖不住。
+
+  // **每格装 8 个镜头**：摊 2×2/3×3 刚好覆盖。
   const TARGET_SHOTS_PER_CELL = 8;
-  // 每张最多几格：由 `size` 档位决定（small 16 / medium 12 / large 9）。
-  // 长片用 4×4 时每格只有 247×137，再二重细分就没法看 —— 高档位宁可多出一张图。
+  // 每张最多几格：由 `board.boardGeometry()` 按 budget + need 推（1.2M+scene → 12）。
+  // 这里只做兜底，正常路径 pipeline 会把它传进来。
   const MAX_PER_SHEET = Math.max(4, Math.min(16, Number(meta.maxPerSheet) || 16));
-  // 单格最多覆盖多少秒。超过这个长度，一格里的"中点"就开始不像这一段的代表了
-  // （6 分钟的格子里，取哪一帧都是随便挑的）。
+  // **单格最多 90 秒**：再长，格子里取哪一帧都不像这一段的代表了。
   const MAX_CELL_SECONDS = 90;
-  // **宁可挤一挤，也不为几格多开一张图。** 一张图 384 token，
-  // 如果总格数只比单张容量多一点点（≤15%），塞进一张、少看两三格，比多一张划算。
-  const OVERFLOW_TOLERANCE = 0.15;
-  // 格数取两个口径里更大的那个：
-  //   按镜头数：每格 8 个镜头（快剪素材的节奏基准）
-  //   按时长：  单格不超过 90 秒（安静的长素材的覆盖基准，且不超过镜头数）
-  // 只用镜头数会漏掉一整类素材：66 分钟讲座只有 150 刀，算出来 19 格 ——
-  // 最后是 12 格看 66 分钟（每格 5.5 分钟）。实测就是这么翻的车。
-  // 也不按"每格 40 秒"算：那会把 15 分钟 61 镜的片子推到 24 格，
-  // 而它 8 格就够 —— 只在"单格长到没法看"时才介入。
-  const byShots = Math.round(shots / TARGET_SHOTS_PER_CELL);
-  const bySeconds = Math.min(Math.round(duration / MAX_CELL_SECONDS), shots);
-  let totalCells = Math.max(4, byShots, bySeconds);
+
+  // **每格多少秒** = 上面两条约束里更紧的那个。
+  // 以前写成 `max(shots/8, duration/90)`：这两个式子是同一个数的倒数
+  // （shots/8 = duration ÷ (8×平均镜头长)），绕一圈再取大，读的人看不出是一回事。
+  const stride = Math.min(MAX_CELL_SECONDS, TARGET_SHOTS_PER_CELL * (duration / shots));
+  // 格数不能多过镜头数（把一个镜头劈成 7 段没意义），也不能少于 4 格
+  let totalCells = Math.max(4, Math.min(Math.round(duration / stride), shots));
+  // 单格不超过 90 秒所要求的**最少**格数。下面两个降档分支拿它当地板 ——
+  // 格数可以砍，但不能砍到"一格 165 秒"。
+  const evenCells = Math.min(Math.round(duration / MAX_CELL_SECONDS), shots);
+
   if (meta.tileFirst) {
     // **摊开优先**：宁可少几格，把画布让给"每格摊 2×2 / 3×3"。
     // 起因（2026-10-30）：记管 MAD02 是 16 格 4×4，单格 247×137，摊 2×2 只剩 123×68 ——
     // 低于"能分辨镜头"的 110×56 那条线，165 个镜头只看到 32 个。
     // 降到 9 格（3×3 布局）单格 331×184，摊 3×3 是 110×61、摊 2×2 是 165×92，都成立。
     // 9 是硬下限：再少就排成 2×2（4 格），92 秒的片子每格 23 秒，那不是"细看"是"抽帧"。
-    // 仍然保留 bySeconds —— 66 分钟讲座该 44 格还是 44 格，这条只管短视频。
-    totalCells = Math.max(9, Math.round(shots / 18), bySeconds);
+    totalCells = Math.max(9, Math.round(shots / 18), evenCells);
   }
   if (!musicDriven && (hasSubtitle || speechRate > 0) && speechRate > T.speechRateCut) {
     // 台词承担信息，图只做锚点 —— 但**不能锚到 90 秒才一张**：
-    // 降档之后再拿 bySeconds 兜一次底，否则 66 分钟讲座会被降成 24 格（每格 165 秒）。
-    totalCells = Math.max(4, Math.round(totalCells * 0.6), bySeconds);
+    // 降档之后再拿 evenCells 兜一次底，否则 66 分钟讲座会被降成 24 格（每格 165 秒）。
+    totalCells = Math.max(4, Math.round(totalCells * 0.6), evenCells);
   }
-  const perSheetCap = MAX_PER_SHEET * (1 + OVERFLOW_TOLERANCE);
-  const sheets = Math.min(MAX_SHEETS, Math.max(1, Math.ceil(totalCells / perSheetCap)));
-  // 每张分到的格数：总格数摊到各张，再吸附成能整除的布局
-  let cells = snapCells(clamp(Math.ceil(totalCells / sheets), 4, MAX_PER_SHEET));
 
+  // 形状（每张几格 / 几张）由 `shapeFromTotal` 一处算，layout 用的是同一个函数。
+  const { cells, sheets } = shapeFromTotal(totalCells, MAX_PER_SHEET);
   const label = cells <= 4 ? 'overview' : cells <= 9 ? 'balanced' : cells <= 12 ? 'detailed' : 'timeline';
-  // 说明里把两个信号都写出来，否则"为什么给这个格数"又变成猜的
   const pace = typeof motion === 'number'
-    ? `画面变化 p90=${motion.toFixed(1)}（${perCell.toFixed(0)}s/格）`
-    : `均镜头 ${avgShot.toFixed(1)}s（${perCell.toFixed(0)}s/格）`;
-  // 把"这张图每格多大、能看清到什么程度"写进 reason：
-  // 旧版只报格数，模型无从判断 16 格是不是已经糊了（286×118 就是这么被接受的）。
-  const px = cellPixels(cells, meta.aspect ?? DEFAULT_ASPECT, meta.budget ?? PIXEL_BUDGET);
-  const readable = readabilityOf(px.w, px.h);
+    ? `画面变化 p90=${motion.toFixed(1)}`
+    : `均镜头 ${avgShot.toFixed(1)}s`;
+  // **只说"计划铺多少格"，不说"几张"、不说"每格多大"。**
+  // 张数要等 layout 按真实上限算，写在这里必然和清单首行对不上（实测 6 格→9 格、18 格→24 格）；
+  // "每格多大"清单里另有一行 `cell=W×H (档位)`，这里再算一次只会多一个近似值（405 vs 394）。
   return pick(label, cells, sheets,
-    `${duration.toFixed(0)}s、${shots} 个镜头、${pace} → ${cells} 格 × ${sheets} 张` +
-    `（≈${Math.round(duration / (cells * sheets))}s/格、${px.w}×${px.h}/格 = ${readable}）` +
-    (musicDriven ? '·音乐驱动（取帧更密，格数不受影响）' : ''), musicDriven);
+    `${duration.toFixed(0)}s、${shots} 个镜头、${pace} → 计划 ${totalCells} 格（≈${Math.round(duration / totalCells)}s/格）` +
+    (musicDriven ? '·音乐驱动（取帧更密，格数不受影响）' : ''), musicDriven, totalCells);
+}
+
+/**
+ * **总格数 → 每张几格 / 几张。** 唯一实现。
+ *
+ * - `suggest()` 调它，只为把"大概几张"说出来；
+ * - `layout.planLayout()` 调它，决定**真正**排几张。
+ *
+ * 两边必须是同一个函数：以前各自算一遍，于是"建议 6 格、实际 9 格"成了常态。
+ *
+ * 15% 的余量：一张图容量是 cap 格，但"多出两三格就多买一张图"不划算，
+ * 所以装到 cap×1.15 才另起一张。
+ */
+export function shapeFromTotal(totalCells, maxPerSheet = 12) {
+  const cap = Math.max(4, Math.min(16, Math.round(Number(maxPerSheet) || 12)));
+  const n = Math.max(1, Math.round(Number(totalCells) || 1));
+  const sheets = Math.min(MAX_SHEETS, Math.max(1, Math.ceil(n / (cap * (1 + OVERFLOW_TOLERANCE)))));
+  // 每张分到的格数：总格数摊到各张，再吸附成能整除的布局
+  const cells = snapCells(clamp(Math.ceil(n / sheets), 4, cap));
+  return { cells, sheets };
 }
 
 /** 吸附到"能整除成好布局"的格数，避免出现大量 padding（8→9 比 8+1 空格好） */
@@ -360,9 +393,12 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
  *   这个参数曾经在调用处传了、在这里没接 → 返回值里永远是 undefined，
  *   于是"音乐片取帧更密"这条规则写了一套却从没生效过。
  */
-function pick(label, cells, sheets, reason, musicDriven) {
+function pick(label, cells, sheets, reason, musicDriven, totalCells = cells * sheets) {
   return {
-    coverage: label, cells, sheets, reason,
+    coverage: label,
+    // **`totalCells` 才是建议的主语言**：layout 按它排布。
+    // `cells`/`sheets` 是同一件事折算成网格形状的样子，给清单展示和 planTotal 用。
+    totalCells, cells, sheets, reason,
     ...(musicDriven ? { musicDriven: true } : {}),
   };
 }

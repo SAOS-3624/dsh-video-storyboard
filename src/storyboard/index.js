@@ -17,6 +17,12 @@ export { runStoryboard, formatManifest } from './pipeline.js';
 
 // ---- 扫描：逐帧分数、切点、以及逐帧的亮度均值与 16×9 指纹
 export { scanShots, decideCuts, scanSummary, refineCutsByWindow } from './scan.js';
+// 判据的零件（暗场/黑边的分数归一、事件聚类、渐变转场）——
+// watch 那边想自己重判同一份 stats 时需要它们，别在外部复制一套阈值。
+export {
+  normalizeScores, barFraction, cutBudget, cutsFromEvents, detectGradual, detectDarkRuns,
+  REF_V, GAIN_MAX, LONG_SEC,
+} from './scan.js';
 
 // ---- 切点分类：flash / white / black / hardcut / dissolve / motion（只打标签，不删点）
 export { tagCuts, flashEvidence } from './flash.js';

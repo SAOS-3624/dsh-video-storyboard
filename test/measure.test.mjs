@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { frameDiversityOf, measureGroup } from '../src/storyboard/measure.js';
+import { frameDiversityOf, measureGroup, subBudgetFor } from '../src/storyboard/measure.js';
 import { layoutCanvas } from '../src/storyboard/sheet.js';
 import { bestLayout } from '../src/storyboard/plan.js';
 
@@ -54,6 +54,68 @@ test('measureGroup: subBudget 不够时降档，且 frameCount 跟着降', () =>
   const tight = measureGroup(rangesOf(4), { aspect: 16 / 9, cuts, subBudget: 1 });
   assert.ok(loose.frameCount > tight.frameCount);
   assert.equal(tight.frameCount, tight.cells.reduce((s, c) => s + c.k * c.k, 0));
+});
+
+/* ------------------------------------------------ 子帧预算与降档（F，2026-10-31）
+ *
+ * 这一组是"安全阀"的测试。真实素材上预算从来不会绑（`subBudgetFor` 给的是几何上限），
+ * 所以默认路径根本走不到 `shrinkToBudget` —— 不单独测它就等于没测过。
+ */
+
+/** 4 格 × 5s：前两格各 9 个镜头且"热闹"（want=3），后两格各 3 个镜头且安静（want=2） */
+function mixedSheet() {
+  const ranges = Array.from({ length: 4 }, (_, i) => ({ from: i * 5, to: (i + 1) * 5 }));
+  const cuts = [];
+  for (let i = 0; i < 8; i += 1) {
+    cuts.push({ t: 0.5 + i * 0.5, score: 40 });
+    cuts.push({ t: 5.5 + i * 0.5, score: 40 });
+  }
+  for (const t of [10.5, 12, 15.5, 17]) cuts.push({ t, score: 40 });
+  const stats = [];
+  for (let t = 0; t < 10; t += 0.5) stats.push({ t, score: 12 });      // 前两格热闹 → 允许 3×3
+  for (let t = 10; t < 20; t += 0.5) stats.push({ t, score: 0.5 });    // 后两格安静 → 最多 2×2
+  return { ranges, cuts, stats };
+}
+
+const ksOf = (m) => m.cells.map((c) => c.k);
+
+test('subBudgetFor: 只跟格数有关，不再从"有几刀"反推 k', () => {
+  assert.equal(subBudgetFor({ cells: 12 }), 12 * 15, '12 格 × (4²−1)');
+  assert.equal(subBudgetFor({ cells: 12, cuts: 9999 }), 12 * 15, 'cuts 已经不是入参语义');
+  assert.equal(subBudgetFor({ cells: 16 }), 240, '夹到上限');
+  assert.equal(subBudgetFor({ cells: 1 }), 48, '夹到下限');
+  assert.equal(subBudgetFor({ cells: 20, maxK: 2 }), 20 * 3, 'maxK 参与几何上限');
+  assert.equal(subBudgetFor({ cells: 12, maxK: 2 }), 48, '12×3=36 被下限 48 托住（多给无害）');
+});
+
+test('shrinkToBudget: 额度够保底时，一格都不许掉到 1', () => {
+  const { ranges, cuts, stats } = mixedSheet();
+  const m = measureGroup(ranges, { aspect: 16 / 9, budget: 640_000, cuts, stats, subBudget: 12 });
+  assert.deepEqual(ksOf(m), [2, 2, 2, 2], '12 = 4 格 × (2²−1)，刚好保底');
+  assert.equal(m.frameCount, 16);
+});
+
+test('shrinkToBudget: 多余的额度按"愿望值"从大到小升级，不是按刀/秒', () => {
+  const { ranges, cuts, stats } = mixedSheet();
+  // 12 保底 + 5 → 只够把一个 want=3 的格子升到 3
+  const one = measureGroup(ranges, { aspect: 16 / 9, budget: 640_000, cuts, stats, subBudget: 17 });
+  assert.deepEqual(ksOf(one), [3, 2, 2, 2], '第一个格子（镜头最多）应当先升级');
+  // 再加 5 → 两个 want=3 的都升满
+  const two = measureGroup(ranges, { aspect: 16 / 9, budget: 640_000, cuts, stats, subBudget: 22 });
+  assert.deepEqual(ksOf(two), [3, 3, 2, 2]);
+  // 给更多也没用：愿望值是上限，不会被"喂胖"
+  const rich = measureGroup(ranges, { aspect: 16 / 9, budget: 640_000, cuts, stats, subBudget: 999 });
+  assert.deepEqual(ksOf(rich), [3, 3, 2, 2]);
+});
+
+test('shrinkToBudget: 连保底都不够才会掉到 1（这条是"没米下锅"，不是常态）', () => {
+  const { ranges, cuts, stats } = mixedSheet();
+  const zero = measureGroup(ranges, { aspect: 16 / 9, budget: 640_000, cuts, stats, subBudget: 0 });
+  assert.deepEqual(ksOf(zero), [1, 1, 1, 1]);
+  assert.equal(zero.frameCount, 4);
+  // 只够一格的保底：愿望最大的先拿，其余退回 1
+  const one = measureGroup(ranges, { aspect: 16 / 9, budget: 640_000, cuts, stats, subBudget: 4 });
+  assert.deepEqual(ksOf(one), [2, 1, 1, 1]);
 });
 
 test('measureGroup: 音乐驱动把"单镜头但在动"的门槛从 1.5 降到 0.7', () => {

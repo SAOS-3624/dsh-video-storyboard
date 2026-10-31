@@ -458,7 +458,10 @@ export function formatManifest(result, {
       `${cellAttr}${tokensAttr}` +
       `${result.provenance?.ffmpeg ? ` ffmpeg="${result.provenance.ffmpeg}"` : ''}` +
       `${result.provenance?.sha256 ? ` sha256="${result.provenance.sha256}"` : ''}` +
-      `${result.audio ? ` footer="audio-strip(${sheet0.stripH ?? 0}px)"` : ''}` +
+      // 条带被跳过（整段静音）时不要再报 footer，否则模型会去图里找一条不存在的波形
+      `${sheet0?.stripH ? ` footer="audio-strip(${sheet0.stripH}px)"` : ''}` +
+      // 音轨到底在不在，是这一层最容易被误读的事实（"no-key" 常被读成"视频没声音"）
+      ` audio="${info?.hasAudio ? 'present' : 'absent'}"` +
       `${result.transcript?.source ? ` transcript="${result.transcript.source}"` : ''}` +
       (cellRange ? ` cells="${lo}-${hi} of ${total}"` : '') +
       (result.cuts?.length
@@ -467,6 +470,12 @@ export function formatManifest(result, {
   ];
   const planLine = formatPlanLine(result.plan);
   if (planLine) lines.push(planLine);
+  // 多张图时先把"每张各管一段"说清楚：图上的抬头就是证据，模型容易把几张串成一条时间轴。
+  if (hasSheets && result.sheets.length > 1) {
+    lines.push(`each image carries a header such as "0:00-5:00 1/3" — that is this sheet's own time ` +
+      `range and its index out of ${result.sheets.length}. The sheets are ${result.sheets.length} separate ` +
+      'windows, not one long strip: read the numbers on the image before stitching anything together.');
+  }
   // **要了多少、出了多少、为什么少**：旧版只写一个数，模型以为 16 格都看到了。
   // 少给通常不是 bug（窗口里只有 8 个镜头，再多就是重复帧），但必须说出来并给改法。
   {
@@ -731,6 +740,11 @@ export function formatManifest(result, {
     lines.push('transcript: skipped because transcript:"off" was requested — this is NOT "the video has no speech". ' +
       'Nothing was listened to; re-run without transcript:"off" (or pass transcriptFile) if you need the words.');
   }
+  if (result.source?.audioMerged) {
+    // 分离流在我们这边合上了 —— 说一句，否则用户会以为是站点问题、或者以为"没声音"是常态
+    lines.push('audio: the picture and sound arrived as two separate streams and were merged locally ' +
+      '(no re-encoding) — nothing was lost. The audio strip and the transcript read from the merged file.');
+  }
   if (result.transcript?.source === 'no-audio') {
     // 区分"源本来没声音"和"这次下载的副本没声音" —— 后者能修（换成带 cookies 或本地文件）。
     // 如果音频轨被留在单独的 m4a 里，真正的原因是合流没跑（ffmpeg 不在 yt-dlp 的搜索路径），
@@ -743,6 +757,11 @@ export function formatManifest(result, {
         : 'no audio in this copy: the downloaded track is silent while the source has audio. ' +
           'Pass cookies, or download locally, to get loudness and transcript.'
       : 'no audio track: grid is visual only');
+    // yt-dlp 自己的警告（"ffmpeg not found" 之类）比我们的推断更接近现场，缺音时一并给出
+    const warns = result.source?.audioWarnings;
+    if (Array.isArray(warns) && warns.length > 0) {
+      lines.push(`  yt-dlp said: ${warns.join(' | ')}`);
+    }
   }
   lines.push(`total ${picked.length} of ${total} cells shown` +
     (hasSheets ? '; unlabeled cells are padding, not content.' : '.'));

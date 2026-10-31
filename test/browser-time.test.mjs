@@ -32,7 +32,7 @@ test('probeBrowser: 端口不通 → closed', async () => {
   assert.equal(r.port, 6553);
 });
 
-test('挑目标时 bilibili 页面优先', () => {
+test('挑目标时 C站 页面优先', () => {
   const targets = [
     { type: 'page', id: 'a', url: 'https://example.com/', webSocketDebuggerUrl: 'ws://a' },
     { type: 'page', id: 'b', url: 'https://www.bilibili.com/video/BV1xx', webSocketDebuggerUrl: 'ws://b' },

@@ -1,11 +1,11 @@
 /**
- * subtitles.js — 直接从站点拿字幕轨（B 站的 CC），不去猜、也不本地转写。
+ * subtitles.js — 直接从站点拿字幕轨（C站的 CC），不去猜、也不本地转写。
  *
- * 为什么需要：B 站视频的字幕是**单独的轨道**，下载下来的 mp4 里通常没有，
+ * 为什么需要：C站视频的字幕是**单独的轨道**，下载下来的 mp4 里通常没有，
  * 所以 `extractSubtitleTrack`（读容器内嵌流）对它永远是 null，于是白白退回 ASR。
  * 而字幕轨是作者自己写的准确文本，比 ASR 好得多：不烧 CPU、不错字、还带准确时间码。
  *
- * 坑：B 站字幕**要登录**。没登录时 yt-dlp 只给 danmaku，并且明确警告
+ * 坑：C站字幕**要登录**。没登录时 yt-dlp 只给 danmaku，并且明确警告
  * "Subtitles are only available when logged in"。所以这里要把"没有字幕"和
  * "有字幕但要登录"分开——前者换 ASR 就行，后者得让用户补 cookies。
  */
@@ -22,7 +22,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { parseSrt } from './asr.js';
 
-/** 优先中文字幕，其次英文；B 站常见的就是这几个 id */
+/** 优先中文字幕，其次英文；C站常见的就是这几个 id */
 const LANGS = ['zh-Hans', 'zh-CN', 'zh', 'ai-zh', 'en', 'en-US'];
 
 const run = (bin, args, opts) => new Promise((resolve) => {
@@ -125,11 +125,11 @@ async function fetchOnce({ url, cookies, timeoutMs, langs }) {
 }
 
 /**
- * 验证 B 站 cookie 到底有没有登录。
+ * 验证 C站 cookie 到底有没有登录。
  *
  * 为什么需要：`needs-login` 有两种可能——「cookie 没配」和「cookie 配了但过期了」。
  * 光看 yt-dlp 的警告分不出来，而这两种对用户是完全不同的动作（去配 / 去重新导出）。
- * 直接问 B 站自己的 nav 接口最干脆：`code: -101` 就是没登录。
+ * 直接问 C站自己的 nav 接口最干脆：`code: -101` 就是没登录。
  */
 export async function checkBiliLogin({ cookies = null, timeoutMs = 15_000 } = {}) {
   const jarPath = cookies ?? configuredCookies();

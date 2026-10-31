@@ -23,7 +23,7 @@ test('board: 全片概览的默认值', () => {
   // 默认抬到 medium：640k 的 9 格只有 331×184，是这次"AI 看的东西太糊"的直接原因。
   assert.equal(o.budget, 1_200_000, '默认预算 1.2M：9 格 421×237');
   assert.equal(o.need, 'scene');
-  assert.equal(o.maxPerSheet, 16, '1.2M + scene 的格数上限是 16（350×197）');
+  assert.equal(o.maxPerSheet, 12, '1.2M + scene 的格数上限是 12（394×220，摊开仍有 197×110）');
   assert.equal(o.fetchOptions.scanHeight, 720, '1.2M 预算配 720p：0.5.3 的默认不能借预算之名降回去');
   assert.equal(o.fetchOptions.zoomHeight, undefined, 'board 不需要高清直链');
 });

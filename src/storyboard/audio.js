@@ -291,3 +291,17 @@ export async function analyzeRhythm({ input, ffmpegPath, start = 0, end } = {}) 
     return null;
   }
 }
+
+/**
+ * 这条音轨到底有没有"能画出来的东西"。
+ *
+ * 用途：决定要不要在图上加那条底部波形带。整段静音（或响度根本没测出来）时它是一条空白，
+ * 白占 20–70px 画布 —— 用户反馈"没台词时那条 strip 是空的"就是这个情况。
+ * 注意判据是**响度**，不是"有没有台词"：没配 ASR 但有对白的片子，波形仍然有用。
+ */
+export function hasAudibleSamples(audio, floor = -70) {
+  const series = audio?.series;
+  if (!Array.isArray(series) || series.length === 0) return false;
+  for (const v of series) if (Number.isFinite(v) && v > floor) return true;
+  return false;
+}

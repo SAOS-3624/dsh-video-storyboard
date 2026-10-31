@@ -158,7 +158,7 @@ export function storyboardToolSpec() {
       transcriptFile: {
         type: 'string',
         description: 'Path to an existing transcript (SRT, or JSON with [{start,end,text}] / ' +
-          '[{from,to,text}] / Bilibili {body:[{from,to,content}]}). When given, the subtitle track ' +
+          '[{from,to,text}] / C站 {body:[{from,to,content}]}). When given, the subtitle track ' +
           'and ASR are both skipped — use this when the site already has captions.',
       },
       planThresholds: {
@@ -320,7 +320,7 @@ export function zoomToolSpec() {
       transcriptFile: {
         type: 'string',
         description: 'Path to an existing transcript (SRT, or JSON with [{start,end,text}] / '
-          + '[{from,to,text}] / Bilibili {body:[{from,to,content}]}). Skips the subtitle track and ASR.',
+          + '[{from,to,text}] / C站 {body:[{from,to,content}]}). Skips the subtitle track and ASR.',
       },
       detail: {
         type: 'string',

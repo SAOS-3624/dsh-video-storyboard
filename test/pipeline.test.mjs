@@ -14,6 +14,7 @@ import { promisify } from 'node:util';
 import { runStoryboard, formatManifest, saveStoryboards } from '../src/storyboard/pipeline.js';
 import { lookupCell } from '../src/storyboard/cells.js';
 import { DEFAULT_FFMPEG } from '../src/storyboard/probe.js';
+import { imageTokens } from '../src/storyboard/plan.js';
 
 const run = promisify(execFile);
 let hasFfmpeg = false;
@@ -60,8 +61,11 @@ test('e2e: runStoryboard 出一张图 + 完整清单', async (t) => {
 
   const text = formatManifest(r);
   assert.match(text, new RegExp(`cell="${sheet.cellW}x${sheet.cellH}"`));
-  assert.match(text, /tokens="418 \(est@418\/img, DSH 42px grid[^"]*\)"/,
-    '要按实际像素算 token（1066x600 → 418）');
+  // token 必须按**实际像素**算，不是一个常数（384 只对 640k 的图成立）。
+  // 这里不写死具体数字：图高会随"顶部时间抬头"这类装饰带变化，写死了每次都得起改。
+  const expectTokens = imageTokens(sheet.width, sheet.height);
+  assert.match(text, new RegExp(`tokens="${expectTokens} \\(est@${expectTokens}/img`),
+    `要按实际像素算 token（${sheet.width}x${sheet.height} → ${expectTokens}）`);
   assert.match(text, /ffmpeg="[^"]+"/);
   assert.match(text, /sha256="[0-9a-f]{64}"/);
   assert.match(text, /plan: explicit 4 cells/);
@@ -442,14 +446,24 @@ test('refineCutsByWindow: 快闪窗口被细判，运镜窗口保持粗判', asy
   assert.equal(r.refined[0].from, 0);
 });
 
-test('refineCutsByWindow: 分数不够大时不采纳（宁可少报）', async () => {
+test('refineCutsByWindow: 采纳门槛按"本窗基线"算，不是常数 25', async () => {
   const { refineCutsByWindow } = await import('../src/storyboard/pipeline.js');
-  // 同样密，但每刀只有 20 分 —— 低于 25 的门槛
-  const stats = gapFrames(50, 20, 0);
-  const coarse = [{ t: 0.5, score: 20 }];
-  const r = refineCutsByWindow({ stats, fps: fps25, coarseCuts: coarse, winStart: 0, winDur: 2, winSec: 2 });
-  assert.equal(r.refined.length, 0, '不该采纳');
-  assert.equal(r.cuts.length, 1, '应保留粗判结果');
+  // 同样密，每刀 20 分，但窗内常态只有 3 分 —— 6.7 倍落差就是真剪辑，
+  // 老的常数门槛（25）会把它挡掉，快剪素材于是只能数出一半（实测 5/11）
+  const loud = gapFrames(50, 20, 0);
+  const r1 = refineCutsByWindow({
+    stats: loud, fps: fps25, coarseCuts: [{ t: 0.5, score: 20 }], winStart: 0, winDur: 2, winSec: 2,
+  });
+  assert.equal(r1.refined.length, 1, '基线很低时 20 分就是刀，应当采纳');
+  assert.ok(r1.cuts.length >= 10, `应细判出多刀，实得 ${r1.cuts.length}`);
+
+  // 反过来：窗内常态本身就有 12 分，20 分只是 1.7 倍 —— 分不清是刀还是运动，宁可少报
+  const noisy = Array.from({ length: 50 }, (_, i) => ({ t: i / fps25, score: i % 4 === 3 ? 20 : 12 }));
+  const r2 = refineCutsByWindow({
+    stats: noisy, fps: fps25, coarseCuts: [{ t: 0.5, score: 20 }], winStart: 0, winDur: 2, winSec: 2,
+  });
+  assert.equal(r2.refined.length, 0, '不该采纳');
+  assert.equal(r2.cuts.length, 1, '应保留粗判结果');
 });
 
 /* ---------------------------------------------------------------- 子格摊开 */

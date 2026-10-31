@@ -24,7 +24,7 @@ const near = (a, b, tol = 2) => a.every((v, i) => Math.abs(v - b[i]) <= tol);
 /* ---------------------------------------------------------------- 字形 */
 
 test('DIGITS: 0-9 齐全，且每个都是 7×5 的点阵', () => {
-  assert.equal(Object.keys(DIGITS).length, 10);
+  assert.equal(Object.keys(DIGITS).length, 12, '0-9 加上时间码要用的 : 和 /');
   for (const [d, rows] of Object.entries(DIGITS)) {
     assert.equal(rows.length, DIGIT_H, `${d} 行数`);
     for (const row of rows) assert.equal(row.length, DIGIT_W, `${d} 列数`);
@@ -350,4 +350,34 @@ test('tileSubFrames: k×k 贴回一格，位置正确', () => {
   assert.equal(at(0, cellH - 1), 30);      // 左下
   assert.equal(at(cellW - 1, cellH - 1), 40); // 右下
   assert.equal(out.length, cellW * cellH * 3);
+});
+
+/* ---------------------------------------------------------------- 每张图的抬头 */
+
+test('addSheetHeader: 加一条抬头，图上多出的高度在预算里已经预留', async () => {
+  const { addSheetHeader, clock, headerHeight } = await import('../src/storyboard/sheet.js');
+  assert.equal(clock(0), '0:00');
+  assert.equal(clock(275), '4:35');
+  assert.equal(clock(3725), '1:02:05');
+
+  const cols = 3;
+  const rows = 3;
+  const { width, height, cellW, cellH } = layoutCanvas(cols, rows, 16 / 9);
+  const frames = Array.from({ length: 9 }, () => ({ buffer: Buffer.alloc(cellW * cellH * 3, 90), index: 1 }));
+  const before = composeSheet({ frames, cols, rows, cellAspect: 16 / 9 });
+  const after = addSheetHeader(before, { text: '0:00-4:35 1/3' });
+
+  assert.equal(after.width, before.width);
+  assert.equal(after.height, before.height + after.headerH);
+  assert.equal(after.headerH, headerHeight(before.width));
+  assert.equal(after.buffer.length, after.width * after.height * 3);
+  // 整图（含抬头）仍不超预算 —— layoutCanvas 已经把这条带子的高度扣掉了
+  assert.ok(after.width * after.height <= 640_000, `超预算 ${after.width}x${after.height}`);
+  // 抬头区不是纯背景色：说明真的画上了字
+  let lit = 0;
+  for (let i = 0; i < after.width * after.headerH * 3; i += 3) {
+    if (after.buffer[i] > 150) lit += 1;
+  }
+  assert.ok(lit > 40, `抬头应该有字，实得 ${lit} 个亮像素`);
+  assert.ok(width > 0 && height > 0);
 });

@@ -182,3 +182,13 @@ test('detectOnsets: 空输入不炸', () => {
   assert.deepEqual(detectOnsets({ series: [], step: 0.1 }), []);
   assert.deepEqual(detectOnsets(undefined), []);
 });
+
+/* ---------------------------------------------------------------- 条带要不要画 */
+
+test('hasAudibleSamples: 整段静音 / 没测出响度时返回 false（不画空白条带）', async () => {
+  const { hasAudibleSamples } = await import('../src/storyboard/audio.js');
+  assert.equal(hasAudibleSamples(null), false);
+  assert.equal(hasAudibleSamples({ series: [] }), false);
+  assert.equal(hasAudibleSamples({ series: Array.from({ length: 40 }, () => -120) }), false);
+  assert.equal(hasAudibleSamples({ series: [-120, -80, -71, -69, -60] }), true);
+});

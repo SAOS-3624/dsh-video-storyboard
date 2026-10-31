@@ -62,7 +62,7 @@ export function configuredPort(env = process.env) {
 /**
  * 这个地址像不像"某个视频的页面"？
  *
- * 为什么需要：B 站**首页**上就挂着自动播放的推荐视频，`document.querySelector('video')` 也有值。
+ * 为什么需要：C站**首页**上就挂着自动播放的推荐视频，`document.querySelector('video')` 也有值。
  * 但 `https://www.bilibili.com/` 不是任何一条视频，拿去喂 yt-dlp 只会得到
  * "this site is not supported"。判定要卡在地址上，而不是"页面上有没有 <video>"。
  */
@@ -110,7 +110,7 @@ export async function listTargets({ port = DEFAULT_PORT, timeoutMs = 1200 } = {}
   }
 }
 
-/** 挑一个"正在放视频"的页面：优先 bilibili，其次任何带 video 的页面 */
+/** 挑一个"正在放视频"的页面：优先 C站，其次任何带 video 的页面 */
 export function pickVideoTarget(targets) {
   const pages = (targets ?? []).filter((t) => t.type === 'page' && t.webSocketDebuggerUrl);
   if (pages.length === 0) return null;
@@ -198,7 +198,7 @@ export async function readBrowserPosition({ port = DEFAULT_PORT, timeoutMs = 150
 
   // **挨个问 "你这儿有 video 吗"**，而不是靠 URL 猜。
   // 实测踩过：同一台浏览器开着 7 个页面，靠 URL 打分选中了没有视频的那个，
-  // 于是永远读到 -1 —— 而 B 站页面好好的。URL 只能用来排序，不能用来判断。
+  // 于是永远读到 -1 —— 而 C站页面好好的。URL 只能用来排序，不能用来判断。
   const ordered = [
     ...pages.filter((t) => /bilibili\.com|\/video\//i.test(t.url ?? '')),
     ...pages.filter((t) => !/bilibili\.com|\/video\//i.test(t.url ?? '')),

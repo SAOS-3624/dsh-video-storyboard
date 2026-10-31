@@ -20,7 +20,7 @@ import { delimiter, join } from 'node:path';
 
 export const COOKIES_ENV = 'DSH_VIDEO_COOKIES';
 
-/** 与 DSH 默认一致的浏览器 UA —— B 站 CDN 对空 UA 直接 403 */
+/** 与 DSH 默认一致的浏览器 UA —— C站 CDN 对空 UA 直接 403 */
 export const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -215,7 +215,7 @@ export function explainYtdlpError(stderr, code = 1) {
       '(or "cookies" in ~/.dsh/video.json) — SESSDATA may also have expired. See docs/SETUP.md.';
   }
   if (/HTTP Error 567/i.test(text)) {
-    return 'Bilibili refused this request (HTTP 567) — that is their risk control, not a plugin bug. ' +
+    return 'C站 refused this request (HTTP 567) — that is their risk control, not a plugin bug. ' +
       'It usually means the video needs a signed-in session (1080P+, 会员/付费, or a fresh rate-limit). ' +
       'Fix: export cookies.txt (README "needs a signed-in video" / docs/SETUP.md §3) and point ' +
       'DSH_VIDEO_COOKIES at it, or download the file yourself and pass a local path. ' +
@@ -225,7 +225,7 @@ export function explainYtdlpError(stderr, code = 1) {
     return 'HTTP 412: the site rate-limited this request. Wait a moment and retry.';
   }
   if (/Requested format is not available|No video formats found/i.test(text)) {
-    return 'no usable format matched the selector: Bilibili serves DASH tracks, ' +
+    return 'no usable format matched the selector: C站 serves DASH tracks, ' +
       'use "bv*[height<=N]+ba" rather than "b[height<=N]".';
   }
   if (/Unsupported URL/i.test(text)) {
@@ -249,7 +249,7 @@ export function summariseInfo(info) {
   const video = formats.filter((f) => f && f.vcodec && f.vcodec !== 'none');
   const heights = [...new Set(video.map((f) => Number(f[HEIGHT_KEYS[0]])).filter((h) => Number.isFinite(h) && h > 0))]
     .sort((a, b) => a - b);
-  // 站点自己说了"登录才给"的字段（B 站实测会返回 need_login_subtitle / is_upower_*）。
+  // 站点自己说了"登录才给"的字段（C站实测会返回 need_login_subtitle / is_upower_*）。
   // 这些不是"没有"，是"不登录不给" —— 必须区分开，否则清单会把"要登录"说成"这视频没有"。
   const loginGates = [];
   if (info?.need_login_subtitle === true) loginGates.push('subtitle');
@@ -275,12 +275,12 @@ export function unwrapSingle(info, url) {
   return entries[0];
 }
 
-/** 选出"能覆盖到 h 的最省参数"的格式串。B 站是 DASH，所以必须是 bv*+ba。 */
+/** 选出"能覆盖到 h 的最省参数"的格式串。C站是 DASH，所以必须是 bv*+ba。 */
 export function formatSelector(height, { withAudio = true } = {}) {
   const cap = Number.isFinite(height) && height > 0 ? `[height<=${Math.round(height)}]` : '';
-  // **优先渐进式单文件**（B 站的 `b`）：一个文件、不用合流，比 `bv*+ba` 快得多，也省一次落盘。
+  // **优先渐进式单文件**（C站的 `b`）：一个文件、不用合流，比 `bv*+ba` 快得多，也省一次落盘。
   // 渐进式最高一般只到 720p，但扫描只用 360p，够；拿不到再退回 DASH。
-  // B 站有些版本会把 video-only 的 mp4 也塞进 `b`，所以要求它必须带音轨；
+  // C站有些版本会把 video-only 的 mp4 也塞进 `b`，所以要求它必须带音轨；
   // 拿不到就落到 `bv*+ba`（需要 ffmpeg 合流，fetchMedia 会把 DSH 的 ffmpeg 位置传给 yt-dlp）。
   // 末尾的 /b 是给真正没有音轨的素材留的：bv*+ba 选不到音频时会失败，
   // 不能因为"要求音轨"连一个无声视频都下不下来。

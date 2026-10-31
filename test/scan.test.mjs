@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  assessDegraded, autoThreshold, decideCuts, DEFAULT_THRESHOLD, frameToHsv, quantile, rgbToHsv,
+  assessDegraded, autoThreshold, barFraction, cutBudget, cutsFromEvents, decideCuts,
+  DEFAULT_THRESHOLD, detectGradual, frameToHsv, normalizeScores, quantile, rgbToHsv,
   scanSummary, scorePair, spikeCuts,
   suppressClose, SCAN_W,
 } from '../src/storyboard/scan.js';
@@ -196,10 +197,34 @@ test('quantile: 取低分位用于"这片就是很快"的阈值', () => {
 test('decideCuts: 同一份逐帧分数可以用不同间隔重判（细判不需要重读视频）', () => {
   // 每两帧一刀（25fps 下 0.04s 一个镜头），分数 70，「不动」的帧是 5
   const stats = Array.from({ length: 50 }, (_, i) => ({ t: i / 25, score: i % 2 ? 70 : 5 }));
-  const coarse = decideCuts(stats, { threshold: 'auto-low', minGap: 0.35, duration: 2 });
-  const fine = decideCuts(stats, { threshold: 'auto-low', minGap: 1.02 / 25, duration: 2 });
+  // 关掉自适应半径：这条测的是 minGap 这个旋钮本身有没有用
+  const coarse = decideCuts(stats, { threshold: 'auto-low', minGap: 0.35, duration: 2, adaptiveGap: false });
+  const fine = decideCuts(stats, { threshold: 'auto-low', minGap: 1.02 / 25, duration: 2, adaptiveGap: false });
   assert.ok(coarse.cuts.length <= 5, `粗间隔应该把密刀并掉，实得 ${coarse.cuts.length}`);
   assert.ok(fine.cuts.length >= 20, `一帧间隔应数出几乎每一刀，实得 ${fine.cuts.length}`);
+});
+
+test('decideCuts: 自适应半径 —— 0.32s 的快剪不再被"隔一刀留一刀"', () => {
+  // 复刻实测：12 镜 / 每镜 8 帧 / 25fps，切点处 20 分，镜头内 3 分
+  const stats = [];
+  for (let i = 0; i < 96; i++) stats.push({ t: i / 25, score: i % 8 === 0 && i > 0 ? 20 : 3 });
+  const auto = decideCuts(stats, { threshold: 12, minGap: 0.35, duration: 3.84 });
+  const fixed = decideCuts(stats, { threshold: 12, minGap: 0.35, duration: 3.84, adaptiveGap: false });
+  assert.ok(fixed.cuts.length <= 6, `固定半径下本来就只能数出一半，实得 ${fixed.cuts.length}`);
+  assert.ok(auto.cuts.length >= 11, `自适应半径应该把 11 刀全数出来，实得 ${auto.cuts.length}`);
+  // 位置也要对：不能只多报，还得报在真切点上
+  const drift = auto.cuts.filter((c) => Math.abs(c.t * 25 % 8) > 1.5 && Math.abs((c.t * 25) % 8) < 6.5);
+  assert.equal(drift.length, 0, `不该有偏离切点的刀：${drift.map((c) => c.t.toFixed(2)).join(',')}`);
+});
+
+test('decideCuts: 一帧之内的两帧同属一刀（不能算成两个切点）', () => {
+  // 硬切常常横跨两帧：第 40、41 帧都在阈值之上
+  const stats = Array.from({ length: 100 }, (_, i) => ({
+    t: i / 25, score: i === 40 || i === 41 ? 60 : 2,
+  }));
+  const r = decideCuts(stats, { threshold: 12, minGap: 0.35, duration: 4 });
+  assert.equal(r.cuts.length, 1, `同一刀横跨两帧应只报一个，实得 ${r.cuts.length}`);
+  assert.equal(r.cuts[0].score, 60);
 });
 
 test('decideCuts: auto-low 用本段自己的低分位，不会被全片平均带偏', () => {
@@ -230,4 +255,122 @@ test('spikeCuts: 运镜里插一刀仍然能挑出来', () => {
   const cuts = spikeCuts(stats, { k: 3, minAbs: 6 });
   assert.equal(cuts.length, 1);
   assert.equal(cuts[0].t, 40 / 12);
+});
+
+/* ---------------------------------------------------------------- 分数归一（暗场 / 黑边） */
+
+test('normalizeScores: 亮画面一个字节都不动（老口径、老阈值全保留）', () => {
+  const stats = [{ t: 1, score: 25 }, { t: 2, score: 12.2 }];
+  const means = [0, 200, 224];        // stats[i] 对应 means[i+1]
+  assert.deepEqual(normalizeScores(stats, means), stats);
+});
+
+test('normalizeScores: 暗场按 3 倍放大（上限），一次真剪辑才够得着门槛 12', () => {
+  // 实测暗场：V 均值 42、每刀 3.9–5.6 分 —— 常数门槛 12 全漏
+  const stats = [{ t: 1, score: 5 }, { t: 2, score: 5.6 }];
+  const out = normalizeScores(stats, [0, 42, 42]);
+  assert.ok(out[0].score > 12, `5 分 ×3 应该过门槛，实得 ${out[0].score}`);
+  assert.equal(out[0].gain, 3, '增益封顶 3 倍，不能无限放大噪声');
+  assert.equal(out[1].score, 16.800000000000004 > 0 ? out[1].score : 0);
+});
+
+test('normalizeScores: 黑边按占比除回来（2.39:1 遮幅 ≈ 25%）', () => {
+  // 黑边上的差恒为 0，等于把真变化按 0.744 打折
+  const out = normalizeScores([{ t: 1, score: 11.8 }], [0, 169], { barFrac: 0.256 });
+  assert.ok(Math.abs(out[0].score - 11.8 / 0.744) < 0.01, `实得 ${out[0].score}`);
+});
+
+test('normalizeScores: 没有亮度序列时保持原样（不猜）', () => {
+  const stats = [{ t: 1, score: 5 }];
+  assert.deepEqual(normalizeScores(stats, undefined), stats);
+});
+
+test('barFraction: 上下各 12% 黑边 → 0.24', () => {
+  const h = 36;
+  const rowV = Array.from({ length: h }, (_, y) => (y < 4 || y >= 32 ? 0 : 200));
+  const rowVMax = Array.from({ length: h }, (_, y) => (y < 4 || y >= 32 ? 0 : 240));
+  assert.equal(barFraction({ rowV, rowVMax, frames: 100 }), +(8 / h).toFixed(3));
+});
+
+test('barFraction: 片头黑场不算黑边（后来亮了）', () => {
+  // fadeclips：前 2 秒全黑，但同一窗里后来亮了 → 累计均值和峰值都会上去
+  const rowV = Array.from({ length: 36 }, () => 120);
+  const rowVMax = Array.from({ length: 36 }, () => 244);
+  assert.equal(barFraction({ rowV, rowVMax, frames: 200 }), 0);
+});
+
+test('barFraction: 整段全黑（片尾黑场）不做补偿', () => {
+  const rowV = Array.from({ length: 36 }, () => 0);
+  const rowVMax = Array.from({ length: 36 }, () => 2);
+  assert.equal(barFraction({ rowV, rowVMax, frames: 200 }), 0);
+});
+
+/* ---------------------------------------------------------------- 事件聚类 / 自适应半径 */
+
+test('cutsFromEvents: 同一刀横跨两帧只算一次', () => {
+  const above = [{ t: 1.60, score: 40 }, { t: 1.64, score: 55 }, { t: 3.00, score: 30 }];
+  const cuts = cutsFromEvents(above, 0.04, { minGap: 0.35 });
+  assert.deepEqual(cuts.map((c) => c.t), [1.64, 3.0]);
+  assert.equal(cuts[0].score, 55);
+});
+
+test('cutsFromEvents: 0.32s 的快剪不会被成对合并', () => {
+  // 实测 12 镜 0.32s：固定 0.35 窗口只数出 5 刀（隔一刀留一刀）
+  const above = Array.from({ length: 11 }, (_, i) => ({ t: 0.32 * (i + 1), score: 20 }));
+  const adaptive = cutsFromEvents(above, 0.04, { minGap: 0.35 });
+  const fixed = cutsFromEvents(above, 0.04, { minGap: 0.35, adaptive: false });
+  assert.equal(adaptive.length, 11);
+  assert.ok(fixed.length <= 6, `固定半径本来就只能数出一半，实得 ${fixed.length}`);
+});
+
+test('cutsFromEvents: 正常间隔时 minGap 照旧生效', () => {
+  const above = [{ t: 1.0, score: 40 }, { t: 1.2, score: 50 }, { t: 4.0, score: 30 }, { t: 4.15, score: 20 }];
+  assert.deepEqual(cutsFromEvents(above, 0.04, { minGap: 0.35 }).map((c) => c.t), [1.2, 4.0]);
+});
+
+/* ---------------------------------------------------------------- 渐变转场 */
+
+const lin = (from, to, step, fn) => {
+  const out = [];
+  for (let t = from; t <= to + 1e-9; t += step) out.push({ t: +t.toFixed(3), score: fn(t) });
+  return out;
+};
+
+test('detectGradual: 1s 叠化（长时差高、帧差低、前后安静）被找到，位置在转场中心', () => {
+  const frame = lin(0, 9, 0.04, (t) => (t > 2 && t < 3 ? 4 : 2));
+  const long = lin(0, 9, 0.04, (t) => (t > 2.1 && t < 3.5 ? 22 : 4));
+  const g = detectGradual(long, frame, { threshold: 12, lagSec: 0.4 });
+  assert.equal(g.length, 1);
+  assert.ok(Math.abs(g[0].t - 2.5) < 0.25, `转场中心应在 2.5 附近，实得 ${g[0].t}`);
+  assert.equal(g[0].kind, 'gradual');
+});
+
+test('detectGradual: 匀速运镜（前后同样吵）不报', () => {
+  const frame = lin(0, 9, 0.04, (t) => (t > 1 && t < 8 ? 12 : 3));
+  const long = lin(0, 9, 0.04, (t) => (t > 1 && t < 8 ? 22 : 4));
+  assert.equal(detectGradual(long, frame, { threshold: 12, lagSec: 0.4 }).length, 0);
+});
+
+test('detectGradual: 已经报过的硬切不重复', () => {
+  const frame = lin(0, 9, 0.04, () => 2);
+  const long = lin(0, 9, 0.04, (t) => (t > 2.0 && t < 2.4 ? 25 : 3));
+  assert.equal(detectGradual(long, frame, { threshold: 12, lagSec: 0.4, cuts: [2.0] }).length, 0);
+});
+
+test('detectGradual: 单帧尖峰（某一帧抖了一下）不算过渡', () => {
+  const frame = lin(0, 9, 0.04, () => 2);
+  const long = lin(0, 9, 0.04, (t) => (Math.abs(t - 3) < 0.02 ? 30 : 3));
+  assert.equal(detectGradual(long, frame, { threshold: 12, lagSec: 0.4 }).length, 0);
+});
+
+/* ---------------------------------------------------------------- 速率预算 */
+
+test('cutBudget: 目标数与间隔', () => {
+  const scores = Array.from({ length: 1000 }, () => 5);
+  const b = cutBudget(scores, { duration: 300 });
+  assert.equal(b.gap, 1.5);
+  assert.equal(b.target, 200);
+  assert.equal(b.total, 300);
+  // 短片收紧粒度：5s 的片子不该只给 3 个名额
+  assert.equal(cutBudget(scores, { duration: 5 }).gap, 0.5);
 });

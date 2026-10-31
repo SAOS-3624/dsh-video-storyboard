@@ -23,7 +23,7 @@ export const BADGE_FG = [255, 235, 59];
 export const GUTTER = 4;
 export const BADGE_ALPHA = 0.85;
 
-/** 5×7 点阵，只有 0-9。scale 必须是整数，保证放大后边缘锐利。 */
+/** 5×7 点阵，只有 0-9 与时间码要用的 `:` `/`。scale 必须是整数，保证放大后边缘锐利。 */
 export const DIGITS = {
   0: ['01110', '10001', '10001', '10001', '10001', '10001', '01110'],
   1: ['00100', '01100', '00100', '00100', '00100', '00100', '01110'],
@@ -35,10 +35,20 @@ export const DIGITS = {
   7: ['11111', '00001', '00010', '00100', '01000', '01000', '01000'],
   8: ['01110', '10001', '10001', '01110', '10001', '10001', '01110'],
   9: ['01110', '10001', '10001', '01111', '00001', '00010', '01100'],
+  ':': ['00000', '00100', '00100', '00000', '00100', '00100', '00000'],
+  '/': ['00001', '00010', '00010', '00100', '01000', '01000', '10000'],
 };
 
 export const DIGIT_W = 5;
 export const DIGIT_H = 7;
+
+/**
+ * 顶部时间抬头的高度（像素）。只跟图宽有关 —— 字号是点阵整数倍，宽了就该更高一点。
+ * `layoutCanvas` 会按同一个公式**预留**这条带子，`addSheetHeader` 按实际宽度画。
+ */
+export function headerHeight(width) {
+  return Math.max(18, Math.round(width * 0.024));
+}
 
 /**
  * 画布尺寸：整图面积 <= budget，格宽高按剩余空间均分。
@@ -48,8 +58,12 @@ export function layoutCanvas(cols, rows, cellAspect, budget = 640_000, gutter = 
   const aspect = (cols * cellAspect) / rows;
   const gw = Math.sqrt(budget * aspect);
   const gh = gw / aspect;
-  const cellW = Math.max(1, Math.floor((gw - gutter * (cols + 1)) / cols));
-  const cellH = Math.max(1, Math.floor((gh - gutter * (rows + 1)) / rows));
+  // 每张图顶部有一条时间抬头（见 addSheetHeader）。它的高度必须**先扣掉**，
+  // 否则"整图面积 <= budget"就成了假话（3×3 实测会超 3%）。
+  // 扣完之后用**格高反推格宽**，比例才不会被这条带子拉偏（1×1 会从 1.78 变成 1.84）。
+  const band = Math.ceil(headerHeight(gw));
+  const cellH = Math.max(1, Math.floor((Math.max(rows, gh - band) - gutter * (rows + 1)) / rows));
+  const cellW = Math.max(1, Math.floor(cellH * cellAspect));
   return {
     width: cols * cellW + gutter * (cols + 1),
     height: rows * cellH + gutter * (rows + 1),
@@ -59,7 +73,6 @@ export function layoutCanvas(cols, rows, cellAspect, budget = 640_000, gutter = 
 }
 
 const clamp255 = (v) => (v < 0 ? 0 : v > 255 ? 255 : v | 0);
-
 /** 在 RGB 画布上填一块矩形（支持 alpha 混合） */
 export function fillRect(buf, width, height, x, y, w, h, color, alpha = 1) {
   const [r, g, b] = color;
@@ -82,10 +95,11 @@ export function fillRect(buf, width, height, x, y, w, h, color, alpha = 1) {
   }
 }
 
-/** 用点阵字形画一个字符串（只支持 0-9 与 "-"），返回实际占用尺寸 */
+/** 用点阵字形画一个字符串（0-9 与 `-` `:` `/`，空格只走位），返回实际占用尺寸 */
 export function drawGlyphs(buf, width, height, text, x, y, scale, color) {
   let cursor = x;
   for (const ch of String(text)) {
+    if (ch === ' ') { cursor += (DIGIT_W + 1) * scale; continue; }
     if (ch === '-') {
       fillRect(buf, width, height, cursor, y + Math.floor(DIGIT_H * scale * 0.6),
         DIGIT_W * scale, Math.max(1, scale), color);
@@ -322,7 +336,8 @@ export function addAudioStrip(sheet, opts) {
     out[i] = STRIP_SEP[0]; out[i + 1] = STRIP_SEP[1]; out[i + 2] = STRIP_SEP[2];
   }
 
-  return { buffer: out, width, height: height + stripH, stripH };
+  // headerH 要跟着带下去：调用方靠它写进 sheet 元信息（丢了就只剩图上一个说不清的带子）
+  return { buffer: out, width, height: height + stripH, stripH, ...(sheet.headerH ? { headerH: sheet.headerH } : {}) };
 }
 
 /* ---------------------------------------------------------------- 锐度 */
@@ -504,4 +519,55 @@ export async function encodeRaw(buffer, width, height, out, opts = {}) {
   args.push(out);
   await exec(args, { input: buffer, timeoutMs });
   return out;
+}
+
+/* ---------------------------------------------------------------- 每张图的抬头 */
+
+export const HEADER_BG = [24, 24, 28];
+export const HEADER_FG = [228, 228, 232];
+export const HEADER_SEP = [58, 58, 64];
+
+/**
+ * 秒 → `m:ss` / `h:mm:ss`（点阵只能画数字和 `:`，不做补零的歧义写法）。
+ * 只在画布上用；文本清单里的时间码仍然保留 0.01 秒精度。
+ */
+export function clock(sec) {
+  const total = Math.max(0, Math.round(Number(sec) || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = String(total % 60).padStart(2, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
+/**
+ * 在图片顶部加一条抬头（`0:00-5:00 1/3`）。
+ *
+ * 为什么需要：出多张图时，模型很容易把几张串成一条连续时间轴（圆圈不卷反馈）。
+ * 格子里烧的只有序号，序号是全局递增的，反而更像"一张长图的第 12 格"。
+ * 抬头把"这张覆盖哪一段、一共几张"直接写在图上 —— 用的是同一套点阵字形，不引入字体文件。
+ *
+ * @param {{buffer:Buffer,width:number,height:number}} sheet
+ * @param {{text:string, height?:number}} opts
+ * @returns {{buffer:Buffer,width:number,height:number,headerH:number}}
+ */
+export function addSheetHeader(sheet, { text = '', height } = {}) {
+  const { buffer, width, height: h0 } = sheet;
+  if (!text) return { ...sheet, headerH: 0 };
+  const bandH = height ?? headerHeight(width);
+  const out = Buffer.alloc(width * (h0 + bandH) * 3, 0);
+  for (let i = 0; i < width * bandH; i++) {
+    out[i * 3] = HEADER_BG[0];
+    out[i * 3 + 1] = HEADER_BG[1];
+    out[i * 3 + 2] = HEADER_BG[2];
+  }
+  buffer.copy(out, width * bandH * 3);
+  // 与宫格之间的分隔线
+  for (let x = 0; x < width; x++) {
+    const i = ((bandH - 1) * width + x) * 3;
+    out[i] = HEADER_SEP[0]; out[i + 1] = HEADER_SEP[1]; out[i + 2] = HEADER_SEP[2];
+  }
+  const scale = Math.max(1, Math.floor((bandH - 4) / DIGIT_H));
+  const y = Math.max(1, Math.floor((bandH - DIGIT_H * scale) / 2));
+  drawGlyphs(out, width, h0 + bandH, text, Math.round(width * 0.012), y, scale, HEADER_FG);
+  return { buffer: out, width, height: h0 + bandH, headerH: bandH };
 }

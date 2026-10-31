@@ -1,8 +1,49 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.5] - 2026-10-31
+
+三条线并进：**切点判据换了口径**（暗场/遮幅/叠化/快剪不再系统性漏）、**排布决策收敛到
+`planLayout()`**、以及一批"静默失效"的修复（台词没了、条带空着、几张图被读成一条时间轴）——
+最后这一类每一件都不报错，全靠用户的截图才发现。
 
 ### Fixed
+
+- **分离的视频/音频流现在由插件自己合流，不再依赖 yt-dlp 找到 ffmpeg**（#43 的真正根因）。
+  yt-dlp 找不到 ffmpeg 时只打一行 warning 就**静默降级成只下视频**（退出码仍是 0），
+  于是 26.5MB 的 `video.<id>.mp4` 只有画面、`video.f30280.m4a` 孤零零躺在旁边 ——
+  清单却说"这条片子没声音"。现在：下载后发现成品没音轨、旁边有音轨文件，就用**自己的 ffmpeg**
+  `-c copy` 合回来（几秒钟、不重编码），并把 `audioMerged` 写进清单；合不上才报错。
+  另外去掉 `--no-warnings`（那行 warning 是唯一的现场证据），缺音时把 yt-dlp 的原话带进清单。
+
+- **清单永远写明音轨在不在**：`<storyboard … audio="present|absent">`。
+  以前 `transcript="no-key"` 很容易被读成"这视频没声音"，而它只表示"没配 key、根本没听"。
+
+- **没有可画的响度时不画音频条带**。整段静音（或响度没测出来）时那条 20–70px 的带子是一块空白，
+  白占画布 —— 现在跳过，并在 trace 里写 `strip:skipped`。判据是响度不是台词：
+  没配 ASR 但有对白的片子，波形照样有用（`audio.js` 的 `hasAudibleSamples`）。
+
+- **每张图顶部加一条时间抬头**（`0:00-4:35 1/3`）。多张图时模型很容易把它们串成一条时间轴 ——
+  格子里只有全局递增的序号，反而更像"一张长图的第 12 格"。抬头用同一套点阵字形（不引入字体文件），
+  高度在 `layoutCanvas` 里**预先扣掉**，所以"整图面积 <= budget"仍然成立。
+
+- 文案：项目里对第三方站点的称呼统一为 **C站**（README/文档/清单/注释）。
+  代码里保留 `bilibili.com` 只出现在"识别链接 / 调用站点接口 / cookie 域"这些**功能位置**。
+
+### Changed
+
+- **切点判据换了口径**（暗场 / 遮幅 / 叠化 / 快剪不再系统性漏）。`scorePair` 的输出没变，
+  改的是判定前后两件事：扫描结束时按亮度归一（`gain = clamp(160/V均值, 1, 3)`）并按黑边占比补回
+  （`/ (1-黑边占比)`）；抑制从"固定 0.35s 窗口"改成"先把连续帧聚成一刀，再按内容定半径"。
+  新增 0.4s 长时差曲线做渐变转场（叠化/淡入淡出）。合成素材实测：暗场 0/7 → 7/7、
+  2.39:1 遮幅 7/9 → 9/9、1s 叠化 0/3 → 3/3、0.32s 快剪 5/11 → 9/11（细扫 11/11），
+  硬切与甩镜不变。代价是扫描 +7%。`CACHE_VERSION` 升到 6，旧缓存自动失效。
+
+- **排布决策收敛到 `layout.planLayout()`**（`layout.js`，纯算术、零 IO、7 条不变量单测）。
+  切格 / 放格 / 选格三层原来散在 pipeline 里，现在 pipeline 只剩编排与 IO（987 行）。
+  行为变化集中在"张数由帧数决定"（不再是贪心切）与黑场单独占格。
+
+- `refineCutsByWindow` 的采纳门槛从常数 25 改成"相对本窗基线"（`max(6, min(25, 3×窗内中位分))`）——
+  暗场快剪的刀均分只有 19.3，而窗内常态 4.1，旧的常数门槛把细判结果全拒了。
 
 - **`bin/asr-check.mjs` 不认「本机地址免 key」，也不拉起 `manage.start` 的托管服务**（#41）。
   它自己拿 `ASR_DEFAULTS.fileKey || process.env[keyEnv]` 判"能不能转写"，而工具走的是
@@ -394,7 +435,7 @@ stream, the `video_watch → watch_together` rename — moved with the feature a
 - **`spikeCuts` local-window median used the wrong indices** when `lo > 0`
   (`slice(i - lo + 1, hi - lo)` indexes the whole array, not the neighbours), so a real cut could be
   dropped.
-- **Bilibili DASH audio (PR #19, issue #18).** `formatSelector` now requires `[acodec!=none]` on the
+- **C站 DASH audio (PR #19, issue #18).** `formatSelector` now requires `[acodec!=none]` on the
   progressive branch, and `fetchMedia` hands yt-dlp our ffmpeg so video+audio actually merge. The
   manifest now separates "unmerged-dash" from "silent source" — cookies do not fix the former.
 - **`paused` false positives.** It was read straight from the DOM, and reported paused while the video
@@ -600,7 +641,7 @@ stream, the `video_watch → watch_together` rename — moved with the feature a
   `on-screen subs: spot-checked 16 lines, corrected 1: …` — anything that could be read as "the whole
   transcript was checked" is wrong, and a test asserts it.
 
-- **URL sources say the correction ran on the low-res copy.** With a Bilibili link the OCR runs against the
+- **URL sources say the correction ran on the low-res copy.** With a C站 link the OCR runs against the
   downloaded 360p scan, where hardcoded subtitles are already blurry and `scale=1280` invents no detail. The
   line now carries `[from the 360p scan copy]` instead of implying source-quality evidence.
 
@@ -679,7 +720,7 @@ got newer — `paraformer-zh-2024-03-09` fixes homophones that previously needed
   review (像差 焦段 光圈) was still being applied to a materials-science lecture. `video_storyboard` now takes
   a per-call `hotwords` that overrides `asr.json`, the cache key includes it, and the README says plainly that
   the global list is a default, not a policy.
-- **A login-gated video was read anyway, and the result was presented as if complete.** When Bilibili hides
+- **A login-gated video was read anyway, and the result was presented as if complete.** When C站 hides
   the subtitle list from anonymous requests (`need_login_subtitle: true`), the pipeline used to report
   "no subtitle" and move on — so the model ended up reading burned-in text off the pixels and calling it a
   transcript.
@@ -710,14 +751,14 @@ got newer — `paraformer-zh-2024-03-09` fixes homophones that previously needed
   without cookies:   [1080, 720, 480, 360]
   ```
 
-  An expired or low-privilege `SESSDATA` makes Bilibili hand back a *shorter* format list — the plugin then
+  An expired or low-privilege `SESSDATA` makes C站 hand back a *shorter* format list — the plugin then
   believed it and reported "no 1080p source", which was true of the request and false about the video.
 
   Both the probe and the download path now go through one `probeSummary()`: when cookies are configured and
   the result caps at ≤720p, it probes once more anonymously and keeps whichever list is taller, recording
   why (`cookies 只允许 480p，匿名反而能拿到 1080p —— SESSDATA 可能过期…`). Verified: that URL now reports
   max 1080, `zoomTarget` 1080 and a 1080p direct link.
-- **Bilibili's HTTP 567 now says what it is and tries once more.** 567 is their risk control, not a format
+- **C站's HTTP 567 now says what it is and tries once more.** 567 is their risk control, not a format
   problem — most often a video that needs a signed-in session (1080P+, 会员/付费) or a rate-limit. Before, the
   message was yt-dlp's raw text, which reads like a plugin bug.
 
@@ -726,7 +767,7 @@ got newer — `paraformer-zh-2024-03-09` fixes homophones that previously needed
   section there: when it is needed, the three steps with Cookie-Editor, both config paths, the local-file
   alternative, and the reminder that `SESSDATA` is a login credential.
 
-  Now: one automatic retry with a browser User-Agent, `Referer: https://www.bilibili.com/`, and
+  Now: one automatic retry with a browser User-Agent, a `Referer` set to the page origin, and
   `--sleep-requests 1` (the retry only fires on 567/412, never on permanent errors); if it still fails, the
   error names both ways out — a cookies.txt, or download the file and pass a local path. `--retries 3
   --fragment-retries 5` also went into the base args, since CDN hiccups are routine.
@@ -734,7 +775,7 @@ got newer — `paraformer-zh-2024-03-09` fixes homophones that previously needed
   media directory was removed (`rm -rf`) whenever yt-dlp exited non-zero — including the `.part` file that is
   the whole point of resuming. Reported as "下到一半直接清零重新开始，而且下得更慢". Now the directory is
   kept and `--continue` is explicit; stale parts are pruned by age instead.
-- **Progressive streams were never tried, so every Bilibili download was a DASH pair plus a merge.** The
+- **Progressive streams were never tried, so every C站 download was a DASH pair plus a merge.** The
   selector jumped straight to `bv*+ba`. It now tries `b[height<=N]` (one file, no merge) first and falls back
   to DASH — the scan copy only needs 360p, and a single stream is both faster and less to write.
 - **A slide deck that "looks the same on every page" produced no cuts at all.** With an absolute threshold,
@@ -841,7 +882,7 @@ Same story as 0.4.0, one level down: a broken thing that was invisible because i
 
 ### Fixed
 
-- **A downloaded copy with no audio track said "no audio in the source".** On an anonymous Bilibili URL the
+- **A downloaded copy with no audio track said "no audio in the source".** On an anonymous C站 URL the
   lowest track is video-only, so the whole audio path went silent — `transcript=no-audio`, empty envelope,
   `meanLufs=null` — and the manifest implied the video itself had no sound. It now probes the downloaded file,
   compares it with the formats the source advertised, and says which of the two it is:
@@ -885,7 +926,7 @@ The release where fast cuts finally count. Three things were true before this ve
    entirely below that line, so every count on a fast-cut film was a floor, not a count.
 2. **A cell covering a montage showed exactly one frame.** The number "22 shots" was in the text and
    nowhere in the picture.
-3. **Vertical video could not be downloaded.** Every portrait URL from Bilibili died on the format selector.
+3. **Vertical video could not be downloaded.** Every portrait URL from C站 died on the format selector.
 
 Measured across ten content types (slide recording, surveillance, 2D animation, 3D short, studio news,
 handheld vlog, mobile-game ad, anime mashup, concept PV, 51-minute documentary), the per-second cut count
@@ -894,7 +935,7 @@ went from a suspiciously uniform 0.22–0.27 to the range the content actually h
 
 ### Fixed
 
-- **Vertical Bilibili videos could not be downloaded at all.** yt-dlp reports a 9:16 video's formats as
+- **Vertical C站 videos could not be downloaded at all.** yt-dlp reports a 9:16 video's formats as
   360x640 / 480x852 / 720x1280, so `height` is the *long* edge and `bv*[height<=480]+ba/b[height<=480]`
   matched nothing: every request ended in `Requested format is not available`. The selector now ends with an
   unfiltered fallback (`.../bv*+ba/b`) and sorts by `res:` (yt-dlp's short-edge metric), so a portrait video
@@ -1019,7 +1060,7 @@ The JSON manifest (CLI `--manifest`) carries the same `provenance` and full `pla
 
 ## [0.3.0] — 2026-10-28
 
-**A URL is now a valid input.** Paste a Bilibili link (or anything yt-dlp supports) instead of a local
+**A URL is now a valid input.** Paste a C站 link (or anything yt-dlp supports) instead of a local
 path. Two decisions make this different from "download the video, then analyse it".
 
 ### Two-tier fetching
@@ -1033,7 +1074,7 @@ the right to jump around. Pure streaming would have been ~3.5x slower end to end
 
 ### `transcriptFile` — skip ASR when the source already has captions
 
-Accepts SRT, a plain `[{start,end,text}]` array, or Bilibili's `{body:[{from,to,content}]}`, detected
+Accepts SRT, a plain `[{start,end,text}]` array, or C站's `{body:[{from,to,content}]}`, detected
 automatically. On a 90 s clip this took a run from 16.9 s to **5.1 s**. It also works on files with no
 audio track, where the old logic fell through to `no-audio`.
 

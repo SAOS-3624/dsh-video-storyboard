@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import { assertFetchableUrl, isHttpUrl, normalizeUrl } from '../src/storyboard/u
 import { discoverYtdlp, explainYtdlpError, formatSelector, loadVideoConfig, resolveAuth, summariseInfo, unwrapSingle } from '../src/storyboard/ytdlp.js';
 import { audioEvidence, fetchMedia } from '../src/storyboard/fetch.js';
 import { mediaKey, pruneMedia } from '../src/storyboard/media-store.js';
+import { DEFAULT_FFMPEG, probeVideo } from '../src/storyboard/probe.js';
 import { pickVideoFormat, resolveDirectUrl, __clearDirectCache } from '../src/storyboard/direct-url.js';
 
 /* ---------------------------------------------------------------- 链接判别 */
@@ -51,7 +53,7 @@ test('mediaKey: 清晰度不同 → 键不同', () => {
 
 /* ---------------------------------------------------------------- 格式选择 */
 
-test('formatSelector: B 站是 DASH，必须 bv*+ba 而不是 b', () => {
+test('formatSelector: C站是 DASH，必须 bv*+ba 而不是 b', () => {
   // 渐进式单文件优先（快、不用合流），拿不到再退 DASH
   assert.equal(formatSelector(360), 'b[height<=360][acodec!=none]/bv*[height<=360]+ba/b[height<=360][acodec!=none]/bv*+ba/b');
   assert.equal(formatSelector(1080, { withAudio: false }), 'b[height<=1080]/bv*[height<=1080]/bv*/b');
@@ -491,7 +493,7 @@ test('pickVideoFormat: 竖屏按短边选，不会被 height 卡掉 1080x1920', 
   assert.equal(pickVideoFormat(formats, 480).width, 480);
 });
 
-test('explainYtdlpError: 567 要说清是 B 站风控，并给出两条出路', () => {
+test('explainYtdlpError: 567 要说清是 C站风控，并给出两条出路', () => {
   const msg = explainYtdlpError('ERROR: unable to download video data: HTTP Error 567: ');
   assert.match(msg, /risk control/, '必须说清这不是插件的锅');
   assert.match(msg, /cookies/i, '给 cookies 这条路');
@@ -567,6 +569,41 @@ test('fetchMedia: 命中老缓存也要认出"音轨没合进去"（#43 的现�
     assert.equal(r.source.cached, true, '文件在，应该走命中');
     assert.equal(r.source.audioMissing, true, '不能因为 meta 里没写就报成"这片子没声音"');
     assert.equal(r.source.audioMissingReason, 'unmerged-dash');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+/* ---------------------------------------------------------------- 自己合流补音轨（#43 根因） */
+
+const hasFfmpeg = (() => {
+  try { execFileSync(DEFAULT_FFMPEG, ['-version'], { stdio: 'ignore' }); return true; } catch { return false; }
+})();
+
+test('fetchMedia: yt-dlp 只留了视频轨时，用旁边的 m4a 自己合流补回来', { skip: !hasFfmpeg }, async () => {
+  const h = await makeHarness();
+  try {
+    const url = 'https://www.bilibili.com/video/BV1split';
+    const dir = join(h.media, mediaKey(normalizeUrl(url), 360));
+    await mkdir(dir, { recursive: true });
+    // 真的造一对"分离的 DASH 流"：一条纯画面的 mp4 + 一条纯音频的 m4a
+    execFileSync(DEFAULT_FFMPEG, ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=64x36:r=10:d=1',
+      '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, 'video.mp4')]);
+    execFileSync(DEFAULT_FFMPEG, ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+      '-c:a', 'aac', join(dir, 'video.f30280.m4a')]);
+    await writeFile(join(dir, 'meta.json'), JSON.stringify({
+      kind: 'url', url, bytes: 1, scanHeight: 360, maxAvailable: 1080,
+      availableHeights: [360], zoomTarget: 360, title: 'split', duration: 1, auth: 'cookies', cached: false,
+    }), 'utf8');
+
+    const r = await fetchMedia(url, { ytdlp: h.ytdlp, env: h.env, cookies: h.cookies });
+    assert.equal(r.source.cached, true);
+    assert.equal(r.source.audioMerged, true, '应该自己合流补回来，而不是报"这片子没声音"');
+    assert.equal(r.source.audioMissing, undefined);
+    const after = await probeVideo(r.path);
+    assert.equal(after.hasAudio, true, '补完之后成品必须有音轨');
+    // 合完把变成孤儿的音轨文件清掉，避免下次又"看到 m4a 就以为没合上"
+    assert.equal((await readdir(dir)).includes('video.f30280.m4a'), false);
   } finally {
     await h.cleanup();
   }

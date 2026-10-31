@@ -148,7 +148,7 @@ test('suggest: 格数由「切点总数」决定（密度积分的总量）', ()
   assert.equal(suggest(meta(1500, 90)).sheets, 1, '91 镜 → 11 格 → 1 张（镜头少就是慢片）');
 });
 
-test('suggest: 真实素材回归（B站 299s / 88 cuts → 总格数够覆盖）', () => {
+test('suggest: 真实素材回归（C站 299s / 88 cuts → 总格数够覆盖）', () => {
   // 实测：这条片子 9 格（33s/格）大量重复草地镜头，要 16 格（19s/格）才覆盖到产品/人物/采访。
   // 现在总格数 = 时长 ÷ 每格秒数，再折成张数（20 格 → 9 格 × 2 张 = 18）。
   // 所以断言改成"总格数"，不再死磕"必须 1 张 16 格"。
@@ -436,9 +436,15 @@ test('maxCellsForNeed: 预算是硬约束，档位决定上限（旧版 small �
   assert.equal(maxCellsForNeed(640_000, L, 'shot'), 16, '只要分辨镜头，16 格也够');
   assert.equal(maxCellsForNeed(640_000, L, 'scene'), 9, '640k + scene 只能 9 格（331×184）');
   assert.equal(maxCellsForNeed(640_000, L, 'text'), 4, '640k 要读字只能 4 格');
-  assert.equal(maxCellsForNeed(1_200_000, L, 'scene'), 16, '预算翻倍才能上 16 格');
+  // **16 格这一档要留余量**（2026-10-31 二审）：摊成 2×2 之后，子帧要仍比 need 的下一档高 15%。
+  // 1.2M + scene：16 格 = 341×189 → 摊开 170×94，只比 shot(160×90) 高 6%，一压缩就掉档；
+  // 12 格 = 394×220 → 197×110（余量 23%），而 token 几乎不变（1396 vs 1393）。
+  assert.equal(maxCellsForNeed(1_200_000, L, 'scene'), 12, '1.2M 上 16 格摊开只剩 170×94，不够');
+  assert.equal(maxCellsForNeed(1_650_000, L, 'scene'), 16, '预算到 1.65M 才给 16 格（摊开 231×129）');
   assert.equal(maxCellsForNeed(1_200_000, L, 'text'), 6, '1.2M 要读字只能 6 格（实际 555×348）');
   assert.ok(maxCellsForNeed(1_200_000, L, 'text') <= maxCellsForNeed(1_200_000, L, 'scene'));
+  // `shot` 不受余量规则约束：那个档位本来就不指望看清内容，铺满更重要。
+  assert.equal(maxCellsForNeed(1_200_000, L, 'shot'), 16);
 });
 
 test('readabilityOf: 说出"能读到哪一档"，含糊的数字没有用', () => {

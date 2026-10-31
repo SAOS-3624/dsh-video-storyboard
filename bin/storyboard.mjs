@@ -137,6 +137,9 @@ const cellRange = (() => {
   return m ? [Number(m[1]), Number(m[2])] : null;
 })();
 const t0 = Date.now();
+// CLI 的键是 kebab（--max-per-sheet），boardGeometry 读的是 camelCase（maxPerSheet）。
+// 只翻译这一个：budget / need / size 都是单词，kebab 与 camel 同名，不需要转。
+const geom = boardGeometry({ ...opt, maxPerSheet: opt['max-per-sheet'] ?? opt.maxPerSheet });
 const r = await runStoryboard({
   input,
   fetchOptions,
@@ -150,9 +153,13 @@ const r = await runStoryboard({
   minGap: Number(opt['min-gap']) || 0,
   // `--size` 现在只是 --budget 的别名；格数上限由 need + 预算推，也可 --max-per-sheet 覆盖。
   // **必须传给 runStoryboard 本身**，放进 fetchOptions（下载参数）会被忽略。
-  budget: boardGeometry(opt).budget,
-  maxPerSheet: boardGeometry(opt).maxPerSheet,
-  need: boardGeometry(opt).need,
+  //
+  // `boardGeometry()` 吃的是 camelCase（`maxPerSheet`），而 CLI 解析出来的是 kebab
+  // （`opt['max-per-sheet']`）。直接 `boardGeometry(opt)` 会让 `--max-per-sheet` **静默失效**：
+  // 参数看着传了、输出一模一样（实测 cap 16 与 cap 9 出图逐字节相同）。这里翻译一次。
+  budget: geom.budget,
+  maxPerSheet: geom.maxPerSheet,
+  need: geom.need,
   segment: Number(opt.segment) || 0,
   pick: String(opt.pick),
   burn: String(opt.burn),
