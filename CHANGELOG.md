@@ -10,10 +10,20 @@
 - 合并 5 个社区 PR：窗口内 OCR 的 `-ss` 不再叠加 `winStart`（#45）、缓存命中读回 `meta.json`（`readFile` 漏导入）、
   CLI `--detail high` 真正打开 OCR（#44）、`fixed=0` 不再在清单里静默（#46）、ASR/OCR 分句级对齐（#46）。
 
-### Changed
+### Performance
 
+- **扫描快 1.8×**（1080p / 5 分钟 / 7483 帧：6.0s → 3.3s）。两个开关：
+  - `scale=…:flags=area`：1080p → 64×36 用默认 bicubic 缩放要 2.9s，占整个扫描近一半；
+    area 是盒式平均，缩这么狠时低频行为与 bicubic 一致，判定结果不变（6 类伪切点仍全 0、召回不变）。
+  - `-skip_loop_filter all`：扫描只要缩略帧，h264/hevc 的去块滤波细节在 1/30 缩放下看不见，
+    却占约 17% 解码时间。对其它编码器是无害空操作。
+  - 剩下的时间已经在**解码地板**上（纯 ffmpeg 跑同一条：3.27s）。再快只能改算法（跳帧/多进程），
+    实测双进程并发只有 16% 收益（ffmpeg 已经吃满 ~5 线程），不值。
 - `decideCuts` 里两处 O(n²) 去掉：邻域判据改成二分定位时间窗、最近邻只看左右相邻事件。
   微基准（60 分钟/9 万帧）：380ms → **45ms**，细扫档 473ms → **22ms**；判定结果逐条相同。
+- **删掉 `spread`（改动面积）与 dHash 两套"诊断字段"**：它们是为了防伪切点加的，最后实测都没能当门槛用上，
+  却要在逐帧热循环里多算一遍 16×9 累加和一次指纹。现在 `scorePairDetail` 整个删除，扫描循环直接回到
+  `scorePair`（少一次全帧遍历、stats 对象少两个字段、缓存更小）。
 - 删掉从未被引用的 `src/flicker.js`（104 行）与两个死导出（`__resetPythonCache`、`scanBandChanges`）。
   `checkBiliLogin` / `looksLikeVideoUrl` / `waitForPort` / `configuredLaunch` 看起来没人用，但**陪看包在用**，保留。
 

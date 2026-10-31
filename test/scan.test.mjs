@@ -387,22 +387,7 @@ const mkFrame = (w, h, fn) => {
   return f;
 };
 
-test('scorePairDetail: 整幅都换 → spread ≈ 1；只换中间一小块 → spread 很小', async () => {
-  const { scorePairDetail } = await import('../src/storyboard/scan.js');
-  const w = 64; const h = 36;
-  const a = mkFrame(w, h, () => [20, 200, 100]);
-  const all = mkFrame(w, h, () => [120, 200, 100]);          // 整幅换色（真剪辑）
-  const local = mkFrame(w, h, (x, y) => (
-    x > w / 3 && x < (2 * w) / 3 && y > h / 3 && y < (2 * h) / 3 ? [200, 200, 220] : [20, 200, 100]
-  ));                                                        // 只有中间 1/9 变了（局部换画）
 
-  const whole = scorePairDetail(a, all, { width: w, height: h });
-  const part = scorePairDetail(a, local, { width: w, height: h });
-  assert.ok(whole.spread > 0.95, `整幅变化应该摊满，实得 ${whole.spread}`);
-  assert.ok(part.spread < 0.3, `局部变化不该摊开，实得 ${part.spread}`);
-  // 分数本身分不开这两件事：局部那块改得更猛，分数反而更高
-  assert.ok(part.score > 0, '局部变化也有分数');
-});
 
 test('decideCuts: 持续在动（甩镜/匀速摇镜）不报刀 —— 前后邻域同样吵', () => {
   // 30 帧里每帧都在 25–30 分：这不是剪辑，是镜头在甩

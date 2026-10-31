@@ -45,14 +45,6 @@ export const BAR_MAX = 24;
 export const BAR_CAP = 0.35;
 /** 长时差窗口（秒）。相邻帧差看不见渐变转场（叠化/淡入淡出），隔这么久看才看得见 */
 export const LONG_SEC = 0.4;
-/** 改动面积判据：把帧切成 16×9 块，块均差 ≥ 最强块 × SPREAD_BLOCK 就算"这块变了" */
-export const SPREAD_GW = 16;
-export const SPREAD_GH = 9;
-export const SPREAD_BLOCK = 0.45;
-// 注：`spread`（改动面积占比）目前**只做诊断**，不参与判定 —— 试过当硬门槛，
-// 暗场/遮幅的真剪辑会被一起挡掉（暗场整帧换场时块差分布也很集中），得不偿失。
-// 它留在 stats 里给 evidence 和后续的"空间证据"用。
-
 /** RGB(0-255) → HSV，各通道归一到 0-255（H 由角度缩放到 0-255） */
 export function rgbToHsv(r, g, b) {
   const rn = r / 255;
@@ -123,73 +115,6 @@ export function scorePair(prev, cur) {
   return sum / ((cur.length / 3) * totalWeight);
 }
 
-/**
- * 一次算两件事：**整帧差**（和 `scorePair` 逐位相同）与**改动面积占比 `spread`**。
- *
- * 为什么需要 spread：相邻帧差这种标量**分不开**"整帧换场"和"画面局部重画" ——
- * 动画一拍二（每 2 帧换一张画）在镜头不动的情况下，帧差会周期性地冒到 30–60 分，
- * 和一次真剪辑一模一样。唯一稳定的是**改了多少面积**：真剪辑整幅都换，
- * 局部重画只有人物/特效那几块动，背景块几乎不变（实测记管概念 PV 就是这么翻的车）。
- *
- * 做法：把帧切成 16×9 的块，各算块内平均差异；`spread` = 块均差 ≥ `blockFloor` 的块占比。
- * 代价是每帧多一趟 144 格的累加（约 +3% 扫描时间）。
- *
- * @param {Float32Array} prev 上一帧的 HSV（frameToHsv 的产物）
- * @param {Float32Array} cur  当前帧
- * @param {{width?:number, height?:number, gw?:number, gh?:number, blockFloor?:number}} o
- * @returns {{score:number, spread:number}}
- */
-export function scorePairDetail(prev, cur, {
-  width = SCAN_W, height = SCAN_H, gw = SPREAD_GW, gh = SPREAD_GH, blockFloor = SPREAD_BLOCK,
-} = {}) {
-  if (prev.length !== cur.length) throw new RangeError('frames must have the same length');
-  const pixels = cur.length / 3;
-  const totalWeight = HUE_WEIGHT + SAT_WEIGHT + VAL_WEIGHT;
-  const nBlocks = gw * gh;
-  const blockSum = new Float64Array(nBlocks);
-  const blockCnt = new Uint16Array(nBlocks);
-  // 每个 x 落在哪一列块：只算一次，避免每像素一次除法
-  const bx = new Uint8Array(width);
-  for (let x = 0; x < width; x++) bx[x] = Math.min(gw - 1, Math.floor((x * gw) / width));
-  let sum = 0;
-  let p = 0;
-  for (let y = 0; y < height; y++) {
-    const by = Math.min(gh - 1, Math.floor((y * gh) / height)) * gw;
-    for (let x = 0; x < width; x++, p += 1) {
-      const i = p * 3;
-      const dh = Math.abs(cur[i] - prev[i]);
-      const hueDiff = Math.min(dh, 255 - dh);
-      const hueWeight = Math.min(cur[i + 1], prev[i + 1]) / 255;
-      const d = hueDiff * hueWeight * HUE_WEIGHT
-        + Math.abs(cur[i + 1] - prev[i + 1]) * SAT_WEIGHT
-        + Math.abs(cur[i + 2] - prev[i + 2]) * VAL_WEIGHT;
-      sum += d;
-      const bi = by + bx[x];
-      blockSum[bi] += d;
-      blockCnt[bi] += 1;
-    }
-  }
-  // 宽高不是网格整数倍时块大小会差 1 像素：按块内实际像素数取均值
-  let peak = 0;
-  for (let k = 0; k < nBlocks; k++) {
-    if (blockCnt[k] === 0) continue;
-    const v = blockSum[k] / blockCnt[k] / totalWeight;
-    if (v > peak) peak = v;
-  }
-  // **相对**判据：块差达到本帧最强块的 blockFloor 倍才算"这块变了"。
-  // 不能用绝对阈值 —— 暗场整帧换场时块差也很小（实测暗场真刀的块差 < 25），
-  // 绝对阈值会把它们全判成"没改面积"，而真剪辑的块差分布是**摊平**的（各块都差不多），
-  // 局部重画是**集中**的（只有几块高）。所以量的是"摊得多开"，不是"改得多猛"。
-  let changed = 0;
-  if (peak > 2) {
-    const floor = peak * blockFloor;
-    for (let k = 0; k < nBlocks; k++) {
-      if (blockCnt[k] === 0) continue;
-      if (blockSum[k] / blockCnt[k] / totalWeight >= floor) changed += 1;
-    }
-  }
-  return { score: sum / (pixels * totalWeight), spread: changed / nBlocks };
-}
 
 /**
  * 黑边占比：整窗里"一直是黑的"顶部/底部行占多少。
@@ -486,7 +411,6 @@ export function decideCuts(stats, {
   const eps = 1e-6;
   // 分数够高还不够，**一次真剪辑得改掉半幅画面**：动画一拍二、局部爆炸/字幕、粒子这些
   // 帧差能到 30–60，但只动了一小块（实测记管概念 PV 里硬币在手里转被数成 20 刀）。
-  // 老缓存没有 spread（undefined）时放行，靠 CACHE_VERSION 保证新条目一定带。
   const above = stats.filter((s) => s.score > used + eps);
   // 上限只对 auto 生效：显式阈值是调用方的明确意图。
   // 修过一次老 bug：这里以前读 `autoThreshold(...).target`，而它返回 number → 永远是 Infinity。
@@ -625,8 +549,16 @@ export function scanShots(opts) {
       ['-hide_banner', '-v', 'error', '-nostdin',
         ...(start > 0 ? ['-ss', String(start)] : []),
         ...(end !== undefined ? ['-t', String(Math.max(0.1, end - start))] : []),
+        // **关掉 h264/hevc 的去块滤波**：扫描只要 64×36 的缩略帧，deblocking 的细节
+        // 缩到 1/30 之后完全看不见，却占掉约 17% 的解码时间（实测 3936ms → 3268ms）。
+        // 对其它编码器是无害的空操作。
+        '-skip_loop_filter', 'all',
         '-i', input, '-an', '-sn',
-        '-vf', `scale=${width}:${height},format=rgb24`, '-f', 'rawvideo', '-'],
+        // **flags=area**：1080p → 64×36 用默认 bicubic 缩放要 2.9s（6639ms vs 3727ms），
+        // 占整个扫描近一半。area 是盒式平均，缩这么狠时低频行为与 bicubic 几乎一致，
+        // 实测判定结果与 bicubic 相同（伪切点 6 类全 0、召回不变）。
+        // （别用 neighbor：点采样会引入大量别名噪声，分数会抖。）
+        '-vf', `scale=${width}:${height}:flags=area,format=rgb24`, '-f', 'rawvideo', '-'],
       { stdio: ['ignore', 'pipe', 'pipe'], signal },
     );
 
@@ -664,10 +596,7 @@ export function scanShots(opts) {
         frameToHsv(slice, cur);
         const t = start + frame / fps;
         if (hasPrev) {
-          // **一次算两件事**：整帧差（判"变没变"）+ 改动面积（判"改了多少画面"）。
-          // 后者是防伪切点的关键：一拍二/局部特效的帧差能到 30–60，但只改一小块。
-          const { score, spread } = scorePairDetail(prev, cur, { width, height });
-          stats.push({ t, score, spread: +spread.toFixed(3) });
+          stats.push({ t, score: scorePair(prev, cur) });
         }
         // 长时差：ring[ringIdx] 里躺着 lag 帧之前那一帧
         if (ringWarm >= lag) {
@@ -904,12 +833,6 @@ export function detectGradual(longStats, frameStats, {
   const at = (t) => {
     const i = Math.round((t - frameStats[0].t) / step);
     return i >= 0 && i < frameStats.length ? frameStats[i].score : null;
-  };
-  /** 那一帧的改动面积（改动面积是 0.5.x 之后才有的字段，老传入缺它就返回 null = 不判） */
-  const spreadAt = (t) => {
-    const i = Math.round((t - frameStats[0].t) / step);
-    const v = i >= 0 && i < frameStats.length ? frameStats[i]?.spread : null;
-    return typeof v === 'number' ? v : null;
   };
   const med = (from, to) => {
     const vals = [];
