@@ -86,3 +86,28 @@ test('解释器不存在 → interpreter-missing，而不是"检测失败"', asy
   assert.equal(r.kind, 'interpreter-missing', JSON.stringify(r));
   assert.ok(r.message, '要带上原因');
 });
+
+test('shouldReplace: 长 ASR 段按分句匹配，只替换命中的那一句（#46）', () => {
+  const asr = '第一句话完全正确。第二句话里有一个错字。第三句话也正确。';
+  const v = shouldReplace({ asr, ocr: '第二句话里有一个错别字', conf: 0.9 });
+  assert.equal(v.replace, true, JSON.stringify(v));
+  assert.match(v.text, /第一句话完全正确/);
+  assert.match(v.text, /第二句话里有一个错别字/);
+  assert.match(v.text, /第三句话也正确/);
+});
+
+test('shouldReplace: ASR 是 OCR 的子序列但漏了字，仍然要替换', () => {
+  const v = shouldReplace({ asr: '第二句话里有一个错字', ocr: '第二句话里有一个错别字', conf: 0.9 });
+  assert.equal(v.replace, true, JSON.stringify(v));
+  assert.match(v.text, /错别字/);
+});
+
+test('shouldReplace: cover 很低的无关文本先报 unrelated，不再误报 length-gap', () => {
+  const v = shouldReplace({
+    asr: '第一句话完全正确。第二句话里有一个错字。第三句话也正确。',
+    ocr: '一固之以后扭头就走了',
+    conf: 0.827,
+  });
+  assert.equal(v.replace, false);
+  assert.equal(v.reason, 'unrelated', JSON.stringify(v));
+});
