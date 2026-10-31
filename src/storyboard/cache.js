@@ -22,7 +22,7 @@ import { join } from 'node:path';
 // 条目就是几十 MB 的 {"0":12,…} 且类型全丢。现在指纹已改为不进缓存，升版本把可能写坏的条目作废。
 // 3 → 4：扫描结果里新增了 darkRuns（黑场段）。旧条目没有这一项，命中后黑场会并回内容格，
 // 同一支片子第一次跑和第二次跑出图不一样 —— 升版本让旧条目重扫一次。
-export const CACHE_VERSION = 16;
+export const CACHE_VERSION = 20;
 // 4 → 5：扫描结果里新增了**抽稀指纹**（printPack，8fps base64）。
 // `frameDiv` 判据靠它，旧条目没有就只能退回 meanMotion —— 同一支片第一次跑和第二次跑
 // 摊开方式不一样，而且清单上看不出来。升版本让旧条目重扫一次。
