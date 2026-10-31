@@ -6,6 +6,12 @@
 
 ## 1. 目录长什么样
 
+> **本插件不带 ASR 服务端。** 下面这棵树是"本机自建一个 OpenAI 兼容服务"时的**一种**参考布局
+> （我们自己在用的那种），`server-sherpa.py` 和 `start-asr.cmd` 是**你自己写的服务**，
+> 仓库里没有这两个文件 —— 服务端只要满足 §7 的契约就行，用现成的 OpenAI 兼容服务也可以（见 §7.1）。
+> 契约的完整说明在 [`asr-contract.md`](./asr-contract.md)（尤其是"segments 的时间相对上传音频"和
+> "音乐段幻觉句过滤"两条，写服务端前先看一遍）。
+
 ```
 D:/asr/                          # 语音服务目录（任意位置，建议独立）
 ├─ .venv/                        # Python 虚拟环境（sherpa-onnx 装在这里）
@@ -16,8 +22,8 @@ D:/asr/                          # 语音服务目录（任意位置，建议独
 │  └─ punct/
 │     ├─ model.onnx              # ct-transformer 标点 281 MB
 │     └─ tokens.json
-├─ server-sherpa.py              # 服务本体（OpenAI 兼容 + /shutdown）
-└─ start-asr.cmd                 # 手动启动用（CRLF + 纯 ASCII）
+├─ server-sherpa.py              # 服务本体（OpenAI 兼容 + /shutdown）★ 你自己写
+└─ start-asr.cmd                 # 手动启动用（CRLF + 纯 ASCII）★ 你自己写
 ```
 
 ## 2. `~/.dsh/asr.json`（语音）
@@ -104,6 +110,23 @@ POST /v1/audio/transcriptions   → OpenAI 兼容，返回 verbose_json
                                  { text, segments:[{start,end,text}] }
 POST /shutdown                  → 返回后退出（不支持也行，插件会退回杀进程）
 ```
+
+### 7.1 服务端从哪来（三选一）
+
+| 做法 | 适合 | 说明 |
+|---|---|---|
+| 现成的 OpenAI 兼容服务 | 大多数人 | 例如自建 funasr-server / speaches，或任何支持 `/v1/audio/transcriptions` 的服务。`baseUrl` 指过去即可，**本机地址不需要 key** |
+| 云端 API | 不想在本机跑模型 | 配 `DSH_ASR_KEY`；中文效果取决于模型 |
+| 自己写（我们就是这种） | 要完全离线、要 VAD+标点自己控 | 按 §7 的契约 + [`asr-contract.md`](./asr-contract.md) 实现，约 300 行 |
+
+写服务端时两个坑（都是社区反馈的真实错误）：
+
+- **sherpa-onnx 2.x 改过标点 API**：`OfflinePunctuation.add_punct()` 在 2.0 起叫
+  `add_punctuation()`。网上能搜到的 paraformer + ct-transformer 示例几乎全是 1.x 的，
+  报错是 `AttributeError: 'OfflinePunctuation' object has no attribute 'add_punct'`。
+- **标点失败不该影响出图**：标点只是可读性。服务端出错时应当**退回不带标点的文本并照常返回
+  200**，而不是 500 —— 否则整条台词链会被一个装饰性环节带崩，清单上还会显示成 `asr-failed`，
+  让人以为 ASR 坏了。
 
 ## 8. 排障对照
 

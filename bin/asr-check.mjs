@@ -4,13 +4,18 @@
  *
  *   node bin/asr-check.mjs <video> [--from 60] [--seconds 12]
  *
- * 顺序：字幕轨 → ASR。没有配置 key 时会直接告诉你缺什么，不会发请求。
+ * 顺序：字幕轨 → ASR。
+ * 「这次会不会真转写」用 `canTranscribe()` 判 —— 和 `video_storyboard` 同一句话：
+ * 本机地址（127.0.0.1 / localhost / [::1]）按设计**不需要 key**，只有云端才要。
+ * 配了 `manage.start` 就先把托管服务拉起来，连不上时给人话而不是抛栈。
  */
 import { args as parse } from './_args.mjs';
 import { probeVideo } from '../src/storyboard/probe.js';
 import {
-  ASR_DEFAULTS, describeAsrTarget, extractSubtitleTrack, filterSuspectSegments, transcribeLong,
+  canTranscribe, describeAsrTarget, effectiveAsrKey, explainFetchError, extractSubtitleTrack,
+  filterSuspectSegments, resolveAsrConfig, transcribeLong,
 } from '../src/storyboard/asr.js';
+import { ensureAsr, isOwned, scheduleStop } from '../src/storyboard/asr-lifecycle.js';
 import { analyzeAudio } from '../src/storyboard/audio.js';
 
 const opt = parse(process.argv.slice(2), { from: 0, seconds: 12 });
@@ -42,17 +47,35 @@ if (info.hasSubtitle) {
   console.log('[subtitle] 声明了字幕轨但抽不出来，回退到 ASR');
 }
 
-// 2) ASR 配置：走和工具同一套解析（env > asr.json > 默认），别再各读各的
-const keyEnv = ASR_DEFAULTS.keyEnv;
-const apiKey = ASR_DEFAULTS.fileKey || process.env[keyEnv];
-console.log(`[asr] ${describeAsrTarget()}`);
-if (!apiKey) {
-  console.log(`\n没有检测到 ${keyEnv}。设置后重跑：`);
-  console.log('  Windows PowerShell:  $env:' + keyEnv + ' = "sk-..."');
-  console.log('  Git Bash / WSL:      export ' + keyEnv + '=sk-...');
+// 2) ASR 配置：判据必须和工具**同一句话**（`canTranscribe`），别再自己看"有没有 key"
+//
+// issue #41：这里原来只看 `ASR_DEFAULTS.fileKey || process.env[keyEnv]`，
+// 于是把"本机 127.0.0.1:8000 正在跑、按设计不需要 key"误判成"没配 → 不会转写"，
+// 而 `video_storyboard` 用 canTranscribe 判得对 —— 同一个环境，脚本说不能跑、工具能跑。
+// 顺带：这个脚本从不 import asr-lifecycle，`manage.start` 配了也不会拉起服务，
+// 而 `doctor.mjs` 第 5 步恰恰把它推给正在排障的人。
+const asrCfg = resolveAsrConfig();
+const apiKey = effectiveAsrKey(asrCfg);
+console.log(`[asr] ${describeAsrTarget(asrCfg)}`);
+if (!canTranscribe(asrCfg, apiKey)) {
+  console.log(`\n这是云端地址（${asrCfg.baseUrl}），但没有配 key —— 这次不会真转写。设置后重跑：`);
+  console.log('  Windows PowerShell:  $env:' + asrCfg.keyEnv + ' = "sk-..."');
+  console.log('  Git Bash / WSL:      export ' + asrCfg.keyEnv + '=sk-...');
   console.log('可选：DSH_ASR_BASE_URL / DSH_ASR_MODEL / DSH_ASR_LANG（默认 zh）');
-  console.log(`      自建 funasr-server 也可以，只要它兼容 OpenAI 的 /audio/transcriptions。`);
+  console.log('      自建 funasr-server 也可以，只要它兼容 OpenAI 的 /audio/transcriptions。');
   process.exit(1);
+}
+if (!apiKey) {
+  console.log('[asr] 本机地址，不需要 key（和 video_storyboard 同一判据）');
+}
+
+// 2.5) 本地托管的服务可能要临时拉起（只有 asr.json 配了 manage.start 才会）
+let asrLife = null;
+try {
+  asrLife = await ensureAsr({ baseUrl: asrCfg.baseUrl, config: asrCfg });
+  if (asrLife?.started) console.log('[asr] 已按 manage.start 拉起本机服务');
+} catch (e) {
+  if (process.env.DSH_ASR_DEBUG) console.error('[asr-lifecycle]', e?.message ?? e);
 }
 
 // 3) 真调一次
@@ -60,9 +83,27 @@ const t0 = Date.now();
 console.log(`[asr] 转写 ${from}s–${from + seconds}s（≈${(seconds * 31.25).toFixed(0)}KB @16k 单声道）…`);
 // 走和工具同一套切片逻辑（>45s 会自动切成多请求，切点优先落在静音）
 const { silences } = (await analyzeAudio({ input, start: from, end: from + seconds })) ?? { silences: [] };
-const result = await transcribeLong({
-  input, start: from, end: from + seconds, silences, maxChunk: 45,
-});
+let result = null;
+try {
+  result = await transcribeLong({
+    input, start: from, end: from + seconds, silences, maxChunk: 45,
+    // apiKey 显式传：不传的话 transcribe 会再解析一次，键和实参可能不是同一份
+    apiKey, language: asrCfg.language,
+  });
+} catch (error) {
+  // 排障脚本最不该吐未捕获异常。连不上是最常见的一种，给一句人话 + 具体地址。
+  console.error(`\n[asr] 请求失败：${explainFetchError(error).slice(0, 400)}`);
+  if (/ECONNREFUSED|ENOTFOUND|fetch failed/i.test(String(error?.message ?? error) + String(error?.cause?.code ?? ''))) {
+    console.error(`      ${asrCfg.baseUrl} 上没有服务在听。本机服务先跑 start-asr.cmd，`);
+    console.error('      或在 ~/.dsh/asr.json 里配 manage.start，让插件按需拉起。');
+  }
+  process.exit(1);
+} finally {
+  // 我们拉起的才安排空闲退出（别人启动的实例无权杀）
+  if (asrLife?.owned || isOwned()) {
+    scheduleStop({ owned: true, config: asrCfg, baseUrl: asrCfg.baseUrl });
+  }
+}
 const ms = Date.now() - t0;
 if (!result) {
   console.log('没有返回内容（音频可能全是静音）。');

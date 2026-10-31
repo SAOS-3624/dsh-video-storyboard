@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { assertFetchableUrl, isHttpUrl, normalizeUrl } from '../src/storyboard/url.js';
 import { discoverYtdlp, explainYtdlpError, formatSelector, loadVideoConfig, resolveAuth, summariseInfo, unwrapSingle } from '../src/storyboard/ytdlp.js';
-import { fetchMedia } from '../src/storyboard/fetch.js';
+import { audioEvidence, fetchMedia } from '../src/storyboard/fetch.js';
 import { mediaKey, pruneMedia } from '../src/storyboard/media-store.js';
 import { pickVideoFormat, resolveDirectUrl, __clearDirectCache } from '../src/storyboard/direct-url.js';
 
@@ -502,4 +502,72 @@ test('explainYtdlpError: 412 是限流，不是登录问题', () => {
   const msg = explainYtdlpError('ERROR: HTTP Error 412: Precondition Failed');
   assert.match(msg, /rate-limited/);
   assert.doesNotMatch(msg, /567/);
+});
+
+/* ---------------------------------------------------------------- 音轨缺失的判据（#43） */
+
+test('audioEvidence: 旁边留着 video.<id>.m4a 就是合流没跑（不依赖 formats 里的 acodec）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-audio-'));
+  try {
+    await writeFile(join(dir, 'video.mp4'), Buffer.alloc(16));
+    await writeFile(join(dir, 'video.f30280.m4a'), Buffer.alloc(16));
+    const ev = await audioEvidence(dir, { localHasAudio: false });
+    assert.equal(ev.audioMissing, true);
+    assert.equal(ev.reason, 'unmerged-dash');
+    assert.deepEqual(ev.companionAudio, ['video.f30280.m4a']);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('audioEvidence: 成品有声就闭嘴（残留音轨文件不算证据）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-audio-'));
+  try {
+    await writeFile(join(dir, 'video.mp4'), Buffer.alloc(16));
+    await writeFile(join(dir, 'video.f30280.m4a'), Buffer.alloc(16));
+    const ev = await audioEvidence(dir, { localHasAudio: true });
+    assert.equal(ev.audioMissing, false);
+    assert.equal(ev.reason, null);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('audioEvidence: 源站说有音轨但没留下文件 → silent-copy（该换 cookies/换源）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-audio-'));
+  try {
+    await writeFile(join(dir, 'video.mp4'), Buffer.alloc(16));
+    const ev = await audioEvidence(dir, { localHasAudio: false, sourceHasAudio: true });
+    assert.equal(ev.audioMissing, true);
+    assert.equal(ev.reason, 'silent-copy');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('audioEvidence: 源本来没声音时不要报"丢音"', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-audio-'));
+  try {
+    await writeFile(join(dir, 'video.mp4'), Buffer.alloc(16));
+    const ev = await audioEvidence(dir, { localHasAudio: false, sourceHasAudio: false });
+    assert.equal(ev.audioMissing, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('fetchMedia: 命中老缓存也要认出"音轨没合进去"（#43 的现象）', async () => {
+  const h = await makeHarness();
+  try {
+    // 造一份"上个版本留下的坏缓存"：video.mp4 没声音 + 旁边一条 m4a + meta 里没有 audioMissing
+    const url = 'https://www.bilibili.com/video/BV1stale';
+    const dir = join(h.media, mediaKey(normalizeUrl(url), 360));
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'video.mp4'), Buffer.alloc(2048, 7));
+    await writeFile(join(dir, 'video.f30280.m4a'), Buffer.alloc(2048, 7));
+    await writeFile(join(dir, 'meta.json'), JSON.stringify({
+      kind: 'url', url, bytes: 2048, scanHeight: 360, maxAvailable: 1080,
+      availableHeights: [360, 720, 1080], zoomTarget: 1080, title: 'stale', duration: 60,
+      auth: 'cookies', cached: false,
+    }), 'utf8');
+
+    const r = await fetchMedia(url, { ytdlp: h.ytdlp, env: h.env, cookies: h.cookies });
+    assert.equal(r.source.cached, true, '文件在，应该走命中');
+    assert.equal(r.source.audioMissing, true, '不能因为 meta 里没写就报成"这片子没声音"');
+    assert.equal(r.source.audioMissingReason, 'unmerged-dash');
+  } finally {
+    await h.cleanup();
+  }
 });

@@ -19,6 +19,8 @@ import {
 import { isAbsolute, join } from 'node:path';
 
 import { DEFAULT_FFMPEG, probeVideo } from './probe.js';
+// 拿不到绝对路径就不传 `--ffmpeg-location`，所以要能再解析一次（会话中途装了 ffmpeg 也算数）
+import { resolveMediaBinary } from './binaries.js';
 import {
   DEFAULT_UA, discoverYtdlp, explainYtdlpError, formatSelector, resolveAuth, runProcess,
   summariseInfo, unwrapSingle,
@@ -35,6 +37,43 @@ import { directFromSummary, recallDirect, rememberDirect } from './direct-url.js
  * 把 m4a 改名成 video.mp4 才是真正的静默坏数据，宁可在这里报错。
  */
 const AUDIO_EXTS = new Set(['.m4a', '.m4b', '.mp3', '.aac', '.opus', '.ogg', '.oga', '.wav', '.flac', '.weba']);
+
+/**
+ * 这份下载下来的副本，音轨到底是"源本来没有"还是"这次没合进去"？
+ *
+ * 判据以**磁盘证据**为准：yt-dlp 合流失败时会把 DASH 音轨留在旁边
+ * （`video.f30280.m4a`），这两个文件并排放着就是铁证 —— 不管 `-J` 的 formats 有没有带
+ * acodec、不管这条是刚下的还是从缓存里命中的。issue #43 的现象（清单说
+ * "no audio track: grid is visual only"，而目录里躺着 `video.f30280.m4a`）就是这个判据漏了。
+ *
+ * @param {string} dir 缓存目录
+ * @param {{localHasAudio?:boolean, sourceHasAudio?:boolean}} o
+ *   localHasAudio: 成品有没有音轨（probeVideo 的结果）；sourceHasAudio: 源站声明的
+ * @returns {Promise<{audioMissing:boolean, companionAudio:string[], reason:'unmerged-dash'|'silent-copy'|null}>}
+ */
+export async function audioEvidence(dir, { localHasAudio, sourceHasAudio } = {}) {
+  const names = await readdir(dir).catch(() => []);
+  const companionAudio = names.filter((name) => {
+    if (!name.startsWith('video.') || /\.(part|ytdl|temp)$/i.test(name)) return false;
+    const ext = name.slice(name.lastIndexOf('.')).toLowerCase();
+    return AUDIO_EXTS.has(ext);
+  });
+  // 成品确认有音轨 = 没问题（旁边的残留音轨文件不代表这一次没合进去）
+  if (localHasAudio === true) {
+    return { audioMissing: false, companionAudio, reason: null };
+  }
+  // 成品没音轨、或者读不出来（ffprobe 失败）时：
+  //  - 旁边躺着 `video.<id>.m4a` → 合流没跑，铁证（yt-dlp 合流成功会删掉这两条输入流）
+  //  - 没有旁边的文件，但源站声明过有音轨 → 这次下的副本是静音的
+  const audioMissing = companionAudio.length > 0
+    || (localHasAudio === false && sourceHasAudio === true);
+  return {
+    audioMissing,
+    companionAudio,
+    reason: audioMissing ? (companionAudio.length > 0 ? 'unmerged-dash' : 'silent-copy') : null,
+  };
+}
+
 
 /**
  * 把 URL 变成一份可以喂给现有管线的本地文件，并把"这条链接能拿到什么"记下来。
@@ -70,6 +109,11 @@ export async function fetchMedia(input, opts = {}) {
   const auth = await resolveAuth({ cookies, allowAnonymous, env });
   const tool = ytdlp || await discoverYtdlp({ env, run });
 
+  // `DEFAULT_FFMPEG` 是模块加载那一刻的快照：用户在会话中间装了 ffmpeg、或者刚设了
+  // DSH_FFMPEG_PATH，这里必须能捡到。拿不到绝对路径就不传 `--ffmpeg-location`（传个裸名
+  // 等于没传），改为在下完货之后用**磁盘证据**把"音轨没合进去"说清楚。
+  const ffmpegAbs = isAbsolute(ffmpegPath) ? ffmpegPath : (resolveMediaBinary('ffmpeg', { env }) ?? null);
+
   const key = mediaKey(normalized, scanHeight);
   const dir = join(mediaDir(env), key);
   const target = join(dir, 'video.mp4');
@@ -87,7 +131,7 @@ export async function fetchMedia(input, opts = {}) {
       // "装好 ffmpeg 再试"也仍然是无声的。用当时可用的 ffmpeg 路径做一次失效重试；
       // 如果同一个 ffmpeg 仍然合不上，就把 audioMergeRetry 记进 meta，避免每次重下。
       const staleMerge = Boolean(
-        meta?.audioMissing && isAbsolute(ffmpegPath) && meta.audioMergeRetry !== ffmpegPath,
+        meta?.audioMissing && ffmpegAbs && meta.audioMergeRetry !== ffmpegAbs,
       );
       if (staleMerge) {
         onProgress?.({ phase: 'cache-invalid', path: target, reason: 'audio-missing' });
@@ -96,6 +140,15 @@ export async function fetchMedia(input, opts = {}) {
       } else {
         const cachedDirect = recallDirect(normalized, zoomHeight);
         onProgress?.({ phase: 'cache-hit', path: target });
+        // 缓存命中也得重新判一次音轨：老版本写的 meta 里根本没有 audioMissing 这一项，
+        // 直接信它就会把"音轨没合进去"报成"这片子没声音"（#43 就是踩在这上面）。
+        // 代价只有一次本地 ffprobe（~50ms），换掉的是"整条音频链无声且说不出原因"。
+        const cachedInfo = await probeVideo(target).catch(() => null);
+        const cachedEvidence = await audioEvidence(dir, {
+          localHasAudio: cachedInfo?.hasAudio,
+          // 缓存里没有源站的 formats，只有上一次的判断结果 —— 当成"源确实有声音"的弱证据
+          sourceHasAudio: meta?.audioMissing === true ? true : undefined,
+        });
         return {
           path: target,
           frameSource: cachedDirect
@@ -107,6 +160,8 @@ export async function fetchMedia(input, opts = {}) {
             bytes: st.size,
             scanHeight,
             ...(meta ?? {}),
+            ...(cachedEvidence.audioMissing ? { audioMissing: true } : {}),
+            ...(cachedEvidence.reason ? { audioMissingReason: cachedEvidence.reason } : {}),
             // `cached` 必须排在展开之后：meta.json 里存的是写入那一刻的 false，会把这里覆盖掉
             cached: true,
           },
@@ -149,7 +204,7 @@ export async function fetchMedia(input, opts = {}) {
     // 按"短边"就近取：竖屏视频的 res 是宽（360/480/720），不是 height。
     ...(Number.isFinite(scanHeight) && scanHeight > 0 ? ['-S', `res:${Math.round(scanHeight)}`] : []),
     // DSH 桌面版常把 ffmpeg 放在 $DSH_HOME/bin 而不进 PATH；yt-dlp 只认 PATH 或这个参数。
-    ...(isAbsolute(ffmpegPath) ? ['--ffmpeg-location', ffmpegPath] : []),
+    ...(ffmpegAbs ? ['--ffmpeg-location', ffmpegAbs] : []),
     '--no-warnings', '--no-playlist', '--no-progress',
     // 断点续传：网络抖了下次接着下，而不是从头再来
     '--continue',
@@ -232,23 +287,18 @@ export async function fetchMedia(input, opts = {}) {
   // 这里明确区分"源本来就没声音"和"这次下载的副本没声音"（xingyueDanYang 报的观察）。
   const sourceHasAudio = (summary.formats ?? []).some((f) => f.acodec && f.acodec !== 'none');
   const localInfo = await probeVideo(target).catch(() => null);
-  const audioMissing = Boolean(localInfo && !localInfo.hasAudio && sourceHasAudio);
-  // 合流失败时 yt-dlp 会留下 video.<id>.mp4 + video.<id>.m4a 两个文件，而这里选了 mp4。
-  // 把原因记下来，清单才能说"装 ffmpeg"，而不是误导用户再去换 cookies。
-  const companionAudio = audioMissing
-    ? (await readdir(dir).catch(() => [])).filter((name) => {
-      if (!name.startsWith('video.') || /\.(part|ytdl|temp)$/i.test(name)) return false;
-      const ext = name.slice(name.lastIndexOf('.')).toLowerCase();
-      return AUDIO_EXTS.has(ext);
-    })
-    : [];
+  // 判据以**磁盘证据**为准（旁边有没有留下音轨文件），`summary.formats` 只是辅助：
+  // 缓存命中 / 直链路径 / 老版本写的 meta 里都可能拿不到 acodec，光看它会漏判成
+  // "这条片子本来就没声音"（#43 的现象就是这样）。
+  const { audioMissing, companionAudio, reason: audioMissingReason } =
+    await audioEvidence(dir, { localHasAudio: localInfo?.hasAudio, sourceHasAudio });
 
   const source = {
     kind: 'url',
     ...(audioMissing ? { audioMissing: true } : {}),
-    ...(audioMissing && companionAudio.length > 0 ? { audioMissingReason: 'unmerged-dash' } : {}),
+    ...(audioMissingReason ? { audioMissingReason } : {}),
     // 让下一次命中知道"这份坏缓存已经用哪个 ffmpeg 重试过"；换了 ffmpeg 才值得再试。
-    ...(audioMissing && isAbsolute(ffmpegPath) ? { audioMergeRetry: ffmpegPath } : {}),
+    ...(audioMissing && isAbsolute(ffmpegAbs) ? { audioMergeRetry: ffmpegAbs } : {}),
     url,
     cached: false,
     bytes: st.size,
