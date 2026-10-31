@@ -1,5 +1,45 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **硬字幕校正（`detail: high`）从发布起就没有真正跑起来过**（#39）。
+  `src/storyboard/ocr.js` 把桥接脚本拼成 `src/storyboard/ocr_bridge.py`，而它在 `src/ocr_bridge.py` ——
+  全仓唯一的引用点，于是每次调用都是 `ENOENT`。更糟的是 `runBridge` 把 **ENOENT、超时、Python 崩溃**
+  一起 `resolve(null)`，上层一律报 `detect-failed`，所以"脚本根本没被打开"看起来像"检测不到字幕带"。
+  修：路径上溯一层；失败返回结构化原因（`bridge-missing` / `interpreter-missing` / `bridge-timeout` /
+  `bridge-crashed` / `bridge-bad-json` / `bridge-error` / `no-band`），清单里直接写出来，
+  `DSH_OCR_DEBUG=1` 时把 stderr 也打出来。
+  `video_subtitles` 的 `bandSource` 因此也会真的出现 `detected`（以前永远是 `default-bottom`）。
+
+- **字幕带检测会把画面顶部的横幅当字幕**。判据只有"宽 > 35% + 置信度 > 0.55"，
+  平台推广横幅同样满足，band 于是被拉成 `[0, 1]` —— 整帧，crop 等于没裁（实测 1280×720 上
+  横幅 y≈77、真字幕 y≈654）。现在**优先只收画面下半部分（中心 y > 0.5）的候选**，
+  下半屏一个都没有才退回全帧 —— 顶部字幕的片子（日式竖排、顶部提示条）不受影响。
+
+- **判据本身也校准错了**：`宽 ≥ 35%` 是照着"平台横幅"定的，而真字幕实测只有 **26%–30%**
+  （1280×720 的双语字幕帧：中文 w=26.4% h=7.6%、英文 w=30.4% h=6.2%），于是一帧里两条真字幕
+  全被砍掉、band 永远落回兜底。改成 `宽 ≥ 18%` **+ 高 ≤ 15%** ——
+  高度才是可靠的区分器：同一支片里画面大字/海报字的框高 31%–83%，字幕只有 6%–8%。
+
+### Added
+
+- **支持 `rapidocr` 3.x**（现在 PyPI 上的主线）。旧包 `rapidocr_onnxruntime` 把
+  `requires-python` 写死在 `<3.13`，Python 3.13 上**根本装不上**；新包改成构造只收
+  `config_path`/`params`、`use_det=False` 走 per-call 参数、返回 `RapidOCROutput` 对象
+  （`.txts`/`.scores`/`.boxes`）。桥接脚本两个包都认，返回形状统一成 `[(box, text, conf)]`。
+
+- **`~/.dsh/video.json` 的 `ocr.python`**：指定用哪个解释器跑 OCR。
+  桌面版宿主读不到 `setx` 设的环境变量，没有这个入口就只能装进 `asr.json` 那个 venv
+  —— 而那会把两个模型的依赖混在一起。不配则回落到 `DSH_OCR_PYTHON` → `asr.json` → PATH。
+
+### Changed
+
+- **"找不到能 import rapidocr 的 Python" 不再永久缓存**：改成失败缓存 60 秒。
+  以前装完 `rapidocr-onnxruntime` 必须**重启整个 DSH 宿主**，否则永远 `no-python-with-rapidocr`，
+  而且从报错看不出是这个原因。现在装完最多等一分钟自动生效。
+
 ## [0.5.4] - 2026-10-31
 
 这一版只解决一件事：**参数不再让人用"更小的格子"去换"更大的封面面积"**。

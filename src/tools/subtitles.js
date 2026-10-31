@@ -51,7 +51,8 @@ export async function execute(ctx, args) {
       ? `explicit ${(r.band[0] * 100).toFixed(0)}%–${(r.band[1] * 100).toFixed(0)}%`
       : r.bandSource === 'detected'
         ? `detected ${(r.band[0] * 100).toFixed(0)}%–${(r.band[1] * 100).toFixed(0)}%`
-        : `bottom ${(DEFAULT_BAND[0] * 100).toFixed(0)}%–${(DEFAULT_BAND[1] * 100).toFixed(0)}% (no OCR available to detect it)`;
+        : `bottom ${(DEFAULT_BAND[0] * 100).toFixed(0)}%–${(DEFAULT_BAND[1] * 100).toFixed(0)}% ` +
+          '(fallback: no subtitle band detected — pass band:[y0,y1] if the subtitles sit higher)';
     const every = r.strips.length > 1
       ? (r.strips[1].t - r.strips[0].t).toFixed(1)
       : '—';

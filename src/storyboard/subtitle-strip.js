@@ -85,7 +85,10 @@ export async function resolveBand({ input, ffmpegPath, from, to, workDir, overri
         probes.push(out);
       }
       const hit = await detectSubtitleBand({ python, frames: probes });
-      if (hit?.band) return { band: hit.band, source: 'detected' };
+      if (hit.ok) return { band: hit.band, source: 'detected' };
+      // 检测不到不致命（很多片子字幕在顶部、或者根本没有），但原因要能看到：
+      // 以前这里静默退回默认带，连"脚本路径错"都看不出来（#39）。
+      if (process.env.DSH_OCR_DEBUG) console.error('[subs] band detect:', hit.kind, hit.message);
     }
   } catch {
     /* 检测是可选的：装不上 python / rapidocr 时不该让整条路失败 */

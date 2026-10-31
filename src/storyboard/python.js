@@ -52,25 +52,43 @@ export function pythonCandidates({ config = {}, env = process.env } = {}) {
 
 /**
  * 依次试候选解释器，返回第一个能跑通 `-c "import <module>"` 的。
- * 结果进程内缓存：一次启动只会探一次。
+ *
+ * **成功永久缓存，失败缓存 60 秒**（`FAIL_TTL_MS`）。
+ * 原来是失败也永久记住 —— 于是"装完 rapidocr 必须重启整个 DSH 宿主"，
+ * 否则永远报 `no-python-with-rapidocr`，而且报不出为什么（#39 的报告人在这上面花了不少时间）。
+ * 留一个 60 秒的窗口，装完包最多等一分钟就自动恢复，不用重启；
+ * 没装的机器每分钟最多重探一轮（每个候选一次 `python -c import`），摊在本就要跑几秒的取帧里可以忽略。
  */
 const verified = new Map();
+const FAIL_TTL_MS = 60_000;
 
 export function findPython(module, { config = {}, env = process.env, timeoutMs = 4000 } = {}) {
   const key = String(module);
-  if (verified.has(key)) return Promise.resolve(verified.get(key));
+  const hit = verified.get(key);
+  if (hit && (hit.cmd || Date.now() - hit.at < FAIL_TTL_MS)) {
+    return Promise.resolve(hit.cmd);
+  }
   const candidates = pythonCandidates({ config, env });
+  const debug = process.env.DSH_OCR_DEBUG;
   return new Promise((resolve) => {
     let i = 0;
+    const tried = [];
     const tryNext = () => {
       if (i >= candidates.length) {
-        verified.set(key, null);
+        verified.set(key, { cmd: null, at: Date.now() });
+        if (debug) {
+          console.error(`[python] no interpreter can import ${key}; tried: ${tried.join(', ') || '(none)'}`,
+            `— cached as missing for ${FAIL_TTL_MS / 1000}s`);
+        }
         return resolve(null);
       }
       const cmd = candidates[i++];
       execFile(cmd, ['-c', `import ${module}`], { timeout: timeoutMs, windowsHide: true }, (err) => {
-        if (err) return tryNext();
-        verified.set(key, cmd);
+        if (err) {
+          tried.push(cmd);
+          return tryNext();
+        }
+        verified.set(key, { cmd, at: Date.now() });
         return resolve(cmd);
       });
     };

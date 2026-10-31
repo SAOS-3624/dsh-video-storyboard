@@ -14,8 +14,9 @@
 | **ffmpeg + ffprobe** | **必须** | 解码、取帧、量响度 | 装完也用不了，第一步就报错 |
 | **yt-dlp** | 可选 | 贴 B 站/YouTube 链接时才要 | 本地文件照常能用 |
 | **ASR 服务** | 可选 | 出字幕/台词 | 能出图，但清单里没有台词 |
+| **OCR 引擎** | 可选 | 用画面硬字幕校正 ASR、找字幕带 | 不影响出图，硬字幕一条也读不到 |
 
-**只有 ffmpeg 是硬性的。** 其余两个不装都能用，只是少一块能力。
+**只有 ffmpeg 是硬性的。** 其余三个不装都能用，只是少一块能力。
 
 ---
 
@@ -125,6 +126,58 @@ pip install funasr modelscope
 **不配也能跑**：清单里会写 `transcript: none`，图照出。
 
 > 已经有字幕文件？不用 ASR —— 用 `transcriptFile` 直接喂 SRT/JSON，见 [USAGE.zh.md](USAGE.zh.md)。
+
+---
+
+## 3.5 装 OCR（可选）
+
+**插件不带 OCR 引擎。** 模型 300MB 上下、还要一个 Python 环境，打进 npm 包对只想要分镜的人是纯负担。
+所以这一块和 ffmpeg 一个待遇：**你自己装，插件负责调用**。
+
+什么时候需要它：
+
+- 想读**硬字幕**（烧在画面里的字）—— PV、唱歌、双语艺术字，ASR 转不出来的那些；
+- 开了 `detail: high`，想用画面字幕把 ASR 听错的专有名词纠正回来。
+
+### 装
+
+```bash
+# 1) 独立环境。别装进 ASR 用的那个 venv —— 两个模型的依赖会打架
+python -m venv D:/ocr-local/.venv
+
+# 2) 模型包 + 推理后端，两个都要
+D:/ocr-local/.venv/Scripts/python.exe -m pip install rapidocr onnxruntime
+```
+
+首装约 300MB，之后完全离线（模型落在 `Lib/site-packages/rapidocr/models/`）。
+
+> ⚠️ **不要照老教程装 `rapidocr-onnxruntime`。** 那个包把 `requires-python` 写死在 `<3.13`，
+> 在新一点的 Python 上直接 `No matching distribution found`。新版包叫 `rapidocr`，
+> import 名和返回结构都变了，插件两个都认（先试新的）。
+
+### 让插件找到它
+
+写进 `~/.dsh/video.json`（桌面版宿主读不到 `setx` 的环境变量，所以只能写文件）：
+
+```json
+{
+  "ocr": { "python": "D:/ocr-local/.venv/Scripts/python.exe" }
+}
+```
+
+不写这一行也行，插件会依次试：`DSH_OCR_PYTHON` → `asr.json` 里的那个 Python → PATH 上的 `python`。
+
+### 验证
+
+```bash
+D:/ocr-local/.venv/Scripts/python.exe -c "from rapidocr import RapidOCR; print('ok')"
+```
+
+或者直接在清单里看：跑一次 `detail: high`，出现 `on-screen subs: spot-checked N lines`
+就是通了；`skipped (no-python-with-rapidocr)` 说明还没找到解释器。
+
+**装完不用重启**：插件对"找不到"的结果只缓存 60 秒，最多等一分钟自动生效。
+还不生效就带 `DSH_OCR_DEBUG=1` 再跑一次，stderr 会列出试过哪些解释器。
 
 ---
 

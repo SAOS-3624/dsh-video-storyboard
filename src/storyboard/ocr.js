@@ -12,6 +12,8 @@
  */
 
 import { execFile } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,21 +21,85 @@ import { findPython } from './python.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * 桥接脚本在 **`src/ocr_bridge.py`**，本文件在 `src/storyboard/` 下 —— 少上溯一层，
+ * 每一次调用都会 ENOENT（issue #39：从装上到现在没有一次成功过）。
+ *
+ * 这条路径是本包**唯一**引用 bridge 的地方，所以下面那条测试断言它是存在的。
+ */
+export const OCR_BRIDGE = join(HERE, '..', 'ocr_bridge.py');
+
 /** 单次最多校正多少条 —— 每条要解一次 ffmpeg、跑一次 OCR，太多就不划算了 */
 export const OCR_MAX_ITEMS = 16;
 
 /**
- * 找一台能 `import rapidocr_onnxruntime` 的 python。
+ * 从 `~/.dsh/video.json` 读 OCR 配置。
+ *
+ * 为什么读文件而不是只认环境变量：桌面版 DSH 的进程环境由启动器决定，
+ * `setx` 设的变量宿主读不到（同 asr.json / tts.json 的理由）。
+ *
+ * ```json
+ * // ~/.dsh/video.json
+ * { "ocr": { "python": "D:/ocr-local/.venv/Scripts/python.exe" } }
+ * ```
+ *
+ * 插件**不带** OCR 引擎：模型有 250MB+，还绑一个 Python 环境，塞进 npm 包只会让人多下一坨
+ * 用不上的东西。这里只负责"找到你自己装的那份"，跟 ffmpeg / yt-dlp 一个待遇。
+ */
+function videoConfig(env = process.env) {
+  const home = env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
+  try {
+    const cfg = JSON.parse(readFileSync(join(home, 'video.json'), 'utf8'));
+    return { ocr: cfg?.ocr, python: cfg?.ocr?.python ?? cfg?.python };
+  } catch {
+    return {}; // 没有配置文件是正常情况，继续走下面的候选链
+  }
+}
+
+/**
+ * 找一台能 import OCR 引擎的 python。
+ *
+ * 两个模块名都试：`rapidocr`（3.x，Python 3.8+，现在 PyPI 上的主线）和
+ * `rapidocr_onnxruntime`（1.x，**只到 Python 3.12**，3.13 上装不上）。
+ * 顺序不能反 —— 新包在旧环境里也能装，旧包在新环境里装不了。
  *
  * 早期版本在这里硬编码了开发机的 `.venv` 路径 —— 跟着包发出去，别人的机器上永远找不到，
  * 于是"OCR 校正"对所有人都是静默跳过。现在统一走 python.js 的候选链 + 实际 import 验证。
  */
-export async function ocrPython({ config = {}, env = process.env } = {}) {
-  return findPython('rapidocr_onnxruntime', { config, env });
+/** 已经确认能 import 的那个模块名。锁住它，免得每轮都先去试一遍不存在的那个。 */
+let resolvedModule = null;
+
+export async function ocrPython({ config, env = process.env } = {}) {
+  const cfg = config ?? videoConfig(env);
+  if (resolvedModule) return findPython(resolvedModule, { config: cfg, env });
+  const fresh = await findPython('rapidocr', { config: cfg, env });
+  if (fresh) {
+    resolvedModule = 'rapidocr';
+    return fresh;
+  }
+  const legacy = await findPython('rapidocr_onnxruntime', { config: cfg, env });
+  if (legacy) resolvedModule = 'rapidocr_onnxruntime';
+  return legacy;
 }
 
+/**
+ * 跑一次桥接脚本。**失败必须说出原因**，不能一律返回 null。
+ *
+ * issue #39 的教训：原来 `if (err) return resolve(null)` 把"脚本不存在 / 超时 / Python 崩溃"
+ * 三种完全不同的故障压成同一个 `null`，调用方再把它报成 `detect-failed` ——
+ * 于是"Python 根本没打开那个文件"看起来像"字幕带检测失败"，藏了一整个版本都没人发现。
+ *
+ * @returns {Promise<{ok:true, data:object} | {ok:false, kind:string, message:string}>}
+ */
 function runBridge({ python, mode, images, timeoutMs = 120_000 }) {
-  const bridge = join(HERE, 'ocr_bridge.py');
+  const bridge = OCR_BRIDGE;
+  if (!existsSync(bridge)) {
+    return Promise.resolve({
+      ok: false,
+      kind: 'bridge-missing',
+      message: `ocr_bridge.py not found at ${bridge}`,
+    });
+  }
   return new Promise((resolve) => {
     execFile(python, [bridge, mode, ...images], {
       timeout: timeoutMs,
@@ -41,31 +107,76 @@ function runBridge({ python, mode, images, timeoutMs = 120_000 }) {
       windowsHide: true,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
     },
-      (err, stdout) => {
-        if (err) return resolve(null);
-        try {
-          const parsed = JSON.parse(String(stdout ?? '').trim() || '{}');
-          resolve(parsed?.ok ? parsed : null);
-        } catch {
-          resolve(null);
+      (err, stdout, stderr) => {
+        if (err) {
+          const kind = err.killed || err.signal || err.code === 'ETIMEDOUT'
+            ? 'bridge-timeout'
+            : err.code === 'ENOENT'
+              ? 'interpreter-missing'
+              : 'bridge-crashed';
+          const message = `${err.message ?? err}${stderr ? ` | ${String(stderr).trim().slice(0, 300)}` : ''}`;
+          if (process.env.DSH_OCR_DEBUG) console.error('[ocr-bridge]', mode, kind, message);
+          return resolve({ ok: false, kind, message });
         }
+        let parsed;
+        try {
+          parsed = JSON.parse(String(stdout ?? '').trim() || '{}');
+        } catch {
+          if (process.env.DSH_OCR_DEBUG) {
+            console.error('[ocr-bridge]', mode, 'bridge-bad-json', String(stdout ?? '').slice(0, 300));
+          }
+          return resolve({
+            ok: false,
+            kind: 'bridge-bad-json',
+            message: `not JSON: ${String(stdout ?? '').trim().slice(0, 200)}`,
+          });
+        }
+        if (!parsed?.ok) {
+          // Python 侧自己报的错（没装 rapidocr、参数不对）：原样带出去，别再造一个错误码
+          return resolve({
+            ok: false,
+            kind: 'bridge-error',
+            message: String(parsed?.error ?? 'bridge returned ok:false').slice(0, 300),
+          });
+        }
+        return resolve({ ok: true, data: parsed });
       });
   });
 }
 
-/** 用 2–3 帧全图检测，找出字幕带（y 的归一化区间）。检测是最贵的一步，只跑这一次。 */
+/**
+ * 用 2–3 帧全图检测，找出字幕带（y 的归一化区间）。检测是最贵的一步，只跑这一次。
+ * @returns {Promise<{ok:true, band:number[], detected:boolean, boxes:object[]} |
+ *                   {ok:false, kind:string, message:string}>}
+ */
 export async function detectSubtitleBand({ python, frames }) {
-  if (!python || !frames?.length) return null;
+  if (!python) return { ok: false, kind: 'no-python', message: 'no python with rapidocr' };
+  if (!frames?.length) return { ok: false, kind: 'no-frames', message: 'no probe frames' };
   const res = await runBridge({ python, mode: 'detect', images: frames.slice(0, 3) });
-  if (!res?.band) return null;
-  return { band: res.band, detected: Boolean(res.detected), boxes: res.boxes ?? [] };
+  if (!res.ok) return res;
+  if (!res.data?.band) {
+    return { ok: false, kind: 'no-band', message: 'detect returned no band' };
+  }
+  return {
+    ok: true,
+    band: res.data.band,
+    detected: Boolean(res.data.detected),
+    boxes: res.data.boxes ?? [],
+  };
 }
 
-/** 已知字幕带后只做识别（比全图检测快约 12 倍） */
+/**
+ * 已知字幕带后只做识别（比全图检测快约 12 倍）
+ * @returns {Promise<{ok:true, items:object[]} | {ok:false, kind:string, message:string}>}
+ */
 export async function readBand({ python, images }) {
-  if (!python || !images?.length) return null;
+  if (!python) return { ok: false, kind: 'no-python', message: 'no python with rapidocr' };
+  if (!images?.length) return { ok: false, kind: 'no-images', message: 'no band images' };
   const res = await runBridge({ python, mode: 'read', images });
-  return res?.items ?? null;
+  if (!res.ok) return res;
+  const items = res.data?.items;
+  if (!items) return { ok: false, kind: 'no-items', message: 'read returned no items' };
+  return { ok: true, items };
 }
 
 /**

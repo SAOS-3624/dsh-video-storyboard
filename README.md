@@ -49,8 +49,6 @@
 > 本地文件永远读原片。默认 `medium`（720p）；嫌糊传 `high`，嫌慢传 `low`。
 > 价位和清晰度的取舍见 [FAQ「关于钱和清晰度」](docs/FAQ.zh.md)。
 
-> 陪看（`watch_together`）是另一个插件 **`dsh-watch-together`**，见下文「陪看：另一个包」。
-
 ## 安装
 
 **从零开始的完整步骤（含依赖、自检、排错）见 [docs/INSTALL.zh.md](docs/INSTALL.zh.md)。**
@@ -204,28 +202,6 @@ video_storyboard({ input: "D:/video/xxx.mp4" })
 
 > 完整步骤（含格式示例、验证顺序、故障对照）见 **[docs/SETUP.zh.md §3](docs/SETUP.zh.md)**。
 
-## 陪看：另一个包，不在本包
-
-`watch_together`（"陪我看视频"）**不在这个插件里**，它是独立发布的
-**[`dsh-watch-together`](https://github.com/SAOS-3624/dsh-watch-together)**，版本从 `0.1.0` 起。
-
-```bash
-npm i dsh-watch-together        # 会连带装上本包（陪看建立在视频识别之上）
-```
-
-| | 本包 | `dsh-watch-together` |
-|---|---|---|
-| 工具 | `video_storyboard` / `video_zoom` / `video_probe` / `video_locate` | `watch_together` |
-| 干什么 | 一次性出一张可引用的宫格 | 跟着播放进度一段一段看下去 |
-| 依赖 | **不依赖陪看**，一个 import 都没有 | 单向依赖本包 |
-
-本包**不 import 陪看的任何一行**，所以只要视频识别就装本包，不必带上陪看。
-
-> `boardOptions()` 仍然保留 `kind: 'watch'` 这一档默认值（每段 5 格、`minGap: 0.5`）——
-> `dsh-watch-together` 就是调它来拿这些数字的，那边不再抄一遍。
-> 同理 `cache.js` 的 `PROTECTED_FILES` 仍然护着 `watch.json` / `latency.json`，
-> 因为两个包共用一个缓存目录，本包裁剪缓存时不能把陪看的数据删掉。
-
 ## 字幕与 ASR（怎么让它"听懂"）
 
 > 想看**完整可用的配置**（目录结构、asr.json / video.json 全文、实测数字、排障对照）：
@@ -368,13 +344,49 @@ DSH_ASR_KEY        DSH_ASR_KEY_ENV
 **贴链接时**（URL 模式）跑的是下载的 360p 扫描副本，`scale=1280` 放大不回细节，硬字幕本来就糊；
 清单会标 `[from the 360p scan copy]`。想要更准就用本地高清文件。
 
-**全程本地、不花 token。** 需要 `rapidocr_onnxruntime`：
+**全程本地、不花 token。但引擎要你自己装 —— 插件不带。**
+
+跟 ffmpeg 一个道理：模型有 300MB 上下，还绑一个 Python 环境，塞进 npm 包只会让所有人多下一坨。
+插件只负责**调用**你装的那一份。
 
 ```bash
-pip install rapidocr-onnxruntime
+# 1) 建一个独立环境（别装进 ASR 那个 venv，两个模型的依赖会打架）
+python -m venv D:/ocr-local/.venv
+
+# 2) 装引擎：模型包 + 推理后端，两个都要
+D:/ocr-local/.venv/Scripts/python.exe -m pip install rapidocr onnxruntime
 ```
 
-没装就**静默跳过**，清单里会写 `skipped (no-python-with-rapidocr)`，不会当作成功。
+> **别照老教程装 `rapidocr-onnxruntime`** —— 那个包把 `requires-python` 写死在 `<3.13`，
+> 在 Python 3.13 上直接 `No matching distribution`。新版包叫 `rapidocr`，import 名和返回结构
+> 都变了，插件两个都认（先试新的）。
+
+```bash
+# 3) 告诉插件用哪个 Python（桌面版宿主读不到 setx 的环境变量，所以写文件）
+#    ~/.dsh/video.json
+{ "ocr": { "python": "D:/ocr-local/.venv/Scripts/python.exe" } }
+```
+
+不配这一行也能用：插件会依次试 `DSH_OCR_PYTHON` → `asr.json` 里那个 Python → PATH 上的 `python`。
+
+**怎么确认配好了**：跑一次 `detail: high`，清单里出现 `on-screen subs: spot-checked N lines`
+就是通了；还是 `skipped (no-python-with-rapidocr)` 说明没找到。`DSH_OCR_DEBUG=1` 会打印
+它试过哪些解释器、以及每条主句的 OCR 原文和判定理由。
+
+没装就**静默跳过**，不影响出图 —— 只是没有字幕校正。
+
+**装完不用重启。** 插件对"找不到解释器"的结果只缓存 60 秒，装完最多等一分钟就自动用上
+（以前是进程内永久缓存，必须重启整个 DSH 宿主，而且报错完全看不出是这个原因）。
+
+校正失败时清单里写的是**具体原因**，不再一律 `detect-failed`：
+
+| 清单里的字样 | 意思 |
+|---|---|
+| `bridge-missing` | 桥接脚本没找到（安装损坏；正常安装不会出现） |
+| `bridge-timeout` | 单次 OCR 超过 120 秒 |
+| `bridge-crashed` | Python 进程非零退出（栈在 `DSH_OCR_DEBUG` 的 stderr 里） |
+| `bridge-error` | Python 自己报的错，后面跟着原文（多半是没装 `rapidocr` / `onnxruntime`） |
+| `no-band` | 检测跑通了，但画面里找不到像字幕的东西 |
 
 ### 热词（比换模型更有效）
 

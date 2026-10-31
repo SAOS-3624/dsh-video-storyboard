@@ -6,8 +6,11 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 
-import { OCR_MAX_ITEMS, ocrPython, shouldReplace, similarity } from '../src/storyboard/ocr.js';
+import {
+  OCR_BRIDGE, OCR_MAX_ITEMS, detectSubtitleBand, ocrPython, readBand, shouldReplace, similarity,
+} from '../src/storyboard/ocr.js';
 
 test('similarity: 忽略标点，按字符算', () => {
   assert.equal(similarity('你好，世界', '你好世界'), 1);
@@ -51,4 +54,35 @@ test('预算与解释器发现是显式常量，不靠猜', async () => {
   // 现在是异步的：要真去试 `import rapidocr_onnxruntime`，不能靠路径猜
   const py = await ocrPython({ env: {} });
   assert.ok(py === null || typeof py === 'string', `unexpected: ${JSON.stringify(py)}`);
+});
+
+/**
+ * #39 的护栏：桥接脚本的路径少上溯一层时，从装上到现在每一次调用都是 ENOENT，
+ * 而调用方把它报成 `detect-failed`，谁也看不出来。这条断言让那种回归当场变红。
+ */
+test('ocr_bridge.py 的路径是真的存在的（#39 的回归护栏）', () => {
+  assert.ok(existsSync(OCR_BRIDGE), `ocr_bridge.py not found: ${OCR_BRIDGE}`);
+  assert.match(OCR_BRIDGE.replace(/\\/g, '/'), /\/src\/ocr_bridge\.py$/,
+    '桥接脚本必须在 src/ 下，不是 src/storyboard/ 下');
+});
+
+test('失败必须说出原因，不能一律 null（#39）', async () => {
+  const noPy = await detectSubtitleBand({ python: null, frames: ['x.jpg'] });
+  assert.deepEqual(noPy.ok, false);
+  assert.equal(noPy.kind, 'no-python');
+
+  const noFrames = await detectSubtitleBand({ python: 'python', frames: [] });
+  assert.equal(noFrames.kind, 'no-frames');
+
+  const noItems = await readBand({ python: null, images: ['x.jpg'] });
+  assert.equal(noItems.kind, 'no-python');
+});
+
+test('解释器不存在 → interpreter-missing，而不是"检测失败"', async () => {
+  const r = await detectSubtitleBand({
+    python: 'definitely-not-a-python-interpreter-xyz', frames: ['x.jpg'],
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.kind, 'interpreter-missing', JSON.stringify(r));
+  assert.ok(r.message, '要带上原因');
 });

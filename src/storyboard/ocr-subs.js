@@ -51,10 +51,12 @@ export async function correctByOnScreenSubs({
     const probes = await Promise.all([0.2, 0.5, 0.8].map((r, i) => grab(
       winStart + winDur * r, `probe${i}.jpg`, null,
     )));
-    const band = await detectSubtitleBand({ python, frames: probes });
-    if (!band) return { status: 'failed', reason: 'detect-failed' };
+    const det = await detectSubtitleBand({ python, frames: probes });
+    // 失败原因要原样传出去：`detect-failed` 曾经同时代表"脚本不存在""超时""检测真失败"，
+    // 于是"ocr_bridge.py 路径拼错"藏了一整个版本（#39）。
+    if (!det.ok) return { status: 'failed', reason: det.kind, detail: det.message };
 
-    const [y0, y1] = band.band;
+    const [y0, y1] = det.band;
     const crop = `crop=iw:ih*${(y1 - y0).toFixed(4)}:0:ih*${y0.toFixed(4)},scale=1280:-1`;
 
     // ② 均匀抽样若干条台词（不取全部，成本与收益不成正比）
@@ -69,8 +71,9 @@ export async function correctByOnScreenSubs({
       const mid = winStart + (seg.from + seg.to) / 2;
       images.push(await grab(mid, `band${k}.jpg`, crop));
     }
-    const items = await readBand({ python, images });
-    if (!items) return { status: 'failed', reason: 'read-failed' };
+    const read = await readBand({ python, images });
+    if (!read.ok) return { status: 'failed', reason: read.kind, detail: read.message };
+    const items = read.items;
 
     const out = segments.map((x) => ({ ...x }));
     const changes = [];
@@ -92,7 +95,7 @@ export async function correctByOnScreenSubs({
       status: 'applied',
       fixed: changes.length,
       checked: picks.length,
-      band: { y0: +y0.toFixed(3), y1: +y1.toFixed(3), detected: band.detected },
+      band: { y0: +y0.toFixed(3), y1: +y1.toFixed(3), detected: det.detected },
       // URL 模式下跑的是下载的扫描副本：字幕本身就糊，校正的可信度低于本地高清文件。
       // 这个事实必须传到清单，否则读起来像"原片台词已核对"。
       ...(sourceCopyHeight
