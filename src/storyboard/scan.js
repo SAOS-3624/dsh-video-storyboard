@@ -398,6 +398,9 @@ export function decideCuts(stats, {
   const used = threshold === 'auto'
     ? autoThreshold(scores, { duration })
     : threshold === 'auto-low'
+      // 保持 4 的低下限（0.5.4 的取法）。试过抬到"本窗 auto 阈值的 1/5"，
+      // 结果与直觉相反：门槛一高，留下的刀均分也变高，反而让**更多**窗口过了
+      // `mean >= minScore` 那道采纳关（概念 PV 上 78 → 91 刀）。两处门槛耦合，别单动一个。
       ? Math.max(4, quantile(scores, 0.10))
       : threshold;
   const eps = 1e-6;
@@ -683,15 +686,25 @@ export function refineCutsByWindow({
     if (perFrame) finalGap = Math.min(finalGap, gap);
     const fine = decideCuts(windowStats, { threshold: 'auto-low', minGap: gap, duration: to - from });
     const mean = fine.cuts.reduce((a, c) => a + (c.score ?? 0), 0) / Math.max(1, fine.cuts.length);
-    // 采纳门槛要**相对本窗**，不能是常数 25：
-    // 暗场/低对比的快剪，刀均分只有 18–19（实测 0.32s 快剪窗内 19.3），
-    // 而被它甩开的"窗内常态"只有 4.1 —— 4.7 倍的落差明明是刀，绝对门槛 25 却把它挡了，
-    // 于是 `refined: []`，细判白跑，快剪镜头数只能靠 0.35s 粗间隔数，结果是对半。
-    // 3×窗内中位分是"这是不是一次跳变"的相对判据；minScore 仍然是硬上限（亮素材不放宽）。
-    const med = quantile(windowStats.map((s) => s.score), 0.5);
-    const need = Math.max(6, Math.min(minScore, med * 3));
+    // 采纳门槛**保持绝对阈值**（minScore=25），不改成"相对本窗基线"。
+    // 试过相对判据（`max(6, 3×窗内中位分)`）：暗场/低对比快剪能多救回几刀，但代价是
+    // **逐帧动画（一拍二/一拍三）的片子全线崩** —— 记管概念 PV 上细扫从 44 刀涨到 122 刀，
+    // 抽 8 个新增点逐个看前后帧，6 个是同一个镜头里换张画（硬币在手里转、白剪影摆姿势），
+    // 不是剪辑。相邻帧差这种信号分不开"整帧换场"和"局部换画"，靠调门槛只会两头晃。
+    // 要放宽必须先有**空间证据**（改了多少块/多少像素），那是下一版的事。
+    const need = minScore;
+    // **逐帧动画的坑**（记管概念 PV 实测）：动画经常"一拍二/一拍三"，画面每 2–3 帧换一张画，
+    // 帧差于是每隔两帧出现一个不小的峰。整窗又不是"每帧都在大改"（meanScoreAll 只有 5–8），
+    // 相对门槛会把这一串峰全当成剪辑点 —— 8 秒里数出 20 刀，而那些帧其实是同一个镜头里
+    // 手里那枚硬币在动（抽样看过）。
+    // 所以非 perFrame 的窗口要求细判出的刀**至少隔 3.5 帧**：真人剪辑不会 2 帧一剪。
+    const gaps = fine.cuts.slice(1).map((c, i) => c.t - fine.cuts[i].t).sort((a, b) => a - b);
+    const medianGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : null;
+    const minShot = Math.max(0.13, 3.5 / Math.max(1, fps));
+    const tooTight = !perFrame && medianGap !== null && medianGap < minShot;
     const adopt = fine.cuts.length > coarse.length
       && fine.degraded !== 'motion'
+      && !tooTight
       && mean >= need;
 
     if (adopt) {

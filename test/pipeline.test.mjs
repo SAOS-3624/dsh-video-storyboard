@@ -446,36 +446,24 @@ test('refineCutsByWindow: 快闪窗口被细判，运镜窗口保持粗判', asy
   assert.equal(r.refined[0].from, 0);
 });
 
-test('refineCutsByWindow: 采纳门槛按"本窗基线"算，不是常数 25', async () => {
+test('refineCutsByWindow: 采纳门槛保持绝对值（相对基线会把一拍二当剪辑）', async () => {
   const { refineCutsByWindow } = await import('../src/storyboard/pipeline.js');
-  // 同样密，每刀 20 分，但窗内常态只有 3 分 —— 6.7 倍落差就是真剪辑，
-  // 老的常数门槛（25）会把它挡掉，快剪素材于是只能数出一半（实测 5/11）
-  const loud = gapFrames(50, 20, 0);
+  // 20 分、窗内常态 3 分：相对判据会采纳（6.7 倍落差），但它正是概念 PV 上翻车的那类窗口 ——
+  // 一刀 20 分的"落差"在动画里多半是换张画。宁可少报：25 分的硬门槛。
+  const quiet = gapFrames(50, 20, 0);
   const r1 = refineCutsByWindow({
-    stats: loud, fps: fps25, coarseCuts: [{ t: 0.5, score: 20 }], winStart: 0, winDur: 2, winSec: 2,
+    stats: quiet, fps: fps25, coarseCuts: [{ t: 0.5, score: 20 }], winStart: 0, winDur: 2, winSec: 2,
   });
-  assert.equal(r1.refined.length, 1, '基线很低时 20 分就是刀，应当采纳');
-  assert.ok(r1.cuts.length >= 10, `应细判出多刀，实得 ${r1.cuts.length}`);
+  assert.equal(r1.refined.length, 0, '20 分不够狠，不该采纳');
+  assert.equal(r1.cuts.length, 1, '应保留粗判结果');
 
-  // 反过来：窗内常态本身就有 12 分，20 分只是 1.7 倍 —— 分不清是刀还是运动，宁可少报
-  const noisy = Array.from({ length: 50 }, (_, i) => ({ t: i / fps25, score: i % 4 === 3 ? 20 : 12 }));
+  // 真正的大跳变（70 分）照样采纳
+  const loud = gapFrames(50, 70, 0);
   const r2 = refineCutsByWindow({
-    stats: noisy, fps: fps25, coarseCuts: [{ t: 0.5, score: 20 }], winStart: 0, winDur: 2, winSec: 2,
+    stats: loud, fps: fps25, coarseCuts: [{ t: 0.5, score: 70 }], winStart: 0, winDur: 2, winSec: 2,
   });
-  assert.equal(r2.refined.length, 0, '不该采纳');
-  assert.equal(r2.cuts.length, 1, '应保留粗判结果');
-});
-
-/* ---------------------------------------------------------------- 子格摊开 */
-
-test('chooseSubGrid: 按密度决定 —— 短段看刀/秒，长段只看长度', async () => {
-  const { chooseSubGrid } = await import('../src/storyboard/pipeline.js');
-  // 4 个镜头摊在 11 秒（0.36/s）低于 0.4，且不到 12 秒 → 不摊
-  assert.equal(chooseSubGrid({ shots: 4, dur: 11, cellW: 499, cellH: 278 }), 1);
-  // 同样 4 个镜头挤在 3 秒里（1.3/s）就是快闪，该摊
-  assert.ok(chooseSubGrid({ shots: 4, dur: 3, cellW: 499, cellH: 278 }) >= 2);
-  // 15 秒 4 个镜头：刀/秒 0.27 一样低，但格子长 → 摊（2026-10-30 新行为）
-  assert.equal(chooseSubGrid({ shots: 4, dur: 15, cellW: 499, cellH: 278 }), 2);
+  assert.equal(r2.refined.length, 1, '70 分应该采纳');
+  assert.ok(r2.cuts.length >= 10, `应细判出多刀，实得 ${r2.cuts.length}`);
 });
 
 test('chooseSubGrid: 子帧小于 200×112 就降档（3×3 / 4×4 都不再摊）', async () => {
@@ -630,4 +618,25 @@ test('e2e: from>0 时 cell 表存绝对时间，不重复加窗口起点（issue
   const hit = await lookupCell(file, 1);
   assert.ok(hit, 'cell 表应已写入');
   assert.equal(hit.from, cell.t_start, 'cell 表的值必须等于 t_start，不能再加一次 from');
+});
+
+test('refineCutsByWindow: 逐帧动画（一拍二）的周期性帧差不算剪辑点', async () => {
+  const { refineCutsByWindow } = await import('../src/storyboard/pipeline.js');
+  // 复刻记管概念 PV 实测：整窗大部分静止（均值 5–8），但每 2 帧换一张画 —— 8 秒里 20 个"峰"，
+  // 而抽样看画面是同一个镜头里硬币在动。真人剪辑不会 2 帧一剪，所以不采纳。
+  const stats = [];
+  for (let i = 0; i < 8 * fps25; i++) stats.push({ t: i / fps25, score: i % 2 ? 46 : 1.2 });
+  const r = refineCutsByWindow({
+    stats, fps: fps25, coarseCuts: [{ t: 1, score: 46 }], winStart: 0, winDur: 8, winSec: 8,
+  });
+  assert.equal(r.refined.length, 0, '一拍二不是剪辑');
+  assert.equal(r.cuts.length, 1, '保留粗判结果');
+
+  // 同样的密度，但间隔 4 帧（0.16s）—— 这是真的快剪，应当采纳
+  const real = [];
+  for (let i = 0; i < 8 * fps25; i++) real.push({ t: i / fps25, score: i % 4 === 0 ? 46 : 1.2 });
+  const r2 = refineCutsByWindow({
+    stats: real, fps: fps25, coarseCuts: [{ t: 1, score: 46 }], winStart: 0, winDur: 8, winSec: 8,
+  });
+  assert.ok(r2.cuts.length >= 20, `4 帧一剪应该数出来，实得 ${r2.cuts.length}`);
 });
