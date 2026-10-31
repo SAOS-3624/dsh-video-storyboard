@@ -6,8 +6,13 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 
-import { OCR_MAX_ITEMS, ocrPython, shouldReplace, similarity } from '../src/storyboard/ocr.js';
+import { OCR_BRIDGE, OCR_MAX_ITEMS, ocrPython, shouldReplace, similarity } from '../src/storyboard/ocr.js';
+
+test('ocr_bridge.py 按导出的路径找得到（路径少上溯一层会全员 ENOENT）', () => {
+  assert.ok(existsSync(OCR_BRIDGE), `ocr_bridge.py not found at ${OCR_BRIDGE}`);
+});
 
 test('similarity: 忽略标点，按字符算', () => {
   assert.equal(similarity('你好，世界', '你好世界'), 1);

@@ -19,6 +19,13 @@ import { findPython } from './python.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * ocr_bridge.py 在 src/（本文件所在目录的上一层）。
+ * 以前写成 join(HERE, 'ocr_bridge.py')，指向 src/storyboard/ocr_bridge.py —— 一个不存在的路径，
+ * 每次调用都 ENOENT，OCR 校正对所有用户静默失效（#39）。
+ */
+export const OCR_BRIDGE = join(HERE, '..', 'ocr_bridge.py');
+
 /** 单次最多校正多少条 —— 每条要解一次 ffmpeg、跑一次 OCR，太多就不划算了 */
 export const OCR_MAX_ITEMS = 16;
 
@@ -33,16 +40,20 @@ export async function ocrPython({ config = {}, env = process.env } = {}) {
 }
 
 function runBridge({ python, mode, images, timeoutMs = 120_000 }) {
-  const bridge = join(HERE, 'ocr_bridge.py');
   return new Promise((resolve) => {
-    execFile(python, [bridge, mode, ...images], {
+    execFile(python, [OCR_BRIDGE, mode, ...images], {
       timeout: timeoutMs,
       maxBuffer: 8 * 1024 * 1024,
       windowsHide: true,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
     },
       (err, stdout) => {
-        if (err) return resolve(null);
+        if (err) {
+          // ENOENT（脚本/解释器不在）、超时、崩溃是三种完全不同的原因，
+          // 默认仍然静默跳过（不影响出图），但要能查 —— 不再全员盲猜"detect-failed"
+          if (process.env.DSH_OCR_DEBUG) console.error('[ocr] bridge failed:', err.message);
+          return resolve(null);
+        }
         try {
           const parsed = JSON.parse(String(stdout ?? '').trim() || '{}');
           resolve(parsed?.ok ? parsed : null);
