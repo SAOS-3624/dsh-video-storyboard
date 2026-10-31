@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { resolveInput } from '../storyboard/fetch.js';
 import { buildSubtitleStrip, DEFAULT_BAND } from '../storyboard/subtitle-strip.js';
 import { validateToolArgs } from '../storyboard/tool-spec.js';
+import { serviceOf } from './shared.js';
 
 const tc = (s) => {
   const m = Math.floor(s / 60);
@@ -42,8 +43,10 @@ export async function execute(ctx, args) {
     });
 
     const jpg = await readFile(out);
-    // 同 shared.js：宿主没有 attachments 服务时给出可读的错误，而不是 TypeError
-    const saveImage = ctx?.attachments?.saveImage;
+    // 同 shared.js：宿主没有 attachments 服务时给出可读的错误，而不是 TypeError。
+    // **必须走 `serviceOf`**：`ctx?.attachments` 在 cordis 的 Proxy 上会直接抛
+    // "without inject"，`?.` 挡不住（见 shared.js 里那段说明）。
+    const saveImage = serviceOf(ctx, 'attachments')?.saveImage;
     if (typeof saveImage !== 'function') {
       throw new Error('this DSH build has no `attachments` service; the subtitle image cannot be '
         + 'shown. The text locations above are still valid.');

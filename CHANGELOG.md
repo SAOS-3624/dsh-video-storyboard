@@ -1,6 +1,29 @@
 # Changelog
 
-## [0.5.10] - 2026-11-01
+## [0.5.11] - 2026-11-01
+
+> `0.5.10` 已废弃（deprecated）：它带着下面第一条那个崩溃，别装。内容全部并进本版。
+
+### Fixed — `cannot get property "attachments" without inject`
+
+用户实报（Win10 / DSH 0.2.1-rc.3 / Node 24.21）：0.5.9 之后分镜工具直接报这句，退回 0.5.3 才好。
+
+根因是 0.5.9 修"装插件卡死"时**只改了一半**：`inject` 里去掉了 `attachments`（cordis 的
+`inject` 是硬依赖，服务缺失会让 `apply` 永不执行），但访问点只是加了个 `?.`：
+
+```js
+const saveImage = ctx?.attachments?.saveImage;   // 看着像运行期探测，其实照样炸
+```
+
+cordis 的 `ctx` 是 Proxy：服务没在 `inject` 里声明时，`get` 陷阱**直接抛**
+`cannot get property "xxx" without inject`。`?.` 只挡 `null` / `undefined`，**挡不住异常**。
+
+现在统一走 `serviceOf(ctx, name)`：优先 `ctx.get(name)`（cordis 给可选依赖的正规取法，
+没注册返回 `undefined`），老宿主才退回属性访问且整段包在 `try` 里。
+
+- `src/tools/shared.js`、`src/tools/subtitles.js` 两处访问点改用 `serviceOf`
+- `test/service-optional.test.mjs` 用一个"像 cordis 那样抛"的 Proxy 钉住：`serviceOf` 收得住，
+  工具给的是可读错误（`no \`attachments\` service`）而不是宿主内部原话
 
 ### Transcript as a separate pass (`./transcript-pass`)
 
