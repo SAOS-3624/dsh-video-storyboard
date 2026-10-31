@@ -14,7 +14,7 @@
  */
 
 import {
-  access, mkdir, readdir, rename, rm, stat, writeFile,
+  access, mkdir, readFile, readdir, rename, rm, stat, writeFile,
 } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { execFile } from 'node:child_process';
