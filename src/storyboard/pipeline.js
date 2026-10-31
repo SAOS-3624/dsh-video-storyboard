@@ -366,7 +366,10 @@ export async function runStoryboard(opts) {
   })();
 
   // 扫描结果按 (文件, 窗口, 阈值策略) 缓存：storyboard 之后的 zoom 能直接复用
-  const key = cache ? await cacheKey({ input, start: winStart, end: winStart + winDur, threshold }) : null;
+  // 键里要带 scanGap：判定用到了它（近邻合并），否则换参数会命中旧配置的切点
+  const key = cache ? await cacheKey({
+    input, start: winStart, end: winStart + winDur, threshold, minGap: scanGap,
+  }) : null;
   // precomputed：批量模式下全片已经扫过一次，窗口直接复用那份切点与摘要，
   // 不再为每个窗口重新解码一遍（2 小时的片子能省掉 24 次重复扫描）。
   // **逐帧的 means 不进缓存**（级联缓存走 JSON.stringify，塞不下也别扭），

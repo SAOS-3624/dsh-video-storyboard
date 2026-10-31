@@ -502,14 +502,21 @@ export function decideCuts(stats, {
   // 判"持续在动"而不是"邻域里有峰值"，而且用**相对于这一刀自己的分数**来比：
   // 甩镜的邻域分数和切口本身一样高（29 vs 29），快剪的邻域是平静的（3 vs 70）。
   // 用阈值当基准不行 —— 细扫的 auto-low 可能只有 4，平静帧的 3 分也会被算成"吵"。
+  // 时间轴是等间隔的，先用二分定出 [from,to] 的下标区间，再做窗口内扫描。
+  // 原来每条候选都 `for (const s2 of stats)` 扫全片 —— 90k 帧 × 数千条候选 = 上亿次比较。
+  const tAt = (i) => stats[i].t;
+  const lowerBoundT = (t) => {
+    let lo = 0; let hi = stats.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (tAt(mid) < t) lo = mid + 1; else hi = mid; }
+    return lo;
+  };
   const neighborhoodQuiet = (t, from, to, self) => {
     let loud = 0;
     let total = 0;
     const bar = Math.max(1.5, self * 0.5);
-    for (const s2 of stats) {
-      if (s2.t < from || s2.t > to) continue;
+    for (let i = lowerBoundT(from); i < stats.length && tAt(i) <= to; i += 1) {
       total += 1;
-      if (s2.score >= bar) loud += 1;
+      if (stats[i].score >= bar) loud += 1;
     }
     if (total === 0) return true;
     return loud / total < 0.6;
@@ -517,11 +524,11 @@ export function decideCuts(stats, {
   const events = cutsFromEvents(picked, step, { minGap, adaptive: adaptiveGap });
   // 密到"每 2 帧一剪"时邻域里根本没有安静的时候，这条护栏无从判断 —— 跳过它。
   // （素材真能做到每秒 12 刀时，只能靠后面的细扫去取舍。）
+  // events 已按时间升序：最近邻只可能是左右相邻那个（原来是 O(n²) 双循环）
   const nearest = (i) => {
     let d = Infinity;
-    for (let k = 0; k < events.length; k++) {
-      if (k !== i) d = Math.min(d, Math.abs(events[k].t - events[i].t));
-    }
+    if (i > 0) d = Math.min(d, events[i].t - events[i - 1].t);
+    if (i + 1 < events.length) d = Math.min(d, events[i + 1].t - events[i].t);
     return d;
   };
   const kept = events.filter((c, i) => nearest(i) < 0.15

@@ -421,3 +421,24 @@ test('decideCuts: 一抹安静里的孤立跳变照样报刀（护栏不能把�
   assert.equal(r.cuts.length, 1);
   assert.equal(r.cuts[0].t, 30 / 25);
 });
+
+test('cacheKey: minGap 必须进键（换参数不能命中旧配置的切点）', async () => {
+  const { cacheKey } = await import('../src/storyboard/cache.js');
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-key-'));
+  try {
+    const input = join(dir, 'f.mp4');
+    await writeFile(input, 'x');
+    // 踩过的坑：键里漏了 minGap，改参数却拿回上一次的 cuts（"阈值调高刀数反而变多"就是这么来的）
+    const a = await cacheKey({ input, start: 0, end: 30, threshold: 'auto', minGap: 0.35 });
+    const b = await cacheKey({ input, start: 0, end: 30, threshold: 'auto', minGap: 0 });
+    const c = await cacheKey({ input, start: 0, end: 30, threshold: 'auto', minGap: 0.35 });
+    assert.ok(a && b);
+    assert.notEqual(a, b, 'minGap 不同必须得到不同的缓存键');
+    assert.equal(a, c, '同参数必须稳定');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

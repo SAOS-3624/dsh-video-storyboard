@@ -97,6 +97,3 @@ export function findPython(module, { config = {}, env = process.env, timeoutMs =
 }
 
 /** 清掉探测缓存（测试用） */
-export function __resetPythonCache() {
-  verified.clear();
-}

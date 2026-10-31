@@ -157,48 +157,6 @@ async function mediaDuration({ input, ffprobePath = DEFAULT_FFPROBE }) {
  *
  * @returns {Promise<Array<{t:number, diff:number}>>} 变化时刻（已按 minGap 合并）
  */
-export async function scanBandChanges({
-  input, ffmpegPath = DEFAULT_FFMPEG, band, from = 0, to,
-  fps = 4, w = 96, h = 12, threshold = 12, minGap = 0.9,
-}) {
-  const [y0, y1] = band;
-  const vf = `crop=iw:ih*${(y1 - y0).toFixed(4)}:0:ih*${y0.toFixed(4)},scale=${w}:${h},format=gray,fps=${fps}`;
-  const args = ['-hide_banner', '-v', 'error'];
-  if (from > 0) args.push('-ss', String(from));
-  if (Number.isFinite(to) && to > from) args.push('-t', String(to - from));
-  args.push('-i', input, '-vf', vf, '-f', 'rawvideo', '-pix_fmt', 'gray', '-');
-
-  const buf = await new Promise((resolve, reject) => {
-    const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const chunks = [];
-    let err = '';
-    child.stdout.on('data', (d) => chunks.push(d));
-    child.stderr.on('data', (d) => { err += d.toString(); });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code !== 0) reject(new Error(err.trim().split('\n').slice(-1)[0] || `ffmpeg ${code}`));
-      else resolve(Buffer.concat(chunks));
-    });
-  });
-
-  const frameSize = w * h;
-  const n = Math.floor(buf.length / frameSize);
-  const out = [];
-  for (let i = 1; i < n; i += 1) {
-    const cur = buf.subarray(i * frameSize, (i + 1) * frameSize);
-    const prev = buf.subarray((i - 1) * frameSize, i * frameSize);
-    let sum = 0;
-    for (let k = 0; k < frameSize; k += 1) sum += Math.abs(cur[k] - prev[k]);
-    const diff = sum / frameSize;
-    if (diff < threshold) continue;
-    const t = from + i / fps;
-    // 淡入淡出会连着好几帧都过阈值：靠得太近的当同一次变化
-    if (out.length > 0 && t - out[out.length - 1].t < minGap) continue;
-    out.push({ t: +t.toFixed(2), diff: +diff.toFixed(1) });
-  }
-  return out;
-}
-
 /**
  * 主流程。
  *

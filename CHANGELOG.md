@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **缓存键漏了 `minGap`**（今晚排查切点参数时撞出来的）：`cacheKey` 只含 文件/窗口/阈值，
+  不含 `minGap` —— 于是"把阈值下限从 12 调到 20，刀数反而变多"，因为拿回来的是旧配置的 cuts。
+  现在 `minGap` 进键（另一处调用也补上 `scanGap`），并加了回归测试。`CACHE_VERSION` 22（升级后首跑会重扫一次）。
+- 合并 5 个社区 PR：窗口内 OCR 的 `-ss` 不再叠加 `winStart`（#45）、缓存命中读回 `meta.json`（`readFile` 漏导入）、
+  CLI `--detail high` 真正打开 OCR（#44）、`fixed=0` 不再在清单里静默（#46）、ASR/OCR 分句级对齐（#46）。
+
+### Changed
+
+- `decideCuts` 里两处 O(n²) 去掉：邻域判据改成二分定位时间窗、最近邻只看左右相邻事件。
+  微基准（60 分钟/9 万帧）：380ms → **45ms**，细扫档 473ms → **22ms**；判定结果逐条相同。
+- 删掉从未被引用的 `src/flicker.js`（104 行）与两个死导出（`__resetPythonCache`、`scanBandChanges`）。
+  `checkBiliLogin` / `looksLikeVideoUrl` / `waitForPort` / `configuredLaunch` 看起来没人用，但**陪看包在用**，保留。
+
 ## [0.5.7] - 2026-10-31
 
 这一版重做切点的**尺度一致性**，并补上"伪切点"这半边测试。
