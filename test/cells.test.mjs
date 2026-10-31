@@ -12,7 +12,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { lookupCell, saveCells } from '../src/storyboard/cells.js';
-import { suggest } from '../src/storyboard/plan.js';
 import { validateZoomArgs } from '../src/tool-spec.js';
 
 test('cells: 存了就能按 id 查回绝对时间', async () => {
@@ -77,15 +76,3 @@ test('validateZoomArgs: 有 cellId 就不再强制 from/to；越界的 cellId �
   assert.ok(validateZoomArgs({ input: 'a.mp4', cellId: 0 }).some((p) => /cellId/.test(p)));
 });
 
-test('suggest: 阈值可覆盖，且覆盖真的改变分类结果', () => {
-  // 同一份元数据：按默认阈值算音乐片（meanLufs -16 > -18 且 speechRate 0.5 < 1）
-  const meta = { duration: 300, cuts: 40, speechRate: 0.5, meanLufs: -16, hasSubtitle: false };
-  const a = suggest(meta);
-  // 把 musicLufs 抬到 -10，就不该再判成音乐驱动
-  const b = suggest({ ...meta, thresholds: { musicLufs: -10 } });
-  assert.notEqual(a.reason, b.reason, '阈值覆盖必须真的影响判定');
-  assert.equal(a.musicDriven, true, '默认阈值下应判成音乐驱动');
-  assert.equal(b.musicDriven, undefined, '抬高阈值后不该再判成音乐驱动');
-  // 判定结果只影响取帧，不该反过来改格数（旧规则会强制 9 格）
-  assert.equal(a.cells, b.cells, '音乐判定不该改格数');
-});

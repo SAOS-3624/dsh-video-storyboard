@@ -37,7 +37,18 @@ function makeResult({ cells = 64, textLen = 300 } = {}) {
     cuts: [], summary: { frames: 0, p90: 0 }, threshold: 40, cached: false,
     audio: null,
     transcript: { source: 'subtitle', model: 'embedded', segments: 1782 },
-    plan: { cells: 16, sheets: 4, adaptive: true, pick: 'sharp', burn: 'index', minGap: 120, reason: 'auto', bursts: [] },
+    plan: {
+      cells: 16, sheets: 4, produced: cells, frames: cells,
+      strategy: 'balanced', strategyNote: '1 档压成 1/2 尺寸', maxFrames: 96,
+      // 新口径：cell 报的是**最小格**，canvas 是画布尺寸，tiers 是档位分布
+      cell: { w: 400, h: 225, readability: 'scene' },
+      canvas: { width: 800, height: 450 }, fill: 82.5, tiers: { 4: cells }, sampleMarks: 0,
+      pick: 'mid', burn: 'index', trace: [],
+      inputs: {
+        duration: 9300, scanThreshold: 40, meanLufs: -18, speechRate: 0.4,
+        motion: 3.2, cuts: 120, hasSubtitle: true,
+      },
+    },
     sheets: cells === 64 ? sheets : sheets.slice(0, Math.ceil(cells / 16)),
     totalDuration: 9300,
   };
@@ -87,29 +98,19 @@ test('cellRange 越界时被夹到有效范围', () => {
 
 test('清单头部带 cell/tokens/ffmpeg/sha256 与 plan 输入', () => {
   const r = makeResult({ cells: 16 });
-  r.sheets[0].cellW = 559;
-  r.sheets[0].cellH = 248;
+  r.plan = { ...r.plan, cell: { w: 559, h: 248, readability: 'text' } };
   r.provenance = { ffmpeg: '6.1.1-essentials_build', sha256: 'abc123' };
-  r.plan = {
-    ...r.plan,
-    auto: true,
-    inputs: {
-      duration: 100, scanThreshold: 40, meanLufs: -14.2, speechRate: 0.3,
-      motion: 7.9, cuts: 12, hasSubtitle: true,
-    },
-    thresholds: { musicLufs: -18, musicSpeechRate: 1, speechRateCut: 3 },
-  };
   const text = formatManifest(r, { maxChars: 200_000 });
-  assert.match(text, /cell="559x248"/);
-  assert.match(text, /tokens="418 \(est@418\/img, DSH 42px grid[^"]*\)"/,
-    '要按实际像素算 token（1064x600 → 418），不能写死 384');
+  assert.match(text, /cell>=559x248/);
+  // 一张图固定 384 token（DS 的 800×800 上限），不再按 42px 网格算 418
+  assert.match(text, /tokens="384 \(384\/img: 800x800 cap\)"/);
   assert.match(text, /ffmpeg="6\.1\.1-essentials_build"/);
   assert.match(text, /sha256="abc123"/);
-  assert.match(text, /plan: auto 16 cells/);
-  assert.match(text, /meanLufs=-14\.2 LUFS/);
-  assert.match(text, /speechRate=0\.3 chars\/s/);
-  assert.match(text, /cuts=12/);
-  assert.match(text, /thresholds musicLufs>-18, musicSpeechRate<1, speechRateCut>3/);
+  assert.match(text, /plan: strategy=balanced/);
+  assert.match(text, /tiers 1\/4×16/);
+  assert.match(text, /meanLufs=-18 LUFS/);
+  assert.match(text, /motion=3\.2/);
+  assert.match(text, /cuts=120/);
 });
 
 test('清单把外部文本里的指令形状内容标成不可信数据', () => {
@@ -286,6 +287,7 @@ test('withSheetSuffix: 没有扩展名时直接追加', () => {
 
 test('manifest: pick=sharp 时每格给出 frame@（它推不出来，且不等于格起点）', () => {
   const r = makeResult({ cells: 4 });
+  r.plan = { ...r.plan, pick: 'sharp' };
   const text = formatManifest(r);
   // 第 1 格 t_start=0, t_frame=70 → frame@01:10.00
   assert.match(text, /cell 1 .*frame@01:10\.00/);
@@ -373,20 +375,6 @@ test('清单：fixed=0 也要说明抽检过但没替换，不能静默（#46）
   assert.doesNotMatch(text, /corrected/);
 });
 
-test('清单：minGap 压掉格数时首行写"实际/请求"，不写成请求值', () => {
-  const r = makeResult({ cells: 16 });
-  r.sheets = [{
-    sheet: 1, cols: 3, rows: 2, width: 1064, height: 600,
-    cells: Array.from({ length: 4 }, (_, k) => ({
-      i: k + 1, sheet: 1, t_start: k * 2, t_end: k * 2 + 1.5, text: '台词',
-    })),
-  }];
-  r.plan = { ...r.plan, cells: 6, sheets: 1, produced: 4,
-    inputs: { duration: 60, scanThreshold: 40, meanLufs: -20, speechRate: 2, motion: 5, cuts: 12, hasSubtitle: false } };
-  const text = formatManifest(r, { maxChars: 200_000 });
-  assert.match(text, /4\/6 cells/, '首行必须同时给出实际与请求');
-});
-
 test('清单：格数一致时不加括号噪音', () => {
   const r = makeResult({ cells: 16 });
   r.plan = { ...r.plan, cells: 16, produced: 16,
@@ -430,66 +418,31 @@ test('清单：没有类型标签的老数据（复用缓存）不崩，也不�
 
 test('头一行写实际格数，不写"每张多少格"（64 格 4 张不能说成 16 cells）', () => {
   const text = formatManifest(makeResult(), { maxChars: 200_000 });
-  assert.match(text, /grid="64 cells x 4 image\(s\)"/, '头一行必须报总格数');
-  assert.doesNotMatch(text, /grid="16 cells/);
-});
-
-test('minGap 卡住时说清"要了多少、出了多少"（不虚报）', () => {
-  const r = makeResult({ cells: 8 });
-  r.plan = { ...r.plan, cells: 16, sheets: 1, produced: 8 };
-  r.sheets = [{
-    sheet: 1, cols: 4, rows: 2, width: 1064, height: 300, stripH: 56,
-    cells: Array.from({ length: 8 }, (_, k) => ({
-      i: k + 1, sheet: 1, t_start: k * 2, t_end: k * 2 + 1.5, text: '台词',
-    })),
-  }];
-  const text = formatManifest(r, { maxChars: 200_000 });
-  assert.match(text, /grid="8 cells x 1 image\(s\) \(asked 16\)"/);
+  assert.match(text, /grid="64 frames on 4 image\(s\)"/, '头一行必须报总帧数');
+  assert.doesNotMatch(text, /grid="16 /);
 });
 
 test('看不清时清单必须主动说，并给三条可执行的改法', () => {
   const r = makeResult({ cells: 16 });
   r.plan = {
-    ...r.plan, budget: 640_000, need: 'text',
-    cell: { w: 286, h: 118, readability: 'composition' },
+    ...r.plan, cell: { w: 100, h: 56, readability: 'composition' }, tiers: { 8: 16 },
   };
   const text = formatManifest(r, { maxChars: 200_000 });
-  assert.match(text, /!! cells are 286x118/);
-  assert.match(text, /below what you asked for \(text/);
-  assert.match(text, /cells:\d+ on this same budget/, '要给"减格数"的具体数字');
-  assert.match(text, /budget:\d+/, '要给出另一条路');
-  assert.match(text, /video_zoom/, '要给出第三条路');
-  // 声明够用的时候不要唠叨
-  r.plan = { ...r.plan, need: 'shot' };
-  assert.ok(!/!! cells are/.test(formatManifest(r, { maxChars: 200_000 })));
-});
-
-test('sub= 报出摊开之后的真实尺寸：cell 够、子帧不够时也要报警', () => {
-  // 112 分钟片子实测：cell 341×189 是 "scene"，但一格摊 2×2 之后每张只有 170×94（"shot"）。
-  // 旧清单只报 cell，模型看到 scene 就不再怀疑 —— 这正是"AI 说根本看不清楚"的来源。
-  const r = makeResult({ cells: 16 });
-  r.plan = {
-    ...r.plan, budget: 1_200_000, need: 'scene',
-    // formatPlanLine 需要 inputs 才渲染几何段
-    inputs: { meanLufs: -20, speechRate: 0, motion: 3, cuts: 99, scanThreshold: 39 },
-    cell: { w: 341, h: 189, readability: 'scene' },
-    sub: { k: 2, w: 170, h: 94, readability: 'shot' },
-  };
-  const text = formatManifest(r, { maxChars: 200_000 });
-  assert.match(text, /sub=170x94 x4 \(shot\)/, '几何段要报子帧尺寸');
-  assert.match(text, /each cell is split 2x2/, '报警要说清是摊开导致的');
-  assert.match(text, /the tiling is what shrank them/, '要指出问题不在 cell 而在摊开');
-  assert.match(text, /video_zoom/);
-  // 子帧够用时不要唠叨
-  r.plan = { ...r.plan, sub: { k: 2, w: 341, h: 191, readability: 'scene' } };
-  assert.ok(!/!!/.test(formatManifest(r, { maxChars: 200_000 })));
+  assert.match(text, /!! the smallest cells are 100x56/);
+  assert.match(text, /colour blocks rather than/);
+  assert.match(text, /strategy:"quality"/, '要给出"升一档"这条路');
+  assert.match(text, /video_zoom/, '要给出 zoom 这条路');
+  assert.match(text, /capped at 800x800/, '要说明加预算没用（800 是硬上限）');
+  // 格子够大时不要唠叨
+  r.plan = { ...r.plan, cell: { w: 400, h: 225, readability: 'scene' } };
+  assert.ok(!/!! the smallest cells/.test(formatManifest(r, { maxChars: 200_000 })));
 });
 
 test('成本按"图数 x token + ASR 秒数"报，不报 CPU', () => {
   const r = makeResult({ cells: 16 });
   r.transcript = { ...r.transcript, source: 'asr', asrSeconds: 192.4, asrCached: false };
   const text = formatManifest(r, { maxChars: 200_000 });
-  assert.match(text, /cost: 1 image\(s\) × ~418 = ~418 vision tokens/);
+  assert.match(text, /cost: 1 image\(s\) × ~384 = ~384 vision tokens/);
   assert.match(text, /ASR 192\.4 s/);
 
   r.transcript = { ...r.transcript, asrCached: true, asrSeconds: 0 };

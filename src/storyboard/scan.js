@@ -516,7 +516,8 @@ export function scanSummary(scores) {
 /**
  * 扫描整条视频，返回切点与逐帧分数。
  * @param {{input:string, fps:number, ffmpegPath?:string, width?:number, height?:number,
- *          threshold?:number|'auto', minGap?:number, signal?:AbortSignal, onProgress?:Function}} opts
+ *          threshold?:number|'auto', minGap?:number, signal?:AbortSignal, onProgress?:Function,
+ *          hwaccel?:'cuda'|'d3d11va'|null}} opts
  *   threshold='auto' 时按 p95×3 自适应（推荐，真实素材与合成素材都能用）
  * @returns {Promise<{cuts:Array<{t:number,score:number}>, stats:Array<{t:number,score:number}>,
  *                    frames:number, threshold:number}>}
@@ -536,6 +537,9 @@ export function scanShots(opts) {
     start = 0,
     end,
     signal,
+    // 硬件解码（见 hwaccel.js）：只管**连续解码**。null = 软解。
+    // 调用方负责探测（有失败风险），这里不做探测，一次都不多花。
+    hwaccel = null,
     onProgress,
   } = opts;
 
@@ -549,6 +553,11 @@ export function scanShots(opts) {
       ['-hide_banner', '-v', 'error', '-nostdin',
         ...(start > 0 ? ['-ss', String(start)] : []),
         ...(end !== undefined ? ['-t', String(Math.max(0.1, end - start))] : []),
+        // **硬件解码必须放在 -i 之前**，且只用顺序解码的场景（见 hwaccel.js 的取舍）。
+        // cuda 会把帧留在显存里，下面的 scale 滤镜由 ffmpeg 自动插 hwdownload —— 实测
+        // 显式写 `hwdownload,format=nv12` 反而会因为 AV1 的 yuv420p 对不上而报
+        // "Impossible to convert between the formats"。
+        ...(hwaccel ? ['-hwaccel', hwaccel] : []),
         // **关掉 h264/hevc 的去块滤波**：扫描只要 64×36 的缩略帧，deblocking 的细节
         // 缩到 1/30 之后完全看不见，却占掉约 17% 的解码时间（实测 3936ms → 3268ms）。
         // 对其它编码器是无害的空操作。

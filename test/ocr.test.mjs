@@ -146,3 +146,18 @@ test('shouldReplace: cover 很低的无关文本先报 unrelated，不再误报 
   assert.equal(v.replace, false);
   assert.equal(v.reason, 'unrelated', JSON.stringify(v));
 });
+
+test('shouldReplace: 长度相同只差一个字 → agree-near，不动（OCR 形近字会污染台词）', () => {
+  // 真实事故：OCR 把"这是一句测试用的硬字幕文字"读成"这是一旬…"（13 字对 13 字，cover 0.92），
+  // 旧逻辑把它当"OCR 纠正 ASR"照换，结果把一条完全正确的台词改错了。
+  const v = shouldReplace({
+    asr: '这是一句测试用的硬字幕文字', ocr: '这是一旬测试用的硬字幕文字', conf: 0.98,
+  });
+  assert.equal(v.replace, false, JSON.stringify(v));
+  assert.equal(v.reason, 'agree-near');
+});
+
+test('shouldReplace: 长度不同就不适用 agree-near（ASR 漏字照旧要换）', () => {
+  const v = shouldReplace({ asr: '他也忘记', ocr: '他也忘记了吗', conf: 0.9 });
+  assert.notEqual(v.reason, 'agree-near', JSON.stringify(v));
+});

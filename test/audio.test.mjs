@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { analyzeAudio, detectOnsets, detectSilence, measureLoudness } from '../src/storyboard/audio.js';
 import { alignCells, parseSrt, speechCurve } from '../src/storyboard/asr.js';
 import { DEFAULT_FFMPEG } from '../src/storyboard/probe.js';
-import { addAudioStrip, composeSheet, layoutCanvas, STRIP_BAR, STRIP_SEP } from '../src/storyboard/sheet.js';
+import { addAudioStrip, composePacked, STRIP_BAR, STRIP_SEP } from '../src/storyboard/sheet.js';
 
 const run = promisify(execFile);
 let hasFfmpeg = false;
@@ -76,10 +76,13 @@ test('speechCurve: 没有台词时 mean=0（不会污染密度）', () => {
 /* ---------------------------------------------------------------- 条带绘制 */
 
 test('addAudioStrip: 画布变高，顶部内容不变，条带里有色块', () => {
-  const { cellW, cellH } = layoutCanvas(2, 2, 16 / 9, 80_000);
-  const sheet = composeSheet({
-    frames: [{ buffer: Buffer.alloc(cellW * cellH * 3, 200), index: 1 }],
-    cols: 2, rows: 2, cellAspect: 16 / 9, budget: 80_000,
+  // 可变网格：一个格子占满 200×112 的画布，其余空着
+  const width = 200;
+  const height = 112;
+  const rects = [{ px: 0, py: 0, pw: width, ph: height, index: 1 }];
+  const sheet = composePacked({
+    frames: [{ buffer: Buffer.alloc(width * height * 3, 200), w: width, h: height }],
+    rects, width, height,
   });
   const solid = 40;
   const loudness = { series: Array.from({ length: solid }, (_, i) => -40 + (i % 10) * 2), step: 0.1 };

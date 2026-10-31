@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * storyboard — CLI 薄壳，真正的逻辑全在 src/pipeline.js（与 DSH 工具同一份实现）。
+ * storyboard — CLI 薄壳，真正的逻辑全在 src/storyboard/pipeline.js（与 DSH 工具同一份实现）。
  *
- *   node bin/storyboard.mjs <video> [--cells 9] [--sheets 1] [--from 0] [--to 300]
- *                                   [--segment 300] [--need scene] [--budget 1200000]
+ *   node bin/storyboard.mjs <video> [--frames N] [--max-sheets N] [--strategy balanced|quality|saver|frugal]
+ *                                   [--from 0] [--to 300] [--segment 300] [--budget 640000]
  *                                   [--pick sharp|mid|thumb] [--burn index|none]
- *                                   [--threshold auto|15] [--min-gap 1.2]
- *                                   [--transcript auto|off] [--no-adaptive] [--badge 0.15]
+ *                                   [--threshold auto|15] [--scan-gap 0]
+ *                                   [--transcript auto|off] [--detail low|med|high]
  *                                   [--out sheet.png] [--manifest m.json] [--plan 300] [--text]
  */
 import { writeFile } from 'node:fs/promises';
@@ -19,21 +19,21 @@ import { resolveInput } from '../src/storyboard/fetch.js';
 import {
   DETAIL_CHARS, formatManifest, formatTimeline, runStoryboard, saveStoryboards,
 } from '../src/storyboard/pipeline.js';
-import { QUALITY_HEIGHTS, SIZE_BUDGETS, boardGeometry } from '../src/storyboard/board.js';
+import { boardGeometry } from '../src/storyboard/board.js';
 import { cliOcr, manifestFromCli, runOptionsFromCli } from '../src/storyboard/cli-options.js';
 
 const opt = parse(process.argv.slice(2), {
-  cells: 0, sheets: 0, from: 0, to: 0, threshold: 'auto', 'min-gap': 1.2,
-  pick: 'sharp', burn: 'index', badge: 0.15, transcript: 'auto',
+  frames: 0, 'max-frames': 0, 'max-sheets': 0, 'tier-map': null, from: 0, to: 0, threshold: 'auto', 'scan-gap': 0,
+  strategy: 'balanced', pick: 'mid', burn: 'index', transcript: 'auto',
   out: 'storyboard.png', manifest: null, plan: 0, 'text-only': false, 'cell-range': null,
   batch: 0, detail: 'med',
-  // scan-height 默认 0 = 交给预算推导（medium → 720p）；写死 360 会让 --size 永远不生效。
+  // scan-height 默认 0 = 按格子最大尺寸推（1 档整幅 800×450，720p 已是 2.5 倍超采样）
   cookies: null, 'allow-anonymous': false, 'scan-height': 0, 'zoom-height': 1080,
-  'transcript-file': null, 'source-hash': false, quality: 'medium', size: 'medium',
+  'transcript-file': null, 'source-hash': false, quality: 'medium',
 });
 const input = opt._[0];
 if (!input) {
-  console.error('usage: node bin/storyboard.mjs <video-or-url> [--cells 9] [--from 0] [--to 300] ...');
+  console.error('usage: node bin/storyboard.mjs <video-or-url> [--frames N] [--max-sheets N] [--from 0] [--to 300] ...');
   process.exit(2);
 }
 
@@ -41,11 +41,9 @@ if (!input) {
 const fetchOptions = {
   cookies: opt.cookies ?? undefined,
   allowAnonymous: opt['allow-anonymous'] === true,
-  // quality 是给人的旋钮；--scan-height 精确覆盖它
+  // 扫描副本只要覆盖最大格子（800×450）就够了，1080p 是浪费带宽
   scanHeight: Number(opt['scan-height'])
-    || QUALITY_HEIGHTS[opt.quality]
-    || SIZE_BUDGETS[opt.size]?.scanHeight
-    || 360,
+    || (opt.quality === 'low' ? 360 : opt.quality === 'high' ? 1080 : 720),
   zoomHeight: Number(opt['zoom-height']) || 1080,
 };
 let localPath = input;
@@ -76,7 +74,7 @@ if (Number(opt.plan) > 0) {
     `${p.stepAdjusted ? `  ⚠️ 段数超上限，已把每段从 ${p.requestedStep}s 拉长以保证覆盖全片` : ''}`);
   for (const w of p.windows) {
     console.log(`  ${String(w.index).padStart(2)}. ${w.from.toFixed(0).padStart(5)}–${w.to.toFixed(0).padStart(5)}s  ` +
-      `(${w.duration.toFixed(0)}s)  ${w.cells} 格 ×${w.images}  ≈${w.approxTokens} tok`);
+      `(${w.duration.toFixed(0)}s)  实际帧数由切点决定  ≈${w.approxTokens} tok`);
   }
   console.log('\n逐段跑：node bin/storyboard.mjs <video> --from A --to B');
   process.exit(0);
@@ -87,13 +85,11 @@ if (Number(opt.plan) > 0) {
 const batchStep = Number(opt.batch) || 0;
 if (batchStep > 0) {
   // 先全片扫一遍拿切点，让窗口边界落在剪辑点上（而不是钟表上）。
-  // 2 小时片约 25s，相对于几十个窗口的渲染时间可以忽略。
   let boundaries = [];
   let precomputed = null;
   if (opt.snap !== false) {
     const { scanShots } = await import('../src/storyboard/scan.js');
     console.log('[batch] 全片扫描切点（用于窗口对齐，可加 --no-snap 跳过）…');
-    // 这一遍的切点也直接喂给每个窗口，省掉"每个窗口各扫一遍"的重复解码
     precomputed = await scanShots({ input: localPath, fps: info.fps, threshold: 'auto' });
     boundaries = precomputed.cuts.map((c) => c.t);
     console.log(`[batch] 切点 ${boundaries.length} 个（窗口内复用，不再重复扫描）`);
@@ -105,8 +101,10 @@ if (batchStep > 0) {
   const t0 = Date.now();
   for (const w of planW.windows) {
     const r = await runStoryboard({
-      input: localPath, from: w.from, to: w.to, cells: 0, sheets: 0,
+      input: localPath, from: w.from, to: w.to,
       threshold: opt.threshold === 'auto' ? 'auto' : Number(opt.threshold),
+      maxFrames: Number(opt.frames) || 96,
+      strategy: String(opt.strategy),
       pick: String(opt.pick), burn: String(opt.burn), transcript: String(opt.transcript),
       ocr: cliOcr(opt),
       precomputed,
@@ -120,7 +118,7 @@ if (batchStep > 0) {
       chars: r.transcript?.chars ?? 0, image,
     });
     console.log(`[batch] ${w.index}/${planW.total}  ${w.from.toFixed(0)}–${w.to.toFixed(0)}s  ` +
-      `${cells.length} 格  → ${image}  (${Date.now() - t0}ms)`);
+      `${cells.length} 帧 ${r.plan.sheets} 张  → ${image}  (${Date.now() - t0}ms)`);
   }
   const md = formatTimeline(rows, { title: `${info.path ?? input} — ${planW.total} windows @ ${batchStep}s` });
   const mdPath = `${base}-timeline.md`;
@@ -130,7 +128,6 @@ if (batchStep > 0) {
   process.exit(0);
 }
 
-const adaptive = !process.argv.includes('--no-adaptive');
 const textOnly = Boolean(opt['text-only']);
 const cellRange = (() => {
   const raw = opt['cell-range'];
@@ -139,28 +136,25 @@ const cellRange = (() => {
   return m ? [Number(m[1]), Number(m[2])] : null;
 })();
 const t0 = Date.now();
-// CLI 的键是 kebab（--max-per-sheet），boardGeometry 读的是 camelCase（maxPerSheet）。
-// 只翻译这一个：budget / need / size 都是单词，kebab 与 camel 同名，不需要转。
-const geom = boardGeometry({ ...opt, maxPerSheet: opt['max-per-sheet'] ?? opt.maxPerSheet });
+const geom = boardGeometry(opt);
 const r = await runStoryboard(runOptionsFromCli({
   opt,
   geom,
   input,
   fetchOptions,
-  adaptive,
   textOnly,
-  tileFirst: process.argv.includes('--tile-first'),
 }));
 
 console.log(`[probe] ${info.width}x${info.height} ${info.fps.toFixed(2)}fps ${info.duration.toFixed(2)}s` +
   `${info.hasAudio ? ' audio' : ''}${info.hasSubtitle ? ' subtitle' : ''}` +
   (r.window.from > 0 || r.window.to < info.duration
     ? `  window=${r.window.from.toFixed(1)}..${r.window.to.toFixed(1)}s` : ''));
-console.log(`[scan] ${r.summary.frames} 帧 → ${r.cuts.length} 个切点（阈值 ${r.threshold}，` +
-  `${r.plan.adaptive ? `自适应 ${r.plan.bursts.length} 个密集段` : '均匀分配'}）`);
-console.log(`[plan] ${r.plan.cells} 格 × ${r.plan.sheets} 张` +
-  (r.plan.requested && r.plan.requested.cells !== r.plan.cells * r.plan.sheets
-    ? `（要 ${r.plan.requested.cells}）` : '') + ` — ${r.plan.reason}`);
+const tierText = Object.entries(r.plan.tiers ?? {})
+  .sort((a, b) => Number(a[0]) - Number(b[0]))
+  .map(([k, v]) => `1/${k}×${v}`).join(' ');
+console.log(`[scan] ${r.summary.frames} 帧 → ${r.cuts.length} 个切点（阈值 ${r.threshold}）`);
+console.log(`[plan] ${r.plan.produced} 帧 → ${r.plan.sheets} 张（策略 ${r.plan.strategy}，档位 ${tierText}，` +
+  `积分点 ${r.plan.sampleMarks}，占用 ${r.plan.fill}%）`);
 if (r.audio) console.log(`[audio] ${r.audio.summary}`);
 if (r.transcript) {
   console.log(`[transcript] ${r.transcript.source}${r.transcript.model ? ` (${r.transcript.model})` : ''}` +
@@ -170,8 +164,8 @@ if (r.transcript) {
 
 const paths = await saveStoryboards(r, opt.out, { quality: 4 });
 for (const [i, sheet] of r.sheets.entries()) {
-  console.log(`[sheet] ${paths[i]}  ${sheet.width}x${sheet.height}  ${sheet.cols}x${sheet.rows}` +
-    `  cell≈${sheet.cellW}x${sheet.cellH}${sheet.stripH ? `  strip=${sheet.stripH}px` : ''}`);
+  console.log(`[sheet] ${paths[i]}  ${sheet.width}x${sheet.height}  ${sheet.cells.length} 帧` +
+    `  cell>=${sheet.cellW}x${sheet.cellH}${sheet.stripH ? `  strip=${sheet.stripH}px` : ''}`);
 }
 console.log(`[done] ${Date.now() - t0}ms`);
 

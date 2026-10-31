@@ -15,11 +15,11 @@ export function cliOcr(opt = {}) {
 
 /**
  * 把解析后的 CLI 参数翻成 runStoryboard() 的入参。
- * @param {{opt:object, geom:object, input:string, fetchOptions:object, adaptive:boolean,
- *          textOnly:boolean, tileFirst:boolean}} o
+ * @param {{opt:object, geom:object, input:string, fetchOptions:object,
+ *          textOnly:boolean}} o
  */
 export function runOptionsFromCli({
-  opt = {}, geom = {}, input, fetchOptions, adaptive = true, textOnly = false, tileFirst = false,
+  opt = {}, geom = {}, input, fetchOptions, textOnly = false,
 } = {}) {
   return {
     input,
@@ -28,23 +28,25 @@ export function runOptionsFromCli({
     sourceHash: opt['source-hash'] === true,
     from: Number(opt.from) || 0,
     to: Number(opt.to) || 0,
-    cells: Number(opt.cells) || 0,
-    sheets: Number(opt.sheets) || 0,
+    // **只有三个几何旋钮**：帧数上限 / 升降档策略 / 画布像素（<= 640k）。
+    // 0 = 没给（用 pipeline 默认）；0 若透传下去就是「最多 1 帧」
+    maxFrames: Number(opt.frames) || Number(opt['max-frames']) || undefined,
+    maxSheets: Number(opt['max-sheets']) || undefined,
+    // --tier-map '{"1":3,"5":4}'（JSON）；坏 JSON 当没给，不让整次运行失败
+    tierMap: (() => {
+      const raw = opt['tier-map'];
+      if (typeof raw !== 'string' || !raw.trim()) return undefined;
+      try { return JSON.parse(raw); } catch { return undefined; }
+    })(),
+    strategy: opt.strategy === undefined ? undefined : String(opt.strategy),
     threshold: opt.threshold === 'auto' ? 'auto' : Number(opt.threshold),
-    minGap: Number(opt['min-gap']) || 0,
-    // --size 现在只是 --budget 的别名；格数上限由 need + 预算推。
-    // 这三个必须由 boardGeometry 的 camelCase 结果喂进去，不能直接传 opt。
+    scanGap: opt['scan-gap'] === undefined ? undefined : Number(opt['scan-gap']),
     budget: geom.budget,
-    maxPerSheet: geom.maxPerSheet,
-    need: geom.need,
+    maxCanvasSide: geom.maxCanvasSide,
     segment: Number(opt.segment) || 0,
     pick: String(opt.pick),
     burn: String(opt.burn),
-    // --badge 0 必须真的等于 0：Number(0) || 0.15 会把它变成默认大小。
-    badgeRatio: opt.badge === undefined ? 0.15 : Number(opt.badge),
     transcript: String(opt.transcript),
-    adaptive,
-    tileFirst,
     textOnly,
     // 这一段是 #44 的核心：detail=high 必须把 ocr=true 交给 pipeline，
     // 否则 CLI 只改了清单字数，硬字幕校正从入口起就没开。
@@ -67,7 +69,7 @@ export function manifestFromCli({ input, r }) {
     // 否则“OCR 跑过但一条没改”和“根本没开 OCR”在文件里无法区分。
     ...(r.ocr ? { ocr: r.ocr } : {}),
     sheets: r.sheets.map((s) => ({
-      sheet: s.sheet, cols: s.cols, rows: s.rows, width: s.width, height: s.height,
+      sheet: s.sheet, width: s.width, height: s.height,
       stripH: s.stripH ?? null, cells: s.cells,
     })),
   };

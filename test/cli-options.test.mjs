@@ -7,19 +7,18 @@ const baseOpt = {
   detail: 'med',
   from: '10',
   to: '0',
-  cells: '6',
-  sheets: '0',
+  frames: '40',
+  strategy: 'saver',
   threshold: 'auto',
-  'min-gap': '1.2',
+  'scan-gap': '0',
   segment: '300',
-  pick: 'sharp',
+  pick: 'mid',
   burn: 'index',
-  badge: '0',
   transcript: 'auto',
   'transcript-file': 'subs.srt',
   'source-hash': true,
 };
-const geom = { budget: 1_200_000, maxPerSheet: 9, need: 'scene' };
+const geom = { budget: 640_000, maxCanvasSide: 800 };
 
 test('CLI: --detail high 必须把 ocr=true 交给 runStoryboard（#44）', () => {
   const o = runOptionsFromCli({
@@ -27,20 +26,16 @@ test('CLI: --detail high 必须把 ocr=true 交给 runStoryboard（#44）', () =
     geom,
     input: 'video.mp4',
     fetchOptions: { cookies: 'cookies.txt' },
-    adaptive: false,
     textOnly: true,
-    tileFirst: true,
   });
   assert.equal(o.ocr, true, '旧实现这里没有 ocr，pipeline 永远走 ocr=false');
-  assert.equal(o.badgeRatio, 0, '--badge 0 不能被默认值吃掉');
-  assert.equal(o.budget, 1_200_000);
-  assert.equal(o.maxPerSheet, 9);
-  assert.equal(o.need, 'scene');
+  assert.equal(o.budget, 640_000);
+  assert.equal(o.maxCanvasSide, 800);
   assert.equal(o.transcriptFile, 'subs.srt');
   assert.equal(o.sourceHash, true);
   assert.equal(o.from, 10);
-  assert.equal(o.tileFirst, true);
-  assert.equal(o.adaptive, false);
+  assert.equal(o.maxFrames, 40);
+  assert.equal(o.strategy, 'saver');
   assert.equal(o.textOnly, true);
 });
 
@@ -58,12 +53,12 @@ test('CLI: manifest 保留 fixed=0 的 OCR 结果（正文仍可省 token）', (
     provenance: {},
     audio: { mean: -20, peak: -1, silences: [] },
     transcript: { source: 'asr' },
-    plan: { cells: 4, sheets: 1 },
+    plan: { frames: 4, sheets: 1, strategy: 'balanced' },
     ocr: { status: 'applied', fixed: 0, checked: 16, changes: [] },
-    sheets: [{ sheet: 1, cols: 2, rows: 2, width: 100, height: 100, stripH: null, cells: [] }],
+    sheets: [{ sheet: 1, width: 100, height: 100, stripH: null, cells: [] }],
   };
   const m = manifestFromCli({ input: 'video.mp4', r });
-  assert.equal(m.ocr.fixed, 0, '机器可读文件要能区分“跑过但 0 条”和“没跑”');
+  assert.equal(m.ocr.fixed, 0, '机器可读文件要能区分"跑过但 0 条"和"没跑"');
   assert.equal(m.audio.mean, -20);
   assert.equal(m.sheets[0].stripH, null);
 });

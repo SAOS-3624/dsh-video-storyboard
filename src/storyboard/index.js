@@ -27,12 +27,16 @@ export {
 // ---- 切点分类：flash / white / black / hardcut / dissolve / motion（只打标签，不删点）
 export { tagCuts, flashEvidence } from './flash.js';
 
-// ---- 格位规划：按画面变化率的积分分配格子（也可以传切点密度走老路）
-export { planCellRanges, densityFromScore } from './density.js';
+// ---- 档位：切点密度 → 1..8 档（格子边长 1/k）、积分取帧、升降档策略
+export {
+  LEVEL_THRESHOLDS, HYSTERESIS, TIER_MIN, TIER_MAX, STRATEGIES, STRATEGY_NAMES,
+  DEFAULT_STRATEGY, applyStrategy, fitCanvas, framesFromBounds, integralMarks, levelAt,
+  levelCurve, readabilityOf, tierHistogram, tierSizes, tierSide,
+} from './tiers.js';
 
-// ---- 排版：格数与布局、画布尺寸、拼图
-export { bestLayout, fillLayout, suggest } from './plan.js';
-export { composeSheet, layoutCanvas } from './sheet.js';
+// ---- 排布：档位序列 → 归一化矩形（按行精确最优），以及拼图
+export { solve, toRects, bestPlan, rowOptions, precompute, bounds, UNIT, DEFAULT_GROW } from './pack.js';
+export { composePacked, badgeScale, drawBadgePlain, drawGlyphsOutlined, blit } from './sheet.js';
 
 // ---- 取流：只读容器头，不花图片 token
 export { probeVideo } from './probe.js';

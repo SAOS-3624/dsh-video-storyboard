@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { detectSubtitleBand, OCR_MAX_ITEMS, ocrPython, readBand, shouldReplace } from './ocr.js';
+import { detectAndRead, OCR_MAX_ITEMS, ocrPython, shouldReplace } from './ocr.js';
 
 const runFile = promisify(execFile);
 
@@ -91,31 +91,35 @@ export async function correctByOnScreenSubs({
     const probes = await Promise.all([0.2, 0.5, 0.8].map((r, i) => grab(
       winStart + winDur * r, `probe${i}.jpg`, null,
     )));
-    const det = await detectSubtitleBand({ python, frames: probes });
+    // ② 均匀抽样若干条台词（不取全部，成本与收益不成正比）——**抽全图**，
+    //    裁字幕带交给桥接脚本（它已经算出了 band，Node 侧不必再起 N 次 ffmpeg 裁图）
+    const samples = planOcrSamples(segments, { winStart, winDur });
+    const frames = [];
+    for (const [k, sample] of samples.entries()) {
+      frames.push(await grab(sample.at, `band${k}.jpg`, null));
+    }
+
+    // 一次 Python 调用做完 detect + read（省一次模型加载 ≈1.5s）
+    const res = await detectAndRead({ python, probes, targets: frames });
     // 失败原因要原样传出去：`detect-failed` 曾经同时代表"脚本不存在""超时""检测真失败"，
     // 于是"ocr_bridge.py 路径拼错"藏了一整个版本（#39）。
-    if (!det.ok) return { status: 'failed', reason: det.kind, detail: det.message };
-
-    const [y0, y1] = det.band;
-    const crop = `crop=iw:ih*${(y1 - y0).toFixed(4)}:0:ih*${y0.toFixed(4)},scale=1280:-1`;
-
-    // ② 均匀抽样若干条台词（不取全部，成本与收益不成正比）
-    const samples = planOcrSamples(segments, { winStart, winDur });
-
-    const images = [];
-    for (const [k, sample] of samples.entries()) {
-      images.push(await grab(sample.at, `band${k}.jpg`, crop));
+    if (!res.ok) return { status: 'failed', reason: res.kind, detail: res.message };
+    // **没检测到字幕就不认**。桥接脚本在"一个候选都没有"时会给一个中下区域的兜底 band
+    // （[0.42,0.68]），旧代码照单全收，于是对着画面中央读了几条 OCR 出来 ——
+    // 实测一支没硬字幕的片子白花了 2.6s detect + 3×0.8s read，最后一条也没换。
+    // `detected=false` 就是"这片子没有硬字幕"，直接说出来，别猜。
+    if (!res.detected) {
+      return { status: 'skipped', reason: 'no-subtitle-band', checked: samples.length };
     }
-    const read = await readBand({ python, images });
-    if (!read.ok) return { status: 'failed', reason: read.kind, detail: read.message };
-    const items = read.items;
+    const [y0, y1] = res.band;
+    const items = res.items;
 
     const applied = applyOcrSamples(segments, samples, items);
     return {
       status: 'applied',
       fixed: applied.changes.length,
       checked: samples.length,
-      band: { y0: +y0.toFixed(3), y1: +y1.toFixed(3), detected: det.detected },
+      band: { y0: +y0.toFixed(3), y1: +y1.toFixed(3), detected: res.detected },
       // URL 模式下跑的是下载的扫描副本：字幕本身就糊，校正的可信度低于本地高清文件。
       // 这个事实必须传到清单，否则读起来像"原片台词已核对"。
       ...(sourceCopyHeight

@@ -1,5 +1,10 @@
 # 从 v0.1 到现在：改了什么，为什么改
 
+> ⚠️ **本文写于 0.5.x。** 0.6.0 重写了切点之后的整条链路：`cells` / `sheets` / `need` /
+> `maxPerSheet` / `adaptive` / `tileFirst` 已删除，换成 `maxFrames` / `strategy` / `maxSheets` / `tierMap`；
+> 一格现在等于一个镜头，格子大小由切点密度决定（1/1 … 1/8）。
+> 参数与输出格式以 [README](../README.md) 和 [CHANGELOG](../CHANGELOG.md) 为准。
+
 > 这份不是 CHANGELOG 的翻译，是**按主题重讲一遍**。CHANGELOG 按版本记录，这份按"问题"记录 —— 每个问题当初怎么暴露的、试过什么、最后为什么这么定。
 
 ---

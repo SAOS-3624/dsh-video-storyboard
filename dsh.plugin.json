@@ -1,7 +1,7 @@
 {
   "name": "dsh-video-storyboard",
-  "description": "Scene-aware storyboard tool for DeepSeek Harness: one addressable grid per video, with an index the model can cite.",
-  "version": "0.5.12",
+  "description": "Shot-aware storyboard for DSH: one frame per cut, cell size = cut density (1/1…1/8), packed into few images with a citable timestamp index.",
+  "version": "0.6.0",
   "entry": {
     "name": "dsh-video-storyboard",
     "inject": [

@@ -110,9 +110,9 @@ test('contract: video_zoom 的 schema 同样过宿主 defineTool', async (t) => 
   assert.equal(spec.parameters.scanHeight.type, 'integer');
   assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a.mp4', from: 0, to: 5, ocr: false, scanHeight: 720 }), []);
   assert.ok(validateZoomArgs({ input: 'a.mp4', from: 0, to: 5, scanHeight: 40 }).length > 0);
-  // 宿主 schema 没有数值上限，cells:20 会被放行 —— 这正是本地校验必须存在的理由
-  assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a', from: 1, to: 2, cells: 20 }), []);
-  assert.ok(validateZoomArgs({ input: 'a', from: 1, to: 2, cells: 20 }).length > 0, '本地必须挡住');
+  // 宿主 schema 没有数值上限，maxFrames:300 会被放行 —— 这正是本地校验必须存在的理由
+  assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a', from: 1, to: 2, maxFrames: 300 }), []);
+  assert.ok(validateZoomArgs({ input: 'a', from: 1, to: 2, maxFrames: 300 }).length > 0, '本地必须挡住');
 });
 
 test('contract: video_locate 暴露 cookies / allowAnonymous', async (t) => {
@@ -147,24 +147,29 @@ test('contract: video_probe 的 schema 同样过宿主 defineTool', async (t) =>
 test('本地兜底校验：越界参数被自己挡住（schema 子集不支持 min/max）', () => {
   assert.deepEqual(validateToolArgs({ input: 'a.mp4' }), []);
   assert.ok(validateToolArgs({}).length > 0);
-  assert.ok(validateToolArgs({ input: 'a', cells: 20 }).length > 0);
-  assert.ok(validateToolArgs({ input: 'a', sheets: 0 }).length > 0);
+  assert.ok(validateToolArgs({ input: 'a', maxFrames: 9999 }).length > 0 === false, '9999 还是合法上限内');
+  assert.deepEqual(validateToolArgs({ input: 'a', maxFrames: 0 }), [], '0 = 不封顶，合法');
+  assert.ok(validateToolArgs({ input: 'a', maxFrames: -1 }).length > 0);
+  assert.ok(validateToolArgs({ input: 'a', maxFrames: 20_000 }).length > 0);
   assert.ok(validateToolArgs({ input: 'a', from: 10, to: 5 }).length > 0);
-  assert.ok(validateToolArgs({ input: 'a', minGap: -1 }).length > 0);
+  assert.ok(validateToolArgs({ input: 'a', strategy: 'turbo' }).length > 0);
+  assert.ok(validateToolArgs({ input: 'a', budget: 1_200_000 }).length > 0, '超过 800x800 的预算要挡住');
 });
 
-test('本地兜底校验：sheets 上限与 cells 对齐（1..16）', () => {
-  // 旧上限 4 是自己跟自己打架：自动档按帧数能算出 5 张、8 张，
-  // 而用户/模型手动要 5 张反而被拒。上限该由调用方判断，不该藏一个自动能越过的阈值。
-  assert.deepEqual(validateToolArgs({ input: 'a', sheets: 5 }), [], '5 张应该放行');
-  assert.deepEqual(validateToolArgs({ input: 'a', sheets: 16 }), [], '16 张是上限');
-  assert.ok(validateToolArgs({ input: 'a', sheets: 17 }).length > 0, '17 张要挡住');
+test('本地兜底校验：帧数上限与档位策略都在允许集合里', () => {
+  assert.deepEqual(validateToolArgs({ input: 'a', maxFrames: 96 }), []);
+  assert.deepEqual(validateToolArgs({ input: 'a', maxFrames: 10_000 }), [], '10000 是上限');
+  assert.ok(validateToolArgs({ input: 'a', maxFrames: 10_001 }).length > 0, '10001 要挡住');
+  for (const s of ['quality', 'balanced', 'saver', 'frugal']) {
+    assert.deepEqual(validateToolArgs({ input: 'a', strategy: s }), []);
+  }
 });
+
 
 test('本地兜底校验：zoom 要求 from/to 且区间有效', () => {
   assert.deepEqual(validateZoomArgs({ input: 'a', from: 0, to: 5 }), []);
   assert.ok(validateZoomArgs({ input: 'a' }).length > 0);
   assert.ok(validateZoomArgs({ input: 'a', from: 5, to: 5 }).length > 0);
   assert.ok(validateZoomArgs({ input: 'a', from: -1, to: 5 }).length > 0);
-  assert.ok(validateZoomArgs({ input: 'a', from: 0, to: 5, cells: 12 }).length > 0);
+  assert.ok(validateZoomArgs({ input: 'a', from: 0, to: 5, maxFrames: 300 }).length > 0);
 });

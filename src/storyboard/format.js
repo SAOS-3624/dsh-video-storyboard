@@ -15,7 +15,7 @@ import { encodeRaw } from './sheet.js';
 import { charsForDetail, DETAIL_CHARS } from './board.js';
 import { describeMemory } from './memory.js';
 import { canTranscribe, resolveAsrConfig } from './asr.js';
-import { cellPixels, imageTokens, maxCellsForNeed, NEED_TIERS, readabilityOf } from './plan.js';
+import { fitCanvas, readabilityOf } from './tiers.js';
 
 /** 三档台词预算（字符）：low 只判断"这段在讲什么"，high 要能引用原话。定义在 board.js，这里转出。 */
 export { DETAIL_CHARS };
@@ -24,6 +24,15 @@ const tc = (t) => {
   const m = Math.floor(t / 60);
   return `${String(m).padStart(2, '0')}:${(t % 60).toFixed(2).padStart(5, '0')}`;
 };
+
+/**
+ * 一张图的花费（vision token）。
+ *
+ * DS 的视觉上限实测是 **800×800 / 384 token**：再大的图会被缩回去，
+ * 于是"我给了 1.2M 像素"只是清单上的假数。旧版按 DSH 的 42px 网格算到 990 token，
+ * 在这套口径下是错的，所以这里写死 384。
+ */
+export const VISION_TOKENS = 384;
 
 /**
  * 每格的机器可读记录：时间、帧时刻、刀数、字数、原文。
@@ -90,6 +99,24 @@ export function withSheetSuffix(outPath, sheet) {
 }
 
 /**
+ * 一格里的台词：**两句以上就逐句标时间**。
+ *
+ * 为什么必须标：ASR 的段起点比人真正开口**早 0.3–1 秒**（VAD 把起音前的气口也算了进去，
+ * 实测 101 段对照站方 CC 字幕：中位 -0.29s、p10 -2.8s）。一格只有 1–2 秒时，
+ * 这半秒就足以让一句台词看起来属于上一格。标上每句自己的时间，模型能自己算，
+ * 不用在"这段字到底从格的哪里开始"上瞎猜。
+ *
+ * 只有一句时不标（格的中点是够用的近似），省下来的 token 比那点精度值钱。
+ */
+function speechOf(cell, text) {
+  const lines = Array.isArray(cell.lines) ? cell.lines : null;
+  if (!lines || lines.length < 2) return `"${text}"`;
+  const parts = lines.map((l) => `[${tc(l.from)}]${String(l.text ?? '').trim()}`).filter((s) => s.length > 1);
+  if (parts.length < 2) return `"${text}"`;
+  return parts.join(' ');
+}
+
+/**
  * 数一下有多少句台词落在"被判静音"的区间里。
  *
  * 两种成因都值得知道：**轻声说话被 -40 dB 阈值吞了**，或者 **ASR 在静音段编了字**。
@@ -133,17 +160,16 @@ export async function formatProbe(info) {
   // 追剧情时不能先看全片总览：一张盖住片尾的图等于把结局摆在你脸上。
   // 短片不铺这些：一句话能说完的片子，给一条建议就够，别用通用模板灌水。
   if (mins > 8) {
-    // 只看时长给个粗估（不调 suggest：probe 没扫描，cuts=0 会被当成"单镜头"，算出 4 格那种假结果）
+    // 只看时长给个粗估（不调扫描：probe 没有切点，算不出档位）
     const segSec = 300;
     const totalSeg = Math.max(1, Math.ceil(info.duration / segSec));
     const estSheets = Math.min(8, Math.max(2, Math.ceil(info.duration / 1200)));
-    const overviewCells = 9 * estSheets;
-    // 用**默认预算**算每格像素：探针要让模型在花第一张图之前就知道"这个配方能不能看清"。
-    const px = cellPixels(9, info.aspect || 16 / 9, 1_200_000);
-    const perImage = imageTokens(
-      Math.round(Math.sqrt(1_200_000 * (info.aspect || 16 / 9))),
-      Math.round(Math.sqrt(1_200_000 * (info.aspect || 16 / 9)) / (info.aspect || 16 / 9)),
-    );
+    // 用**默认画布**算每格像素：探针要让模型在花第一张图之前就知道"这个配方能不能看清"。
+    // 一张图封顶 800×800 / 384 token（DS 视觉上限），9 格 → 1/3 边长。
+    const canvas = fitCanvas(info.aspect || 16 / 9);
+    const perImage = VISION_TOKENS;
+    const px = { w: Math.round(canvas.width / 3), h: Math.round(canvas.height / 3) };
+    const estFrames = 96 * estSheets;
     lines.push(`How to read ${mins.toFixed(0)} min: **window by window, not one overview.**`);
     lines.push(`  • SEQUENCE (no spoilers, like watching it) — default for films / episodes / any story:`);
     lines.push(`      video_storyboard({ input, from: 0, segment: ${segSec} })`);
@@ -151,11 +177,11 @@ export async function formatProbe(info) {
       `y min left · next: from=…"; pass that from back with the same segment. ` +
       `One image (~${perImage} vision tokens) per window; ASR is transcribed once per window, cached after that.`);
     lines.push(`  • STRUCTURE (spoils the ending) — **only to identify what this is, or when spoilers are allowed**:`);
-    lines.push(`      video_storyboard({ input, cells: 9, sheets: ${estSheets} }) → ${overviewCells} moments ` +
-      `at ~${px.w}×${px.h} each, ~${perImage * estSheets} vision tokens.`);
-    lines.push('    Do NOT reach for cells:16 at the cheap budget: 16 cells in a 640k image is 247×137 ' +
-      '(286×118 on a 2.39:1 film) — below the readable line, so you get colour blocks and start ' +
-      'inventing a plot from them.');
+    lines.push(`      video_storyboard({ input, maxFrames: ${estFrames} }) → up to ${estFrames} frames ` +
+      `at ~${px.w}×${px.h} for the 1/3 tier, ~${perImage * estSheets} vision tokens.`);
+    lines.push('    The tier is decided by cut density, not by you: fast-cutting stretches get 1/8-size ' +
+      'cells (100×56 on a 800-wide canvas), long takes get 1/1. Lower `strategy` to "saver"/"frugal" ' +
+      'only when you accept blurrier cells in exchange for fewer images.');
   } else if (mins < 1) {
     lines.push(`under a minute (${info.duration.toFixed(0)}s): one call is enough.`);
   } else {
@@ -263,61 +289,43 @@ export function formatTimeline(rows, { title = 'batch timeline' } = {}) {
 }
 
 /**
- * Compact, single-line record of the auto-plan inputs and effective thresholds.
- * This is for reproducibility; it does not imply those thresholds are configurable.
+ * 一行说清"这次是怎么排的"：策略、帧数、张数、档位分布、几何、代价。
+ *
+ * 这一行存在的意义是**可复核**：模型看到 1/8 档有 30 帧，就知道那一段被切成小格子了；
+ * 看到 fill 只有 60%，就知道那张图有 40% 是黑底，不是"图里没东西"。
  */
 function formatPlanLine(plan) {
   if (!plan?.inputs) return null;
-  const t = plan.thresholds ?? {};
   const fmt = (v) => (v === null || v === undefined || (typeof v === 'number' && !Number.isFinite(v))
     ? 'n/a' : String(v));
-  const mode = plan.auto ? 'auto' : 'explicit';
-  // `produced` 是**所有图加起来**的格数，比较对象必须是 cells × sheets。
-  // 以前拿它和"每张几格"比，6 格 × 2 张会被写成 "12/6 cells (minGap-limited)" —— 数字没错，
-  // 但归因错了（不是 minGap 卡的，是重新切张），模型会去调 minGap 而问题不在那。
-  const totalAsked = plan.cells * Math.max(1, plan.sheets ?? 1);
-  const cellsText = plan.produced && plan.produced !== totalAsked
-    ? `${plan.produced}/${totalAsked} cells (see adjusted= for why)`
-    : plan.filledFrom
-      // 补满了就说清补过：否则"我要了 5 格，怎么给了 6 格"会像 bug
-      ? `${plan.cells} cells (filled from ${plan.filledFrom} — a blank slot costs the same tokens)`
-      : `${plan.cells} cells`;
-  // **判定的依据写进清单**：只给结论（摊得密/不密），模型没法判断该不该信；
-  // 给到"因为包络主导 4 Hz"或"因为 0.12 字/秒"，它就能自己复核并推翻。
-  const audioClass = plan.musicDriven === undefined ? '' : ' · ' + (plan.musicDriven
-    ? `audioClass=music-driven (basis=${plan.musicBasis ?? '?'}: ${plan.musicDetail ?? ''}) — ` +
-      'sub-frames packed denser on purpose; if this reading is wrong, pin cells/sheets explicitly'
-    : `audioClass=speech-led (basis=${plan.musicBasis ?? '?'}: ${plan.musicDetail ?? ''})`);
-  // **几何与代价单独一段**：格数、格像素、可读性、预算、以及"被改过没有"。
-  // 这几项以前散在 image= / cell= 里，模型要自己做除法，于是 286×118 被当成"够看"。
+  const i = plan.inputs;
+  const tiers = Object.entries(plan.tiers ?? {})
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([k, v]) => (k === '0' ? `free×${v}` : `1/${k}×${v}`)).join(' ');
   const geo = [];
-  if (plan.budget) geo.push(`budget=${plan.budget}`);
-  if (plan.cell) {
-    geo.push(`cell=${plan.cell.w}x${plan.cell.h} (${plan.cell.readability})`);
+  if (plan.canvas) geo.push(`canvas=${plan.canvas.width}x${plan.canvas.height}`);
+  // 报**最小格**：模型实际看到的最糊那一张就是它，报平均会让它高估小格的可读性
+  if (plan.cell) geo.push(`cell>=${plan.cell.w}x${plan.cell.h} (${plan.cell.readability}, smallest)`);
+  // 画布已裁到内容（图上不会有灰条），这个 fill 是**裁之前**占理想画布的比例
+  if (Number.isFinite(plan.fill)) geo.push(`fill=${plan.fill}% (before crop)`);
+  // 多张时把**每张**的填充率也报出来：平均 79% 可能是"四张 95% + 一张 50%"，
+  // 那张图的下一半就是灰条，不说清楚模型会以为"那里没内容"。
+  if (Array.isArray(plan.sheetFill) && plan.sheetFill.length > 1) {
+    geo.push(`sheetFill=${plan.sheetFill.join('/')}%`);
   }
-  // 摊开之后的真实尺寸：`cell=` 说的是"一个大格"，一格 2×2 时实际给模型看的是 4 张更小的图。
-  // 只报 cell，模型会按大格的可读性去描述画面 —— 那个描述就是编的。
-  if (plan.sub) {
-    geo.push(`sub=${plan.sub.w}x${plan.sub.h} x${plan.sub.k * plan.sub.k} (${plan.sub.readability})`);
+  // 0 表示不封顶：写成 0 会让模型以为"只能取 0 帧"
+  geo.push(plan.maxFrames > 0 ? `maxFrames=${plan.maxFrames}` : 'maxFrames=unlimited');
+  // 模型自己设的档位覆盖：写出来才复核得了（否则"我要 1 档全变大"没生效也看不出来）
+  if (plan.tierMap && Object.keys(plan.tierMap).length > 0) {
+    geo.push(`tierMap=${Object.entries(plan.tierMap).map(([k, v]) => `${k}->${v}`).join(',')}`);
   }
-  if (plan.need) geo.push(`need=${plan.need}`);
-  if (plan.maxPerSheet) geo.push(`maxPerSheet=${plan.maxPerSheet}`);
-  // 静默改格数是旧版最招人恨的一条：要 16 给 8、要 5 给 6，清单里却只有一个数。
-  if (Array.isArray(plan.trace) && plan.trace.length > 0) {
-    geo.push(`adjusted=${plan.trace.join(',')}`);
-  }
-  // 实际出的格数少于"要的"时，标题里就要显示两个数 —— 只写 8 会让人以为是 8 格的结果。
-  const askedTotal = plan.requested?.cells;
-  const short = Number.isFinite(askedTotal) && askedTotal > plan.cells * Math.max(1, plan.sheets ?? 1)
-    ? ` (asked ${askedTotal})` : '';
-  return `plan: ${mode} ${cellsText}${short} — ${plan.reason ?? 'auto'} · ` +
-    `meanLufs=${fmt(plan.inputs.meanLufs)} LUFS · ` +
-    `speechRate=${fmt(plan.inputs.speechRate)} chars/s · ` +
-    `motion=${fmt(plan.inputs.motion)} · cuts=${fmt(plan.inputs.cuts)} · ` +
-    `cutThreshold=${fmt(plan.inputs.scanThreshold)} · ` +
-    `thresholds musicLufs>${fmt(t.musicLufs)}, musicSpeechRate<${fmt(t.musicSpeechRate)}, ` +
-    `speechRateCut>${fmt(t.speechRateCut)}` + audioClass +
-    (geo.length ? ' · ' + geo.join(' · ') : '');
+  if (Array.isArray(plan.trace) && plan.trace.length > 0) geo.push(`adjusted=${plan.trace.join(',')}`);
+  return `plan: strategy=${plan.strategy} (${plan.strategyNote}) · ` +
+    `${plan.produced} frames on ${plan.sheets} image(s) · tiers ${tiers || 'n/a'}` +
+    `${plan.markBoost ? ` (+${plan.markBoost} on integral-mark frames)` : ''} · ` +
+    `integral-marks=${plan.sampleMarks} · meanLufs=${fmt(i.meanLufs)} LUFS · ` +
+    `motion=${fmt(i.motion)} · cuts=${fmt(i.cuts)} · ` +
+    `cutThreshold=${fmt(i.scanThreshold)} · ${geo.join(' · ')}`;
 }
 
 /**
@@ -326,51 +334,21 @@ function formatPlanLine(plan) {
  * 旧版对"看不清"完全沉默 —— 模型只能从 286×118 这个数字自己推断，
  * 而它没有像素尺（不知道该多大才读得清），于是把糊图当成了片子本身的画质。
  *
- * 建议必须可执行：减格数 / 加预算 / 换工具，三条都写清代价。
+ * 建议必须可执行，而且要说清代价：这套几何下"加预算"是没用的（800 是硬上限）。
  */
 export function readabilityAdvice(plan) {
   if (!plan?.cell) return null;
-  // **摊开的格子要按子帧判**。cell 341×189 是 "scene"，可一格摊 2×2 之后每张只有 170×94（"shot"）——
-  // 模型看到 cell 达标就不再怀疑，实际连脸都认不出。旧版只判 cell，所以 320 张 170×94
-  // 摆在它面前，清单还是写着"scene"。这一条是"AI 说根本看不清楚"最直接的来源。
-  const box = plan.sub ?? plan.cell;
-  const { w, h } = box;
-  // 以真实像素为准重算一次：清单里存的 readability 可能是别的调用方写进来的，
-  // 拿它当判据会出现"像素明明够、却因为字段过期一直报警"。
+  const { w, h } = plan.cell;
   const readability = readabilityOf(w, h);
-  const need = plan.need ?? 'scene';
-  const tier = NEED_TIERS[need];
-  if (!tier) return null;
-  const RANK = { composition: 0, shot: 1, scene: 2, text: 3 };
-  if ((RANK[readability] ?? 0) >= (RANK[need] ?? 2)) return null;
-  // 用同一套推导（含布局保守系数），不要在清单里另写一份算术 —— 两处一定会走样。
-  const cellsForNeed = maxCellsForNeed(plan.budget ?? 1_200_000, 16 / 9, need);
-  const nextBudget = (plan.budget ?? 1_200_000) < 1_650_000 ? 1_650_000
-    : Math.round((plan.budget ?? 1_200_000) * 1.5);
-  const cost = readability === 'composition'
-    ? 'You will see colour blocks, not content.'
-    : `You will see ${readability}-level detail, but not the ${need}-level detail you asked for ` +
-      '(small text and fine detail will be lost).';
-  // 报警的主体要说清是"整格"还是"子帧"。说错了模型会去调 cells，而问题其实是摊开。
-  const subject = plan.sub
-    ? `each cell is split ${plan.sub.k}x${plan.sub.k}, so the pictures you actually see are ${w}x${h}`
-    : `cells are ${w}x${h}`;
-  const tilingNote = plan.sub
-    ? ` The cell itself is fine — the tiling is what shrank them; tiling trades pixels for more ` +
-      'instants, and at this size that trade is a loss.'
-    : '';
-  // **建议要分情况**：整格太小 → 减格数有用；子帧太小 → 减格数基本没用。
-  // 子帧 = cellW / k，想让 3×3 的子帧达到 scene（320×180）需要 cell 960×540，
-  // 一图预算 1.2M 只够放 2 格 —— 那不是"少几格"能解决的。这时候 zoom 才是真解。
-  const fixes = plan.sub
-    ? `Fix it: video_zoom on the 1-2 cells that matter (one short window, one image — the direct fix), ` +
-      `or budget:${nextBudget} (bigger image, more tokens per image). Fewer cells will not help much here: ` +
-      `the sub-frames are small because the cell was split ${plan.sub.k}x${plan.sub.k}.`
-    : `Fix it one of three ways: cells:${cellsForNeed} on this same budget (fewer, bigger cells, same tokens), ` +
-      `budget:${nextBudget} (bigger image, more token per image — and the host may downscale it back), ` +
-      `or video_zoom on the 1-2 cells that matter (one short window, one image).`;
-  return `!! ${subject} — that is "${readability}", below what you asked for (${need}: ` +
-    `${tier.minCellW}x${tier.minCellH}, ${tier.label}). ${cost}${tilingNote} ${fixes}`;
+  if (readability !== 'composition') return null;
+  const tier = plan.tiers ? Object.keys(plan.tiers).sort((a, b) => Number(b) - Number(a))[0] : '8';
+  return `!! the smallest cells are ${w}x${h} — that is "${readability}", colour blocks rather than ` +
+    `content. The 1/${tier} tier exists because that stretch cuts fast (many short shots), so each ` +
+    'frame there is a real shot but only that wide. Fix it one of three ways: ' +
+    'strategy:"quality" (every frame one tier bigger — same frames, more images, ~384 tokens each), ' +
+    'strategy:"balanced" instead of "saver"/"frugal" (the cheap modes shrink everything one or three ' +
+    'tiers on purpose), or video_zoom on the 1-2 frames you actually need (one short window, big cells). ' +
+    'Raising budget will not help: the canvas is capped at 800x800 by the vision API.';
 }
 
 /**
@@ -417,6 +395,10 @@ export function formatManifest(result, {
     : null;
   const hasSheets = Boolean(result.sheets?.length);
   const sheet0 = result.sheets?.[0];
+  // 画布裁到内容之后每张高度不同，尺寸要去重后列出来
+  const sizes = hasSheets ? [...new Set(result.sheets.map((s2) => `${s2.width}x${s2.height}`))] : [];
+  const sizesText = sizes.length <= 3 ? sizes.join(' / ')
+    : `${sizes.slice(0, 3).join(' / ')} … (${sizes.length} distinct sizes)`;
 
   // 统一成一条平坦的 cell 列表：有图时从 sheets 里取（带行列），textOnly 时从 cells 里取
   const all = [];
@@ -433,30 +415,26 @@ export function formatManifest(result, {
     : [1, total];
   const picked = all.filter((c) => c.i >= lo && c.i <= hi);
 
-  const cellAttr = hasSheets && Number.isFinite(sheet0?.cellW) && Number.isFinite(sheet0?.cellH)
-    ? ` cell="${sheet0.cellW}x${sheet0.cellH}"` : '';
-  // **按实际像素算**，不再写死 384：384 只对 640k 的图成立，默认预算 1.2M 时一张图约 700 token。
-  // 报小了，模型会以为"多要几张也不贵"；报大了，它会为了省 token 把格子压糊。
-  // 口径写在括号里：DSH 按 42px 网格计价，API 宿主按像素计价。
-  const perImage = hasSheets ? imageTokens(sheet0.width, sheet0.height) : 0;
+  // 报**最小格**（模型看到的最糊那张）：计划里的 `cell` 就是它，见 pipeline 的 planInfo。
+  const cellAttr = hasSheets && plan.cell ? ` cell>=${plan.cell.w}x${plan.cell.h}` : '';
+  // 一张图的花费按 **384** 算：DS 的视觉上限是 800×800 / 384 token，更大的图会被缩回去。
+  const perImage = hasSheets ? VISION_TOKENS : 0;
   const tokensAttr = hasSheets
-    ? ` tokens="${perImage * result.sheets.length} (est@${perImage}/img, DSH 42px grid; an API host bills by pixels)"`
+    ? ` tokens="${perImage * result.sheets.length} (${perImage}/img: 800x800 cap)"`
     : '';
-  // 头一行必须写**实际出了多少格**。原来写的是 `plan.cells`，多张时那只是"每张多少格"
-  // （64 格 4 张会写成 "16 cells x 4 image(s)"），单张时又可能在 minGap 卡住后虚报
-  // （用户实测：要 16 格只出 8 格，头一行仍写 16）—— 模型据此以为自己看了 16 个瞬间。
+  // 头一行必须写**实际出了多少帧**：档位是上游算的，帧数是排布的结果，
+  // 写 plan.cells 那种"每张几格"会让模型以为自己看了那么多瞬间。
   const producedCells = hasSheets
     ? result.sheets.reduce((n, s) => n + (s.cells?.length ?? 0), 0)
-    : (plan.produced ?? plan.cells);
-  const askedCells = (plan.cells ?? producedCells) * Math.max(1, plan.sheets ?? 1);
-  const gridsText = producedCells === askedCells
-    ? `grid="${producedCells} cells x ${plan.sheets} image(s)"`
-    : `grid="${producedCells} cells x ${plan.sheets} image(s) (asked ${askedCells})"`;
+    : (plan.produced ?? 0);
+  const gridsText = `grid="${producedCells} frames on ${plan.sheets} image(s)"`;
   const lines = [
     ...(subtitleNote ? [subtitleNote] : []),
     `<storyboard path="${info.path ?? 'video'}" duration="${info.duration.toFixed(2)}" ` +
       `window="${win.from.toFixed(2)}-${win.to.toFixed(2)}" ` +
-      `image="${hasSheets ? `${sheet0.width}x${sheet0.height}` : 'none (text only)'}" ` +
+      // 每张图裁到内容后高度不同（行数不一样），多张时必须把尺寸列出来，
+      // 否则模型会以为所有图一样大、按第一张的比例去估别的图
+      `image="${hasSheets ? sizesText : 'none (text only)'}" ` +
       `${gridsText} burn="${plan.burn}"` +
       `${cellAttr}${tokensAttr}` +
       `${result.provenance?.ffmpeg ? ` ffmpeg="${result.provenance.ffmpeg}"` : ''}` +
@@ -471,6 +449,15 @@ export function formatManifest(result, {
         ? ` cuts="${result.cuts.length} (avg ${(result.window.duration / Math.max(1, result.cuts.length)).toFixed(1)}s)"`
         : '') + '>',
   ];
+  // 图上跳号的原因说清楚：模型数格子时会以为漏读了
+  {
+    const marks = (hasSheets ? all : []).filter((c) => c.via === 'mark').length;
+    if (marks > 0) {
+      lines.push(`badges: ${marks} of ${all.length} cells are integral-sample points (a long take that kept ` +
+        'changing, split every ~6 s) and carry NO number on the image — that is why the numbers skip. ' +
+        'They are real frames; cite them by cell number from this list.');
+    }
+  }
   const planLine = formatPlanLine(result.plan);
   if (planLine) lines.push(planLine);
   if (omitTranscript) {
@@ -507,7 +494,7 @@ export function formatManifest(result, {
     const cost = [];
     if (hasSheets) {
       cost.push(`${result.sheets.length} image(s) × ~${perImage} = ` +
-        `~${perImage * result.sheets.length} vision tokens (DSH grid)`);
+        `~${perImage * result.sheets.length} vision tokens (${perImage}/img, 800x800 cap)`);
     }
     const tr = result.transcript;
     // `omitTranscript` 时台词已经在另一条消息里发过了，但 ASR 的账**是真花掉的**，
@@ -614,7 +601,8 @@ export function formatManifest(result, {
       dissolve: 'gradual blend, not a hard cut',
       motion: 'possibly camera motion rather than a cut',
     };
-    const typed = (result.cuts ?? []).filter((c) => c.type && c.type !== 'hardcut');
+    // 只列**有描述**的类型：unknown / null 没有对应文案，列出来只是噪音
+    const typed = (result.cuts ?? []).filter((c) => c.type && c.type !== 'hardcut' && CUT_TYPE_DESC[c.type]);
     if (typed.length > 0) {
       const byType = {};
       for (const c of typed) byType[c.type] = (byType[c.type] ?? 0) + 1;
@@ -662,29 +650,23 @@ export function formatManifest(result, {
   let used = lines.join('\n').length;
   let stoppedAt = null;
   for (const c of picked) {
-    const pos = (c.i - 1) % plan.cells;
-    // 单图时 "image 1" 是纯冗余（64 格能省 500 字符）；多图时必须保留
-    const where = typeof c.cols === 'number'
-      ? ` (r${Math.floor(pos / c.cols) + 1}c${(pos % c.cols) + 1}` +
-        `${result.sheets.length > 1 ? `, image ${c.sheet}` : ''})`
-      : '';
+    // 可变网格没有"第几行第几列"这回事，只有"第几张图的第几格"。
+    const where = result.sheets.length > 1 ? ` (image ${c.sheet})` : '';
     const text = omitTranscript ? '' : truncateAtSentence(c.text, maxCellChars);
     // sharp 只留在 JSON 清单里：给模型一个 "479.7" 它无法判断好坏，纯占字符
     // frame@ 只在 pick='sharp' 时给：mid 的取帧时刻就是格中点，模型自己能算，
     // 而 sharp 是"3 个候选里选最锐的那个"，**推不出来** —— 少了它就等于暗示"画面在格首"。
-    const showFrame = plan.pick === 'sharp' && Number.isFinite(c.t_frame);
-    // 黑场格要说清楚"这是原片的暗场，不是取帧失败"，否则模型会以为自己看漏了。
-    // 措辞不能说"无内容"：实测 PV 的暗格里还有 logo 和演职员表。
-    const darkTag = c.dark
-      ? ' dark/transition — this stretch of the source is black or a transition, not a capture failure; titles or text may still be visible'
-      : '';
+    const showFrame = Number.isFinite(c.t_frame) && plan.pick !== 'mid';
+    // 档位写进每一格：同一张图上有的格子 800 宽、有的 100 宽，
+    // 不给 k 的话模型会以为所有格子一样清楚，然后拿 1/8 那张去描述细节。
+    const tierTag = c.tier === 0 ? '  k=free (size set by the packer)'
+      : (Number.isFinite(c.tier) ? `  k=${c.tier} (1/${c.tier})` : '');
+    // 积分采样点：图上没编号，这里标一下，否则模型数格子会对不上（编号会跳号）
+    const markTag = c.via === 'mark' ? '  [integral]' : '';
     const head = `cell ${c.i}${where} = ${tc(c.t_start)}-${tc(c.t_end)}` +
       (showFrame ? ` frame@${tc(c.t_frame)}` : '') +
-      (c.cuts ? `  cuts ${c.cuts}` : '') +
-      // 被摊开的格子要说清里面有几张：否则模型会以为那是一整张画面
-      (c.sub ? `  ${c.sub * c.sub} frames (${c.sub}×${c.sub})` : '') +
-      darkTag;
-    const body = text ? `${head}\n    "${text}"` : head;
+      (c.cuts ? `  cuts ${c.cuts}` : '') + tierTag + markTag;
+    const body = text ? `${head}\n    ${speechOf(c, text)}` : head;
     if (used + body.length + 1 > maxChars) { stoppedAt = c.i - 1; break; }
     lines.push(body);
     used += body.length + 1;

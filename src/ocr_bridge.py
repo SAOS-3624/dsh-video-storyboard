@@ -20,7 +20,9 @@
 """
 
 import json
+import os
 import sys
+import tempfile
 
 # 同 watch_smtc.py：Windows 默认 cp936，中文会变乱码
 try:
@@ -184,13 +186,106 @@ def read(paths):
     print(json.dumps({"ok": True, "engine": engine_name, "items": out}, ensure_ascii=False))
 
 
+def subs(probe_n, paths):
+    """一次进程做完 detect + read。
+
+    为什么要合并：每次起 Python 都要重新加载三个 onnx 模型（≈1.5 s），
+    而这条链路本来就是两次调用（先 3 张探针帧定字幕带，再识别 N 条）。
+    合并后省掉一次加载，整条 OCR 从 ~5.0 s 降到 ~3.4 s。
+
+    入参全是**全图**：前 `probe_n` 张只用来定字幕带，其余按这条带子
+    **在这里裁**（Node 侧不必再起 N 次 ffmpeg 去裁，也不用把 band 传回去）。
+    """
+    RapidOCR, engine_name = _load()
+    probes = paths[:probe_n]
+    targets = paths[probe_n:]
+    ocr = _make(RapidOCR, engine_name)
+    from PIL import Image
+
+    lower, every = [], []
+    width = height = None
+    for p in probes:
+        im = Image.open(p)
+        width, height = im.size
+        for box, txt, conf in _rows(_run(ocr, engine_name, p)):
+            if not box:
+                continue
+            xs = [pt[0] for pt in box]
+            ys = [pt[1] for pt in box]
+            w = max(xs) - min(xs)
+            h = max(ys) - min(ys)
+            if w / width < 0.18 or conf < 0.55:
+                continue
+            if h / height > 0.15:
+                continue
+            b = {"y0": min(ys), "y1": max(ys), "w": w, "text": txt, "conf": round(conf, 3)}
+            every.append(b)
+            if (b["y0"] + b["y1"]) / 2 / height >= 0.5:
+                lower.append(b)
+    boxes = lower or every
+    if boxes:
+        y0 = min(b["y0"] for b in boxes)
+        y1 = max(b["y1"] for b in boxes)
+        pad = (y1 - y0) * 0.6 + 8
+        band = [max(0.0, (y0 - pad) / height), min(1.0, (y1 + pad) / height)]
+    else:
+        band = [0.42, 0.68]
+    detected = bool(boxes)
+
+    items = []
+    if targets and detected:
+        ocr_read = _make(RapidOCR, engine_name, read_only=True)
+        for idx, p in enumerate(targets):
+            try:
+                im = Image.open(p).convert("RGB")
+                w, h = im.size
+                strip = im.crop((0, int(h * band[0]), w, int(h * band[1])))
+                # 宽 1280：rapidocr 的识别模型在这个量级上最稳；源比它窄就放大，
+                # 比它宽就缩小 —— 都是同一条带子，只是换了个尺度。
+                if strip.width != 1280:
+                    ratio = 1280 / strip.width
+                    strip = strip.resize((1280, max(8, int(strip.height * ratio))),
+                                        Image.LANCZOS)
+                # **落成临时文件再识别**，不要传 ndarray：rapidocr 对 ndarray 按 BGR 理解
+                # （cv2 约定），PIL 给的是 RGB —— 通道颠倒会吃掉字形边缘，实测把"句"读成"旬"，
+                # 然后这条错字被当成"OCR 校正"写进台词。
+                tmp = os.path.join(tempfile.gettempdir(), f"dsh-ocr-{os.getpid()}-{idx}.jpg")
+                strip.save(tmp, quality=95)
+                rows = _rows(_run(ocr_read, engine_name, tmp, read_only=True))
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                texts = [t for _, t, _ in rows if t]
+                confs = [c for _, t, c in rows if t]
+                items.append({
+                    "text": " ".join(texts).strip(),
+                    "conf": round(sum(confs) / len(confs), 3) if confs else 0.0,
+                })
+            except Exception as e:      # noqa: BLE001
+                items.append({"text": "", "conf": 0.0, "error": str(e)[:120]})
+    elif targets:
+        items = [{"text": "", "conf": 0.0, "skipped": "no-band"} for _ in targets]
+
+    print(json.dumps({
+        "ok": True, "engine": engine_name, "size": [width, height],
+        "band": [round(band[0], 4), round(band[1], 4)],
+        "detected": detected, "boxes": boxes[:12], "items": items,
+    }, ensure_ascii=False))
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        _fail("usage: ocr_bridge.py detect|read <image> [<image> ...]")
+        _fail("usage: ocr_bridge.py detect|read|subs <image> [<image> ...]")
     mode, imgs = sys.argv[1], sys.argv[2:]
     if mode == "detect":
         detect(imgs)
     elif mode == "read":
         read(imgs)
+    elif mode == "subs":
+        # subs <probeCount> <img...>
+        if not imgs or not imgs[0].isdigit():
+            _fail("usage: ocr_bridge.py subs <probeCount> <image> [<image> ...]")
+        subs(int(imgs[0]), imgs[1:])
     else:
         _fail(f"unknown mode: {mode}")

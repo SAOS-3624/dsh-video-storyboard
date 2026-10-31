@@ -1,14 +1,23 @@
 /**
- * pipeline.js — 端到端**编排**：探测 → 切分 → 分段 → 取帧 → 拼图 → 清单。
+ * pipeline.js — 端到端**编排**：探测 → 扫描切点 → 定帧 → 分档 → 排布 → 取帧 → 拼图 → 清单。
  *
- * CLI（bin/storyboard.mjs）和 DSH 工具（index.js）都走这里，避免两份实现漂移。
+ * CLI（bin/storyboard.mjs）和 DSH 工具（src/index.js）都走这里，避免两份实现漂移。
  * 本模块只返回内存里的 PNG buffer 与结构化清单，落盘由调用方决定。
  *
- * 本文件只留"一次运行是按什么顺序做什么"。三件事已经各自独立成模块：
- *   frames.js     取像素（本地/直链、单帧/摊格、并发）
- *   ocr-subs.js   用画面硬字幕校正转写
- *   format.js     把结果渲染成清单 / 时间线 / 证据文件
- *   scan.js       镜头切分（含爆点细扫 refineCutsByWindow）
+ * ## 2026-11-01 的大砍
+ *
+ * 旧版在"扫描出切点"之后还有一整套独立体系：suggest() 猜格数、rodt 按密度挪格、
+ * 格内摊开 k×k 子帧、measure 量帧数、按帧数切张、补满布局、裁暗场、并尾、音频驱动判定……
+ * 每一层都为上一层的历史问题打补丁，最后"5 格要成 6 格"这种事说不清。
+ *
+ * 现在是三个阶段，一条直线：
+ *
+ *   1. **帧 = 镜头**。真切点切段，积分假切点在真切点之间补，一段一帧。
+ *   2. **档位 = 切点密度**。密度高的地方格子小（1/8），长镜头格子大（1/1）。
+ *      `tiers.levelCurve()` 按 docx 的阈值/滞回状态机算。
+ *   3. **排布 = 打包**。档位序列喂给 `pack.solve()`，按行精确最优，一张装满再开下一张。
+ *
+ * 没有"每张几格"的参数 —— 张数是排布的结果，不是输入。
  */
 
 import { cpus } from 'node:os';
@@ -16,56 +25,46 @@ import { cpus } from 'node:os';
 import { probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
 import { resolveInput } from './fetch.js';
 import {
-  detectDarkRuns, packPrints, packedFps, refineCutsByWindow, scanShots, spikeCuts,
-  suppressClose, unpackPrints,
+  packPrints, packedFps, refineCutsByWindow, scanShots, spikeCuts, suppressClose, unpackPrints,
 } from './scan.js';
 import { tagCuts } from './flash.js';
 import { rememberSegments } from './locate.js';
 import { isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
-import { musicDrivenVerdict, readabilityOf, suggest, PLAN_THRESHOLDS } from './plan.js';
-import { findBursts, integralMarks } from './density.js';
-// 一张图会产生多少帧，切张与渲染共用同一个答案（见 measure.js 顶部说明）。
-// 现在这个"答案"由 layout.planLayout() 一次量好并随 groups 一起返回，pipeline 不再自己调。
-// 排布决策（几张 / 每张几格 / 时间轴怎么切）已经独立成 layout.js：纯算术、可单测。
-import { planLayout } from './layout.js';
+import {
+  BIN_COST, DEFAULT_STRATEGY, MARK_BOOST, STRATEGIES, applyMarkBoost, applyStrategy, applyTierMap, fitCanvas,
+  framesFromBounds, integralMarks, levelAt, levelCurve, readabilityOf, tierHistogram,
+} from './tiers.js';
+import { solve, toRects } from './pack.js';
 import { remember } from './memory.js';
-import { analyzeAudio, analyzeRhythm, describeAudio, detectOnsets, hasAudibleSamples } from './audio.js';
-import { alignCells, resolveAsrConfig, speechCurve } from './asr.js';
-// 转写的四条判据在 transcript-pass.js（和陪看的字幕轨共用同一套），这里只递上下文
+import { analyzeAudio, describeAudio, hasAudibleSamples } from './audio.js';
+import { alignCells, resolveAsrConfig } from './asr.js';
 import { resolveTranscript } from './transcript-pass.js';
 import { cacheKey, withCache } from './cache.js';
 import { pruneStorage } from './storage.js';
 import { saveCells } from './cells.js';
 import { ffmpegVersion, sha256File } from './provenance.js';
 import { findInjection } from './injection.js';
-import { addAudioStrip, addSheetHeader, clock, composeSheet, encodePngBuffer } from './sheet.js';
-import { extractFrameWithFallback, extractSubTile, mapPool } from './frames.js';
+import { addAudioStrip, addSheetHeader, clock, composePacked, encodePngBuffer } from './sheet.js';
+import { extractFrameWithFallback, extractFramesBatched, mapPool } from './frames.js';
 import { correctByOnScreenSubs } from './ocr-subs.js';
+import { resolveHwaccel } from './hwaccel.js';
 
 export const PICK_MODES = ['sharp', 'mid', 'thumb'];// 只有两种：时间码不烧进画面 —— 它占像素、压缩后先糊，而清单里已经有 0.01 秒精度的时间。
 // （历史上 `index+time` 在参数表里但从没实现过，等于一个会静默失效的选项。）
 export const BURN_MODES = ['index', 'none'];
-
-// 子帧预算的算法随"量帧数"一起搬到了 measure.js（切张与渲染共用同一个口径）。
-// 这里只做兼容再导出：`./pipeline` 是公开子路径，老调用方可能还在直接 import 它们。
-export { SUB_BUDGET, SUB_BUDGET_MAX, subBudgetFor } from './measure.js';
 
 /**
  * @param {object} opts
  * @param {string} opts.input 视频路径
  * @param {number} [opts.from] 窗口起点（秒）
  * @param {number} [opts.to] 窗口终点（秒）
- * @param {number} [opts.cells] 每张格数（0=自动）
- * @param {number} [opts.sheets] 张数（0=自动）
- * @param {number|'auto'} [opts.threshold]
- * @param {number} [opts.minGap] 采样最小间隔
+ * @param {number|'auto'} [opts.threshold] 切点阈值
+ * @param {number} [opts.scanGap] 切点近邻合并的秒数（0 = 关掉）
+ * @param {'quality'|'balanced'|'saver'|'frugal'} [opts.strategy] 升降档策略
+ * @param {number} [opts.maxFrames] 最多取多少帧（超过就合并最短的段）
+ * @param {number} [opts.budget] 单图像素预算（不会超过 800×800）
  * @param {'sharp'|'mid'|'thumb'} [opts.pick]
  * @param {'index'|'none'} [opts.burn]
- * @param {boolean} [opts.sourceHash] 在清单里写源文件 SHA-256（默认关；大文件要整读一遍）
- * @param {number} [opts.badgeRatio]
- * @param {number} [opts.budget] 单图像素预算
- * @param {string} [opts.ffmpegPath]
- * @param {string} [opts.ffprobePath]
  * @param {(p:object)=>void} [opts.onProgress]
  */
 export async function runStoryboard(opts) {
@@ -74,19 +73,31 @@ export async function runStoryboard(opts) {
     from = 0,
     to,
     threshold = 'auto',
-    minGap = 1.2,
-    // 扫描时的"两刀最短间隔"。和上面的 minGap（格子合并）不是一回事：
-    // 快闪素材要把这个调小才数得出镜头数，否则 3 秒 18 镜会被压成 4 刀。
-    scanGap = 0.35,
+    // **切点近邻合并默认关掉**：旧版 0.35s 会把"3 秒 18 个快闪镜头"压成 4 刀。
+    // 档位算法自己会用密度把快剪区压成小格子，不需要在扫描阶段先丢掉一半切点。
+    // 例外：`thrifty`（恭喜发财档）自己带 `defaultScanGap: 0.35`，见下面 capGap。
+    scanGap = 0,
     refineBursts = true,
-    // 取帧并发数：每路 ffmpeg 只解一帧，互不依赖。实测 9 格 90 秒片：
-    // 1 路 13.3s / 3 路 8.0s / 5 路 6.5s / 8 路 4.0s（这台 16 核）。
-    // 默认取核数一半、上限 8 —— 弱机或机械盘上不会把 IO 打死。
-    frameConcurrency = Math.min(8, Math.max(2, Math.floor(cpus().length / 2))),
-    adaptive = true,
-    // 摊开优先：少几格、每格更大，好让 2×2 / 3×3 排得下（见 plan.suggest 里的 tileFirst）
-    tileFirst = false,
-    pick = 'sharp',
+    // 取帧并发数：每路 ffmpeg 只解一帧，互不依赖。实测 154 帧（16 核 i9-12900HX）：
+    // 4 路 9.65s / 8 路 6.58s / 12 路 5.68s / 16 路 5.56s / 24 路 6.44s（过了 16 就抢不到核）。
+    // 取 0.75×核数：16 核 → 12，比 8 快 14%，又不像 24 那样把机械盘和内存带宽打满。
+    frameConcurrency = Math.min(12, Math.max(2, Math.floor(cpus().length * 0.75))),
+    strategy = DEFAULT_STRATEGY,
+    // **0 = 不封顶**。帧数由切点决定：一部长片几千刀就几千帧，用户自己承担解码时间。
+    maxFrames = 0,
+    // 张数上限：zoom / 陪看要**一张图**，概览默认也不封顶（帧多自然张多）。
+    maxSheets = 0,
+    // 至少取几帧：zoom / 陪看这种"窗口短 + 可能一个长镜头"的场景，光有切点会只出 1 帧。
+    // 不够就把最长的段等分切开（补足到 minFrames），保证"看这一段"至少有几张。
+    minFrames = 0,
+    // 'auto' = 所有帧统一取 ceil(sqrt(帧数)) 档（zoom 用：n 帧正好铺成 sqrt(n)×sqrt(n) 的一张图）
+    uniformTier = null,
+    // 档位映射表：`{1:3, 5:4, 6:4}` —— 接在策略之后，调用方说啥就是啥（没写的档位原样保留）
+    tierMap = null,
+    // 积分取帧（假切点）：真切点之间按"画面变化率的时间积分"补采样点，累够就触发、触发即清零。
+    integral = true,
+    integralSeconds = 6,
+    pick = 'mid',
     burn = 'index',
     transcript = 'auto',
     transcriptFile,
@@ -95,35 +106,18 @@ export async function runStoryboard(opts) {
     fetchOptions = null,
     audioStrip = true,
     asrMaxChunk = 45,
-    // 热词按**这一次**覆盖全局：材料视频该传「位错 滑移 柏氏矢量」，口播摄影片传「像差 焦段」。
-    // 全局 asr.json 里的那份是默认值，不是铁律 —— 学科不对时它对识别是负偏置。
     hotwords,
-    // 用画面硬字幕校正 ASR（detail=high 时才开）：OCR 全程本地，不花 token
     ocr = false,
-    // undefined = 按 env / $DSH_HOME/asr.json 解析；显式 null = 明确不用 env/file 里的 key
-    // （云端因此变成 no-key；本机服务按设计不需要 key，仍会尝试。要彻底关掉转写用 transcript:'off'）
     asrKey,
-    // 内容分类阈值（musicLufs / musicSpeechRate / speechRateCut）可覆盖：
-    // 不同母带响度能差 9 LU，写死的常数换一批片源就误判。实际生效的那组会写进清单。
-    planThresholds = null,
-    // 本次运行结束后，本地 ASR 至少再活这么久（毫秒）。陪看用它跨段保活。
     asrIdleMs = null,
     cache = true,
     textOnly = false,
     precomputed = null,
-    badgeRatio = 0.15,
-    // 出图几何：像素预算 / 每张格数上限 / 目标可读性（need 只影响自动排格的上限）。
-    // 三个值由 board.js 的 boardGeometry() 算好传进来，管线不再自己解释 size 档位。
+    // 出图几何：像素预算 / 画布边长上限。两个都由 board.js 收口后传进来。
     budget = 640_000,
-    // **0 = 交给 layout 按 budget + need 推**（和 boardGeometry 走同一个 plan.maxCellsForNeed）。
-    // 以前这里写死 16：于是"直接调 runStoryboard"和"走 CLI / DSH 工具"对同一个 budget
-    // 给出两种几何（32 格 341×189 vs 24 格 394×220）—— 同一件事两个口径，正是要收掉的。
-    maxPerSheet = 0,
-    need = 'scene',
+    maxCanvasSide = 800,
     // 只传 from 时自动推下一段：segment 秒。0 = 看到片尾（短片默认）。
     segment = 0,
-    // 只取一帧（cells:1 的语义）：不做格内摊开。清单说 1 格就必须是 1 帧。
-    noTile = false,
     encode = true,
     ffmpegPath = DEFAULT_FFMPEG,
     ffprobePath = DEFAULT_FFPROBE,
@@ -132,10 +126,20 @@ export async function runStoryboard(opts) {
   if (!inputRaw) throw new Error('input is required');
   if (!PICK_MODES.includes(pick)) throw new RangeError(`pick must be one of ${PICK_MODES.join('/')}`);
   if (!BURN_MODES.includes(burn)) throw new RangeError(`burn must be one of ${BURN_MODES.join('/')}`);
+  if (!STRATEGIES[strategy]) throw new RangeError(`strategy must be one of ${Object.keys(STRATEGIES).join('/')}`);
+  // 扫描期最小间隔：调用方显式给了就用它，否则用策略自带的（只有"恭喜发财档"带 0.35）
+  const capGap = Number(scanGap) > 0
+    ? Number(scanGap)
+    : (STRATEGIES[strategy]?.defaultScanGap ?? 0);
+  // **0 = 不限**（用户明确要求长片不封顶）。正数才当上限；NaN 也当不限。
+  // 别写成 `|| 96` —— 那会把"没限制"变成"96 帧"，正是上一版被吐槽的地方。
+  const capFrames = Number.isFinite(Number(maxFrames)) && Number(maxFrames) > 0
+    ? Math.min(10_000, Math.round(Number(maxFrames)))
+    : Infinity;
+  const capSheets = Number.isFinite(Number(maxSheets)) && Number(maxSheets) > 0
+    ? Math.min(64, Math.round(Number(maxSheets)))
+    : Infinity;
 
-  // 链接在这里变成一份本地文件；本地路径原样返回（source 为 null）。
-  // 后面的所有阶段都只面对 input，不知道它原来是不是个 URL。
-  // ffmpegPath 也要带过去：链接下载时 yt-dlp 需要它来合流 DASH 的 video+audio（issue #18）
   const resolved = await resolveInput(inputRaw, { ...(fetchOptions ?? {}), ffmpegPath });
   const input = resolved.path;
   const sourceInfo = resolved.source;
@@ -145,26 +149,12 @@ export async function runStoryboard(opts) {
     : null;
 
   const info = { ...(await probeVideo(input, { ffprobePath })), path: input };
-  // Provenance 是锦上添花：ffmpeg 版本缓存/失败不阻塞；hash 只在显式要求时算。
   const [ffmpeg, sha256] = await Promise.all([
     ffmpegVersion(ffmpegPath),
     sourceHash ? sha256File(input).catch(() => 'unavailable') : Promise.resolve(null),
   ]);
-  const provenance = {
-    ...(ffmpeg ? { ffmpeg } : {}),
-    ...(sourceHash ? { sha256 } : {}),
-  };
+  const provenance = { ...(ffmpeg ? { ffmpeg } : {}), ...(sourceHash ? { sha256 } : {}) };
   const winStart = Math.max(0, Math.min(Number(from) || 0, Math.max(0, info.duration - 0.2)));
-  /**
-   * 窗口终点。三种情况，按优先级：
-   *  1. 显式 `to` —— 调用方说了算；
-   *  2. 给了 `segment`（或 from>0 但没给 to）—— 按固定长度推下一段。
-   *     这是给 SEQUENCE 用的：只传 from，不用自己记"下一段从哪开始"；
-   *  3. 都没有 —— 看到片尾（短片/整片概览）。
-   *
-   * 旧行为是"from>0 且没 to → 看到片尾"：2 小时的片子传了 from:600 就等于
-   * 悄悄把剩下 110 分钟全扫了，扫描和 ASR 都按整段算，一次调用能烧十几分钟。
-   */
   const segSec = Number(segment) > 0
     ? Math.max(1, Math.round(Number(segment)))
     : (winStart > 0 ? 300 : 0);
@@ -175,11 +165,7 @@ export async function runStoryboard(opts) {
   );
   const winDur = Math.max(0.2, winEnd - winStart);
 
-  // 分阶段计时：只有真跑的时候才知道慢在哪。结果里带 timing，不额外开销（Date.now 级别）
-  // 本地 ASR 的生命周期句柄：只有"我们拉起来的"那个才会在结束时被停。
-  // 必须声明在转写块之前 —— 转写现在跑在扫描之前（并行），拿不到后面声明的变量。
   let asrLife = null;
-  // ASR 的耗时与命中情况（清单的成本行要用）：null = 这次没转写
   let asrSeconds = null;
   let asrCached = null;
 
@@ -187,24 +173,20 @@ export async function runStoryboard(opts) {
   let _t = Date.now();
   const mark = (name) => { timing[name] = ((Date.now() - _t) / 1000); _t = Date.now(); };
 
-  // ---- 音频测量（零模型：响度 + 静音）。先做，因为静音位置要用来切 ASR 请求。
-  const needAudio = info.hasAudio && !textOnly && (audioStrip !== false || transcript !== 'off');
+  // ---- 音频测量（零模型：响度 + 静音）。只为了图上的那根条带，不再参与排布。
+  //
+  // **串行放在扫描前面**（试过并行，更慢）：两条 ffmpeg 一起跑时会和扫描的 cuda 解码
+  // 抢 IO 和 CPU —— 实测并行让 scan 从 2.2s 涨到 3.7s，而 audio 自己只有 0.9s，
+  // 净亏 0.6s。0.9s 已经压到地板（两条 ffmpeg 的启动各 240ms），没必要再动。
+  const needAudio = info.hasAudio && !textOnly && audioStrip !== false;
   const audio = needAudio
     ? await analyzeAudio({ input, ffmpegPath, start: winStart, end: winStart + winDur })
     : null;
   const stripAudio = audioStrip !== false ? audio : null;
   const silences = audio?.silences ?? [];
-  // 声音事件：突然变响/突然安静。画面没动但事情发生的时刻，只能靠它抓到。
-  // 口播片里"每句话的停顿"都会触发，所以**只用最突出的若干个**参与格位加权
-  // （全部 90 多个事件铺上去等于把密度曲线压平），清单里也按强度排序展示。
-  const allEvents = audio ? detectOnsets(audio) : [];
   mark('audio');
 
   // 转写在**扫描的同时**跑：它只依赖音频静音位置，不依赖切点。
-  // 21 分钟教程实测：扫描 133s、转写 58s，串起来 202s；并行后只等较慢的那个。
-  //
-  // 判据（四条优先级）已经搬进 transcript-pass.js —— 陪看的字幕轨要的是**同一套判定**，
-  // 只是不要图。这里只负责把这一趟的上下文递进去、把 asr 的账记下来。
   const transcriptP = resolveTranscript({
     input, info, sourceInfo, fetchOptions, transcript, transcriptFile,
     winStart, winDur, silences, ffmpegPath, hotwords, asrKey, asrMaxChunk, cache,
@@ -216,21 +198,13 @@ export async function runStoryboard(opts) {
   });
 
   // 扫描结果按 (文件, 窗口, 阈值策略) 缓存：storyboard 之后的 zoom 能直接复用
-  // 键里要带 scanGap：判定用到了它（近邻合并），否则换参数会命中旧配置的切点
   const key = cache ? await cacheKey({
-    input, start: winStart, end: winStart + winDur, threshold, minGap: scanGap,
+    input, start: winStart, end: winStart + winDur, threshold, minGap: capGap,
   }) : null;
-  // precomputed：批量模式下全片已经扫过一次，窗口直接复用那份切点与摘要，
-  // 不再为每个窗口重新解码一遍（2 小时的片子能省掉 24 次重复扫描）。
-  // **逐帧的 means 不进缓存**（级联缓存走 JSON.stringify，塞不下也别扭），
-  // 所以 `tagCuts` 只有"这一趟真的扫了"才会打标签。
-  // prints 则**会**进缓存，但存的是 `printPack`（8 fps 抽稀 + base64，见 scan.packPrints）——
-  // 于是缓存命中时 `frameDiv` 判据照跑，只是采样率与冷跑不同（交接文档 §9.1 有实测差异）。
   let scanMeans = null;
   let scanPrints = null;
-  // 指纹序列的**实际帧率**：真扫时是 info.fps，从缓存读回的是抽稀后的（info.fps / step）。
-  // 这根数直接决定"时刻 → 下标"的换算，算错整条时间轴就偏了。
   let printFps = 0;
+  let hwaccelUsed = null;
   const scan = precomputed
     ? {
       cuts: (precomputed.cuts ?? []).filter((c) => c.t >= winStart && c.t < winStart + winDur),
@@ -238,32 +212,25 @@ export async function runStoryboard(opts) {
       threshold: precomputed.threshold ?? threshold,
       cached: false,
       reused: true,
-      // batch 模式下 precomputed 是 scanShots 的完整返回，指纹就在里面（整片坐标，offset=0）
       ...(Array.isArray(precomputed.prints) ? { printsRaw: precomputed.prints } : {}),
     }
     : await withCache(key, async () => {
+      // 硬件解码只服务"整片顺序解码"这一件事（见 hwaccel.js）。放在缓存回调里：
+      // 命中缓存时一行解码都不做，探测本身就是白花的 300ms。
+      const hwaccel = await resolveHwaccel({ ffmpegPath, input });
+      hwaccelUsed = hwaccel;
       const s = await scanShots({
         input, fps: info.fps, threshold, start: winStart, end: winStart + winDur,
-        // 默认 0.35s：两刀之间短于它的合并成一刀。快闪素材（<0.35s 一个镜头）要显式调小，
-        // 否则 3 秒 18 个镜头会被压成 4 刀 —— 实测过，这是"数不出快闪"的主因。
-        minGap: scanGap, ffmpegPath, onProgress,
+        minGap: capGap, ffmpegPath, hwaccel, onProgress,
       });
-      // **逐帧的 means / prints 不进缓存**：级联缓存走的是 JSON.stringify，
-      // 而 prints 是 7500 个 Uint8Array —— 序列化后会变成 {"0":12,"1":34,…}，
-      // 60 分钟片子直接几十 MB，而且读回来类型也丢了（判据会拿到坏数据）。
-      // **抽稀版要存**（8fps + base64，see scan.packPrints）：`frameDiv` 判据全靠它。
-      // 但它只解决了"有没有"，没解决"一样不一样"：逐帧 vs 8fps 会给出不同的 frameDiv，
-      // 所以冷跑和缓存命中仍可能摊出不同的 k（交接文档 §9.1，实测 PV 28 帧 vs 23 帧）。
       scanMeans = s.means;
       scanPrints = s.prints;
       return {
         cuts: s.cuts, stats: s.stats, frames: s.frames,
         threshold: s.threshold, degraded: s.degraded, summary: s.summary,
-        darkRuns: detectDarkRuns(s.means, { fps: info.fps }),
         printPack: s.prints?.length ? packPrints(s.prints, info.fps) : null,
       };
     }, { enabled: cache });
-  // 三个来源收口成一份：真扫（内存里已有）> 缓存读回（解包）> precomputed（batch，整片坐标）
   if (scanPrints?.length) {
     printFps = info.fps;
   } else if (scan.printPack) {
@@ -273,53 +240,24 @@ export async function runStoryboard(opts) {
     scanPrints = scan.printsRaw;
     printFps = info.fps;
   }
-  // **统一采样率：三条来路必须落到同一份指纹上。**
-  // 真扫 / precomputed 拿到的是**逐帧**（fps = info.fps），缓存读回的是 `packPrints` 的 **8 fps**。
-  // `frameDiversityOf` 用 `round((t-offset)*fps)` 寻址，两者算出的下标最多差 1.5 帧 ——
-  // 快剪段里差一帧，`frameDiv` 就能从 76 掉到 52（跨过 `FRAME_DIV_MID=70`）→ k 从 3 变 2。
-  // 实测（记管MAD02 / 概念 PV）：冷跑 126 帧 `{1:3,2:15,3:7}`、缓存命中 121 帧 `{1:3,2:16,3:6}`；
-  // PV 28 帧 vs 23 帧。**同一部片、同一组参数，第一次跑和第二次跑出图不同。**
-  //
-  // 修法：真扫这边**当场按缓存的口径抽稀一遍再解回来**，两条路从此逐字节一致。
-  // 为什么以 8 fps 为准（而不是把缓存提到逐帧）：PRINT_FPS=8 是为了缓存体积（见 scan.packPrints），
-  // 而 0.125 s 一帧在最短格（0.5 s）里也还分得开 4 张 —— 精度够，体积不炸。
-  if (scanPrints?.length) {
-    const packed = packPrints(scanPrints, printFps || info.fps);
-    const unpacked = packed ? unpackPrints(packed) : null;
-    if (unpacked?.length) {
-      scanPrints = unpacked;
-      printFps = packedFps(packed, printFps || info.fps);
-    }
-  }
   if (cache && !scan.cached && !precomputed) await pruneStorage();
   mark('scan');
 
-  // ---- 爆点细扫（见 refineBurstCuts 注释：粗扫看不见 0.35s 以下的刀）
-  // **运行一开始就续命**。上一次运行结束时设的 idleMs 计时器，会在这一次运行的扫描阶段到点，
-  // 把服务关掉 —— 等这次终于到转录那一步又得重新拉起（白等 30 秒）。续命一次就避免这种浪费。
   if (isOwned()) keepAlive();
   let cuts = scan.cuts;
 
   // ---- 极静素材（PPT / 代码录屏 / 固定机位）：绝对阈值会漏掉"只改了几个像素"的翻页。
-  // 这类素材的分数中位数接近 0，一页 PPT 换页可能只有 3–8 分，压在任何合理绝对阈值下面。
-  // 改用**相对基线**再找一次（和本地中位数比），只在确实更静的时候替换。
-  // 用户反馈（野生的猛龙）：纯 PPT 视频上"阈值压到 0.08 也一条都检不出来，只能退回等间隔"。
   if (!precomputed && scan.stats.length > 20) {
-    // 判据是**刀密度**，不是"画面静不静"：实测概念 PV / 沧野 / MAD 的中位分都是 0.9–1.1，
-    // 和录屏素材（0.0–1.4）完全混在一起，用中位分根本分不开。
-    // 能分开的是刀/秒：录屏 0.11–0.22，视频内容 0.40–0.49。
     const perSec = cuts.length / Math.max(1, winDur);
     if (perSec < 0.25) {
-      // minAbs 4：实测 320×180 上"改一块约 3.5% 的画面"峰值只有 5.7 分、7.8% 才 11.8 分 ——
-      // 绝对阈值 12~15 全都漏；而静止画面的噪声底只有 0.0–1.5，4 分足够把噪声挡在外面。
-      const spikes = suppressClose(spikeCuts(scan.stats, { k: 4, minAbs: 4, halfWindow: 12 }), scanGap);
+      const spikes = suppressClose(spikeCuts(scan.stats, { k: 4, minAbs: 4, halfWindow: 12 }), capGap);
       if (spikes.length > cuts.length) cuts = spikes;
     }
   }
 
+  // ---- 爆点细扫：粗扫看不见 0.35s 以下的刀
   let refinedBursts = [];
   if (refineBursts && !precomputed && !textOnly) {
-    // 把粗扫的阈值也传下去：细扫的刀不能比它低太多（否则 2–4 分的抖动会混进来）
     const r = refineCutsByWindow({
       stats: scan.stats, coarseCuts: cuts, fps: info.fps, winStart, winDur,
       coarseThreshold: scan.threshold ?? 0,
@@ -328,9 +266,29 @@ export async function runStoryboard(opts) {
     refinedBursts = r.refined;
   }
 
+  const trace = [];
+  if (hwaccelUsed) trace.push(`hwaccel:${hwaccelUsed}`);
+  // ---- 丐中丐档：**自适应加大切点最小间隔**，直到整段能装进一张图。
+  // 一张 1/8 档画布最多 8×8=64 格，留点余量取 56（格子会浮动到 1/7，那时只有 49 格）。
+  // 间隔是**对原始切点**逐轮放大的（不是在上一次结果上继续合并），所以单调、可复现。
+  if (STRATEGIES[strategy]?.fitOneSheet && !precomputed && cuts.length + 1 > 56) {
+    const ONE_SHEET = 56;
+    let gap = capGap > 0 ? capGap : 0.2;
+    let fitted = suppressClose(cuts, gap);
+    let rounds = 0;
+    while (fitted.length + 1 > ONE_SHEET && gap < 120 && rounds < 60) {
+      gap *= 1.3;
+      fitted = suppressClose(cuts, gap);
+      rounds += 1;
+    }
+    if (fitted.length < cuts.length) {
+      cuts = fitted;
+      trace.push(`cuts-merged:${scan.cuts.length}->${cuts.length}@gap${gap.toFixed(1)}s`);
+    }
+  }
+
   // ---- 给每个切点打类型标签（flash / white / black / hardcut / dissolve / motion）。
-  // **一个都不删**：删掉误检会让这段在插件眼里变成"完全静止"，反而丢了"这里一直在动"。
-  // 标签只用于清单表述和下游降权，格位分配靠的是变化率积分（见 densityFromScore）。
+  // **一个都不删**：删掉误检会让这段在插件眼里变成"完全静止"。
   if (!precomputed && !textOnly && Array.isArray(scanPrints) && scanPrints.length) {
     cuts = tagCuts(cuts, {
       prints: scanPrints,
@@ -340,19 +298,14 @@ export async function runStoryboard(opts) {
     });
   }
 
-
   // ---- 台词：显式文件 > 字幕轨 > ASR；三者都没有就静默跳过（绝不让分镜失败）
-
   const transcriptResult = await transcriptP;
   let { transcriptInfo } = transcriptResult;
   const { textInSilence } = transcriptResult;
-  // ---- 硬字幕校正：只在明确要求、且转写来自 ASR 时才做
   let ocrReport = null;
   if (ocr && transcriptInfo?.source === 'asr' && (transcriptInfo.segments?.length ?? 0) > 0) {
     ocrReport = await correctByOnScreenSubs({
       input, winStart, winDur, ffmpegPath, segments: transcriptInfo.segments, remoteFrame,
-      // URL 模式下 input 是下载的扫描副本（默认 360p）。scale=1280 放大不回细节，
-      // 所以这份校正是"基于低清副本做的"，必须让清单说清楚，而不是假装和原流一样准。
       sourceCopyHeight: sourceInfo ? (sourceInfo.scanActual ?? sourceInfo.scanHeight ?? null) : null,
     }).catch((e) => {
       if (process.env.DSH_OCR_DEBUG) console.error('[ocr]', e?.message ?? e);
@@ -366,10 +319,7 @@ export async function runStoryboard(opts) {
   const relSegments = (transcriptInfo?.segments ?? [])
     .map((seg) => ({ ...seg, from: seg.from - winStart, to: seg.to - winStart }))
     .filter((seg) => seg.to > 0 && seg.from < winDur);
-  // 窗口口径：transcriptFile 可能给的是整片，不能拿整片 chars 去除以 winDur。
   const transcriptChars = relSegments.reduce((n, seg) => n + String(seg.text ?? '').length, 0);
-  // 外部文本只做标记，不改变执行：注入扫描是证据，不是策略。
-  // 标题也算外部文本（yt-dlp 的 title 会进清单），一并扫；它没有时间码，from/to 留 null。
   const externalSource = sourceInfo?.url ?? info.path ?? null;
   const suspectInjection = findInjection(
     [
@@ -378,194 +328,384 @@ export async function runStoryboard(opts) {
     ],
     { source: externalSource },
   );
-  const speech = relSegments.length > 0
-    ? speechCurve(relSegments, { duration: winDur })
-    : null;
 
-  // 声音事件只有在"话不密"的片子里才有信息量：
-  // 口播片每句话的停顿都会触发（实测 299s 里 92 次），铺到密度曲线上等于把它压平。
-  const speechRateForEvents = winDur > 0
-    ? relSegments.reduce((n, seg) => n + seg.text.length, 0) / winDur : 0;
-  const audioEvents = speechRateForEvents < 3
-    ? [...allEvents]
-      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
-      .slice(0, 12)
-      .sort((a, b) => a.t - b.t)
-    : [];
+  /* ================================================================ 新链路 */
 
-  // ---- 格数：放在台词与音频之后，是为了让"口播多不多 / 是不是音乐驱动"参与决策
-  // 显式给了格数就不问 suggest()（它的建议只在自动档用）。
-  const explicitCells = Math.max(0, Number(opts.cells) || 0);
-  const explicitSheets = Math.max(0, Number(opts.sheets) || 0);
-  // 和 suggest() 用同一个口径；下面写进 plan.inputs，方便复现判定。
-  const speechRate = winDur > 0 ? transcriptChars / winDur : 0;
-  // 「有没有台词」是**有没有拿到转写结果**，不是"转出来几个字"：
-  // 跑了 ASR 但一个字没转出来，那是"这片子确实没台词"，结论有效；
-  // 没跑 ASR（--transcript off）才是"不知道"，才需要去听音频。
-  // transcript:'off' 是一个明确结果（"没听"），不是"没有台词" —— 不能拿它当"这片子没人说话"的证据。
-  const hasSpeech = transcriptInfo != null && transcriptInfo.source !== 'off';
-  // 没有台词数据时才去听节奏（多一次音频解码，只在需要时付这个成本）。
-  const rhythm = !hasSpeech && info.hasAudio && !textOnly
-    ? await analyzeRhythm({ input, ffmpegPath, start: winStart, end: winStart + winDur })
-    : null;
-  // 判定结果连**依据**一起带出来：清单要写清"因为什么这么判"，模型才可能推翻它。
-  const verdict = musicDrivenVerdict({
-    meanLufs: audio?.mean, speechRate, hasSpeech, rhythm, thresholds: planThresholds ?? {},
-  });
-  let suggestion;
-  if (explicitCells === 0) {
-    suggestion = suggest({
-      duration: winDur,
-      cuts: cuts.length,
-      motion: scan.summary.p90,
-      aspect: info.aspect,
-      speechRate,
-      hasSubtitle: info.hasSubtitle,
-      hasSpeech,
-      rhythm,
-      tileFirst,
-      maxPerSheet,
-      budget,
-      need,
-      meanLufs: audio?.mean,
-      ...(planThresholds ? { thresholds: planThresholds } : {}),
-    });
-  }
-  // 音乐驱动**只影响取帧**，不影响格数（格数走 rodt）。音乐片的信息全在画面上，
-  // 所以把"摊开"的触发门槛压低：同样的段更容易摊、摊得更细。
-  // 用 verdict 而不是只读 suggestion —— 显式指定 cells 时 suggestion 是空的，
-  // 但"音乐片取帧更密"跟格数从哪来无关。
-  const musicDriven = suggestion?.musicDriven === true || verdict.musicDriven;
-  // 排布过程的"为什么变成这样"：由 layout.planLayout() 逐条追加（补满、裁暗场、并尾、重切）。
-  const trace = [];
-
-  // 两条路：自适应按密度分配格位（快切区多给格），否则退回"并段到 k 格"
-  mark('transcript');
-  const relCuts = cuts.map((c) => c.t - winStart);
-  // **积分采样点（假切点）**：扫描之后立刻算好，交给下面"格内取几帧 / 取在哪"用。
-  // 它不进 `cuts` —— 清单里"切点 N 个"必须还是真切点，否则模型会以为那些地方有硬切。
-  // 阈值就是 equivSeconds（每条采样点代表多少秒的平均变化量）。
-  //
-  // **音乐驱动原本设 4（比默认 6 更密），2026-10-30 反过来了**：实测正式 PV 第 2 格
-  // 只有 3.0 秒却塞了 7 个真切点 + 2 个采样点 → k=3 → 9 帧，平均 **0.3 秒一张**。
-  // 3 秒里 8 个镜头本来就长得像，多采出来的点全变成"相似帧"，把预算从别处抢走。
-  // 采样点只在**真切点之间**补洞，不该在已经切得很碎的地方再加密度。
-  const sampleMarks = scan.stats?.length
+  // ---- 1) 积分取帧（假切点）：只在**真切点之间**补，真切点自己已经是边界
+  const absCuts = cuts.map((c) => c.t);
+  // 乞丐档不要假切点：那些帧是"画面一直在变"补出来的，省钱的档位不该再为它多取帧
+  const wantIntegral = integral && !STRATEGIES[strategy]?.noIntegral;
+  const sampleMarks = wantIntegral && scan.stats?.length
     ? integralMarks({
       duration: winDur,
       series: scan.stats,
-      cuts: cuts.map((c) => c.t),
+      cuts: absCuts,
       start: winStart,
-      equivSeconds: musicDriven ? 8 : 6,
+      equivSeconds: integralSeconds,
     })
     : [];
-  // 让 video_locate 能直接复用这次的转写，省掉一次 ASR
-  if (transcriptInfo?.segments?.length) rememberSegments(input, transcriptInfo.segments);
-  // 黑场段（≥2s）在预算里**额外占格**，所以要先数清楚：算"内容格数"时必须把它扣掉，
-  // 否则 12 内容 + 1 黑场 = 13 格 → 排成 4×4 会空 3 个黑位（实测「中国剑」就是这样）。
-  const darkRuns = (Array.isArray(scan.darkRuns) ? scan.darkRuns : [])
-    .filter((r) => r.to - r.from >= 2 && r.from < winDur);
 
-  // ---- 排布：几张图、每张几格、时间轴怎么切。
-  // 整段决策（黑场占格 / 补满布局 / 按帧切张 / 再补满）已经搬到 layout.js —— 那是纯算术，
-  // 可以单独单测；这里只负责把"已经算好的输入"交过去，再把结果接回来。
-  const layout = planLayout({
-    winStart, winDur, relCuts,
-    p90: Number(scan.summary?.p90) || 0,
-    darkRuns,
-    stats: scan.stats ?? [],
-    adaptive, minGap,
-    cellsIn: opts.cells, sheetsIn: opts.sheets, maxPerSheet,
-    suggestion,
-    aspect: info.aspect, budget, need,
-    audioStrip: Boolean(stripAudio), musicDriven,
-    cuts, sampleMarks,
-    // **逐帧指纹的上下文**：`scanPrints` 有三个来源（见上面 438-446 行）——
-    // 真扫（逐帧）、缓存命中（`printPack` 解出来的 **8 fps 抽稀版**）、precomputed（整片坐标）。
-    // 三者的 fps 不同，所以必须带 `printFps`，不能一律用 `info.fps`：
-    // offset 是窗口起点（prints[0] 对应 winStart）；拿原 fps 去寻址抽稀序列会越界，
-    // frameDiv 整片变 null，而现象只是"判据悄悄失效"。
-    printCtx: { prints: scanPrints, fps: printFps || info.fps, printOffset: winStart },
-    noTile, trace,
-  });
-  const { cellRanges, groups, noTiling } = layout;
+  // ---- 2) 帧 = 镜头（+ 积分采样点切出来的子段），3) 档位，4) 排布
+  //
+  // 三件事必须一起做：**帧数影响档位序列，档位序列决定张数**。所以当调用方要求
+  // "最多几张图"（zoom / 陪看都是一张）时，只能减少帧数再重排 —— 不能事后砍掉尾图，
+  // 那会让最后一格覆盖半分钟却只给一帧。
+  const curve = levelCurve({ duration: winDur, fps: info.fps, cuts: absCuts });
+  const canvas = fitCanvas(info.aspect, { maxSide: maxCanvasSide, budget });
+  // 排布沿用"按行凑满"（fillRows: true）：放开它虽然填充率更高，但**张数会涨**（5 → 7），
+  // 那是舍本逐末 —— 一张图固定 384 token，张数才是成本。`fillRows:false` 保留给调用方自己选。
+  const PACK = { stretch: 0.2, binCost: BIN_COST[strategy] ?? 1.02, fillRows: true };
+  // 低于 minFrames 就把最长的段反复二等分（zoom / 陪看用）
+  const ensureMinFrames = (segsIn, min) => {
+    let out = segsIn;
+    while (out.length < min) {
+      let idx = 0;
+      let len = 0;
+      for (let i = 0; i < out.length; i += 1) {
+        const l = out[i].to - out[i].from;
+        if (l > len) { len = l; idx = i; }
+      }
+      if (len < 0.25) break;                 // 段已经太短，再切没意义
+      const s0 = out[idx];
+      const mid = (s0.from + s0.to) / 2;
+      out = [
+        ...out.slice(0, idx),
+        { ...s0, to: mid, t: (s0.from + mid) / 2 },
+        { ...s0, from: mid, t: (mid + s0.to) / 2, cut: false },
+        ...out.slice(idx + 1),
+      ];
+    }
+    return out;
+  };
 
-  // 指纹完全拿不到时（precomputed 没带 prints / 旧缓存没有 printPack），`frameDiv` 那几条判据
-  // 会自动退回 meanMotion。**必须写出来**：否则摊开方式的差异在清单上完全看不出来。
-  // 注意：**缓存命中时不算"拿不到"** —— 它会给出 8 fps 的抽稀指纹，判据照跑，
-  // 但数值与冷跑（逐帧）不同，同一部片两次跑可能给出不同的 k（见交接文档 §9.1）。
-  // 放在 planLayout 之后 push：trace 的顺序就是"补满 → 裁暗场 → 并尾 → 重切"的真实顺序。
-  if (!scanPrints) trace.push('no-prints:frameDiv-off');
+  const build = (cap) => {
+    let sg = framesFromBounds({
+      duration: winDur, start: winStart, cuts: absCuts, marks: sampleMarks, maxFrames: cap,
+    });
+    if (Number(minFrames) > 1) sg = ensureMinFrames(sg, Math.min(24, Math.round(Number(minFrames))));
+    // 档位 = 切点密度；假切点段额外 +2 档（那里画面在连续变化，一帧代表不了多久）
+    const base = sg.map((s) => levelAt(curve, s.t - winStart));
+    const raw = applyMarkBoost(base, sg);
+    let tr = applyStrategy(raw, strategy);
+    tr = applyTierMap(tr, tierMap);
+    if (uniformTier === 'auto') {
+      // zoom 的语义是"一张图里 n 个格子看清楚"，不是"按内容密度分配大小"：
+      // 统一成 ceil(sqrt(n)) 档，刚好铺满 √n×√n 网格。
+      const k = Math.max(1, Math.min(8, Math.ceil(Math.sqrt(sg.length))));
+      tr = sg.map(() => k);
+    }
+    return { segs: sg, raw, tiers: tr, plan: solve(tr, { stretch: 0.2, ...PACK }) };
+  };
+  let built = build(capFrames);
+  if (Number.isFinite(capSheets) && built.plan.bins > capSheets) {
+    // 张数对帧数**近似单调**（帧少 → 张少），所以二分找"能装进 maxSheets 的最多帧数"。
+    // 别按比例一步砍：73 帧 5 张要 4 张，一步砍到 34 帧 3 张 —— 白白丢掉一半帧。
+    let lo = 1;
+    let hi = built.segs.length;
+    let best = null;
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const b = build(mid);
+      if (b.plan.bins <= capSheets) {
+        if (!best || b.segs.length > best.segs.length) best = b;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (best) built = best;
+  }
+  // 尾部瘦身：最后一张只装 1~4 帧、填充率又低于 65% 时，把那几帧的档位加一档重排。
+  // 一张图 = 384 token，换最后几帧小一档是划算的（片尾标题 + 演职员表各占半张图，实测很常见）。
+  // 只加档、不减帧：时间覆盖和"不封顶"都不受影响。
+  const trimTail = (b) => {
+    const lastBin = b.plan.cells.filter((c) => c.bin === b.plan.bins - 1);
+    if (b.plan.bins < 2 || lastBin.length === 0 || lastBin.length > 4) return b;
+    const lastFill = lastBin.reduce((a, c) => a + c.w * c.h, 0);
+    if (lastFill >= 0.65) return b;
+    const from = lastBin[0].seq;
+    for (let step = 1; step <= 2; step += 1) {
+      const bumped = b.tiers.map((t, i) => (i >= from ? Math.min(8, t + step) : t));
+      const p2 = solve(bumped, { stretch: 0.2, ...PACK });
+      if (p2.bins < b.plan.bins) return { ...b, tiers: bumped, plan: p2 };
+    }
+    return b;
+  };
+  built = trimTail(built);
 
-  // 本次实际输入 + 生效阈值。只记录，不做成十几个可配置旋钮。
-  // 格数/张数用的是**最终生效值**：清单和 manifest 读的是它们 —— 不刷就会报 12 格 1 张、
-  // 而实际出了 25 格 2 张（2026-10-30 对比测试踩到，报告里对不上账）。
-  // 多张时取"最多那张的格数"（真正的每张格数在 sheets[].cells 里，这里只给个量级）。
+  // ---- 补位：排布留了洞就**把那段长镜头切开多取一帧**，而不是让画布空着。
+  //
+  // 洞的成因固定：某张图覆盖的段太少（片尾标题 + 演职员表、一个 20 秒长镜头），
+  // 格子占不满一行。补法不是"塞一张无关的帧"，而是**把最长的那段再切一刀**——
+  // 时间轴仍然连续、清单不会出现两个重叠的时间段，多出来的帧还正好是该看的。
+  // 切点用段起点的哈希取 0.35~0.65 之间的位置（同一部片可复现，但不会所有刀都落在正中）。
+  const hash01 = (v) => {
+    const x = Math.sin((Number(v) || 0) * 12.9898) * 43758.5453;
+    return x - Math.floor(x);
+  };
+  const splitSeg = (seg, frac) => {
+    const mid = seg.from + (seg.to - seg.from) * frac;
+    return [
+      { from: seg.from, to: mid, t: (seg.from + mid) / 2, cut: seg.cut, via: seg.via },
+      { from: mid, to: seg.to, t: (mid + seg.to) / 2, cut: false, via: seg.via },
+    ];
+  };
+  // 补位目标：每张图都往 90% 上推。低于它的部分算"欠满"。
+  const FILL_TARGET = 0.9;
+  // 每张图的填充率（= 格子面积之和），以及"欠满总量" = Σ max(0, FILL_TARGET - fill)
+  const binFills = (plan) => {
+    const m = new Map();
+    for (const c of plan.cells) m.set(c.bin, (m.get(c.bin) ?? 0) + c.w * c.h);
+    return [...m.entries()];
+  };
+  const deficitOf = (plan) => binFills(plan).reduce((n, [, a]) => n + Math.max(0, FILL_TARGET - a), 0);
+
+  const fillGaps = (b) => {
+    let cur = b;
+    const startFrames = b.segs.length;
+    // **不许因为补位多开图**：一张图 384 token，补位只该在现有张数里找缝，不能拿张数换填充率。
+    const binCap = b.plan.bins;
+    for (let round = 0; round < 10; round += 1) {
+      const fills = binFills(cur.plan);
+      let worst = null;
+      for (const [bin, area] of fills) if (!worst || area < worst.area) worst = { bin, area };
+      if (!worst || worst.area >= FILL_TARGET) break;
+
+      // **先试"减帧"**：n 个正方形铺不满时，减到最近的较小平方数反而能 100%，
+      // 而且格子放大一档（6 个 1/3 → 4 个 1/2），画面更清楚。这比"切几刀补到较大平方数"
+      // 省帧、也不会把张数顶开 —— 唯一代价是少看几个瞬间。
+      {
+        const cellsOfBin = cur.plan.cells.filter((c) => c.bin === worst.bin);
+        const nb = cellsOfBin.length;
+        const small = [4, 9, 16, 25].filter((k) => k < nb).pop();
+        if (small && nb - small <= 3) {
+          const first = cellsOfBin[0].seq;
+          const last = cellsOfBin[cellsOfBin.length - 1].seq;
+          const lo = cur.segs[first].from;
+          const hi = cur.segs[last].to;
+          const span = (hi - lo) / small;
+          const tier = Math.round(Math.sqrt(small));
+          const newSegs = Array.from({ length: small }, (_, j) => ({
+            from: lo + span * j,
+            to: lo + span * (j + 1),
+            t: lo + span * (j + 0.5),
+            cut: j === 0,
+            via: 'start',
+          }));
+          const segs2 = [...cur.segs.slice(0, first), ...newSegs, ...cur.segs.slice(last + 1)];
+          const tiers2 = [...cur.tiers.slice(0, first),
+            ...new Array(small).fill(tier), ...cur.tiers.slice(last + 1)];
+          const p2 = solve(tiers2, { stretch: 0.2, ...PACK });
+          if (process.env.DSH_PLAN_DEBUG) {
+            console.error(`[fillGaps] coarsen bin=${worst.bin} ${nb}->${small} tier=${tier}`
+              + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`
+              + ` deficit=${deficitOf(cur.plan).toFixed(3)}->${deficitOf(p2).toFixed(3)}`);
+          }
+          if (p2.bins <= cur.plan.bins && deficitOf(p2) < deficitOf(cur.plan) - 1e-9) {
+            cur = { ...cur, segs: segs2, tiers: tiers2, plan: p2 };
+            if (cur.segs.length > startFrames * 2) break;
+            continue;                       // 这张补好了，回去看还有没有更空的
+          }
+        }
+      }
+
+      // **第三招：把这张图覆盖的时间重新均分，档位统一**（n → 最近的平方数）。
+      // 混合档位时行内矮格上方的缝是几何必然（一行里 400 和 133 并排，行高取大的那个），
+      // 只有"整张图尺寸一致"才能铺满。代价是这张图内部不再区分长镜头/快剪 —— 只在它欠满时用。
+      {
+        const cellsOfBin = cur.plan.cells.filter((c) => c.bin === worst.bin);
+        const nb = cellsOfBin.length;
+        const sq = [4, 9, 16, 25].reduce(
+          (best, k) => (Math.abs(k - nb) < Math.abs(best - nb) ? k : best), 4,
+        );
+        if (sq !== nb && Math.abs(sq - nb) <= 4) {
+          const tier = Math.round(Math.sqrt(sq));
+          const first = cellsOfBin[0].seq;
+          const last = cellsOfBin[cellsOfBin.length - 1].seq;
+          const lo = cur.segs[first].from;
+          const hi = cur.segs[last].to;
+          const span = (hi - lo) / sq;
+          const newSegs = Array.from({ length: sq }, (_, j) => ({
+            from: lo + span * j,
+            to: lo + span * (j + 1),
+            t: lo + span * (j + 0.5),
+            cut: j === 0,
+            via: 'start',
+          }));
+          const segs2 = [...cur.segs.slice(0, first), ...newSegs, ...cur.segs.slice(last + 1)];
+          const tiers2 = [...cur.tiers.slice(0, first),
+            ...new Array(sq).fill(tier), ...cur.tiers.slice(last + 1)];
+          const p2 = solve(tiers2, { stretch: 0.2, ...PACK });
+          if (process.env.DSH_PLAN_DEBUG) {
+            console.error(`[fillGaps] uniform bin=${worst.bin} ${nb}->${sq} tier=${tier}`
+              + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`
+              + ` deficit=${deficitOf(cur.plan).toFixed(3)}->${deficitOf(p2).toFixed(3)}`);
+          }
+          if (p2.bins <= cur.plan.bins && deficitOf(p2) < deficitOf(cur.plan) - 1e-9) {
+            cur = { ...cur, segs: segs2, tiers: tiers2, plan: p2 };
+            if (cur.segs.length > startFrames * 2) break;
+            continue;
+          }
+        }
+      }
+
+      // 减帧不成，再试"切几刀补到较大平方数"。
+      // 只看**这张图覆盖的段**，按长度从长到短排。切太短的段（<1s）取不出两张不同的画面。
+      const seqs = cur.plan.cells.filter((c) => c.bin === worst.bin).map((c) => c.seq);
+      const cand = [];
+      for (let i = Math.min(...seqs); i <= Math.max(...seqs); i += 1) {
+        const len = cur.segs[i].to - cur.segs[i].from;
+        if (len >= 1.0) cand.push({ i, len });
+      }
+      if (cand.length === 0) break;
+      cand.sort((x, y) => y.len - x.len);
+
+      // 填满的关键是**帧数凑成完全平方数**：n 个正方形最多只能铺到 n/k²，
+      // 6 个 1/3 格 = 2 行 × 3 个 = 2/3 高（67%），补到 9 个才是 3×3 = 100%。
+      // 所以先按"补到最近的较大平方数"切几刀；补不上（或已经凑齐）再用自由尺寸帧填缝。
+      const n = cur.plan.cells.filter((c) => c.bin === worst.bin).length;
+      const target = [4, 9, 16].find((k) => k > n);
+      const toSquare = target ? Math.min(6, target - n) : 0;
+      const want = Math.max(toSquare, 1);      // 至少补一个（可能是自由尺寸）
+      let accepted = false;
+      for (const pick of cand.slice(0, 4)) {
+        if (toSquare === 0) break;             // 已经凑成平方数，走自由尺寸那条路
+        const segs2 = [...cur.segs];
+        const tiers2 = [...cur.tiers];
+        // 一次切 toSquare 刀（刀数不够就用 cand 里能切的）
+        const cuts = cand.slice(0, toSquare).sort((x, y) => y.i - x.i);
+        for (const c2 of cuts) {
+          const fr = 0.35 + hash01(cur.segs[c2.i].from) * 0.3;
+          const ps = splitSeg(cur.segs[c2.i], fr);
+          segs2.splice(c2.i, 1, ...ps);
+          tiers2.splice(c2.i, 1, cur.tiers[c2.i], cur.tiers[c2.i]);
+        }
+        const p2 = solve(tiers2, { stretch: 0.2, ...PACK });
+        if (process.env.DSH_PLAN_DEBUG) {
+          console.error(`[fillGaps] bin=${worst.bin} n=${n} toSquare=+${toSquare}`
+            + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`
+            + ` deficit=${deficitOf(cur.plan).toFixed(3)}->${deficitOf(p2).toFixed(3)}`);
+        }
+        if (p2.bins <= binCap && deficitOf(p2) < deficitOf(cur.plan) - 1e-9) {
+          cur = { ...cur, segs: segs2, tiers: tiers2, plan: p2 };
+          accepted = true;
+        }
+        break;                                  // 只试这一种（切哪几段由 cand 排序决定）
+      }
+      if (!accepted && toSquare === 0) {
+        // 已经是平方数但还欠满 → 用自由尺寸帧填缝（它按剩余宽度伸展）
+        for (const pick of cand.slice(0, 4)) {
+          const segs2 = [...cur.segs];
+          const tiers2 = [...cur.tiers];
+          const frac = 0.35 + hash01(cur.segs[pick.i].from) * 0.3;
+          const parts = splitSeg(cur.segs[pick.i], frac);
+          segs2.splice(pick.i, 1, ...parts);
+          tiers2.splice(pick.i, 1, cur.tiers[pick.i], 0);
+          const p2 = solve(tiers2, { stretch: 0.2, ...PACK });
+          if (process.env.DSH_PLAN_DEBUG) {
+            console.error(`[fillGaps] bin=${worst.bin} free-filler seg=${pick.i}`
+              + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`
+              + ` deficit=${deficitOf(cur.plan).toFixed(3)}->${deficitOf(p2).toFixed(3)}`);
+          }
+          if (p2.bins <= binCap && deficitOf(p2) < deficitOf(cur.plan) - 1e-9) {
+            cur = { ...cur, segs: segs2, tiers: tiers2, plan: p2 };
+            accepted = true;
+            break;
+          }
+        }
+      }
+      if (!accepted) break;
+      if (cur.segs.length > startFrames * 2) break;    // 兜底：最多补一倍
+    }
+    return cur;
+  };
+  // **显式限帧就不补**：调用方说"最多 4 帧"就是 4 帧，补到 5 帧是违约。
+  if (!Number.isFinite(capFrames)) built = fillGaps(built);
+
+  const { segs, raw: rawTiers, tiers, plan: packed } = built;
+
+  // 每格对到帧：seq 就是帧下标（排布不改顺序）
+  const cellFrames = segs.map((s, i) => ({ ...s, tier: tiers[i], rawTier: rawTiers[i], seq: i }));
+
+  const sheetRects = [];
+  for (let b = 0; b < packed.bins; b += 1) {
+    // 把 `via` 带到 rect 上：拼图时要靠它决定"这一格画不画编号"
+    sheetRects.push(toRects(packed.cells, {
+      width: canvas.width, height: canvas.height, bin: b,
+    }).map((r) => ({ ...r, via: cellFrames[r.seq]?.via })));
+  }
+
+  if (segs.length < absCuts.length + 1) trace.push(`frames-merged:${absCuts.length + 1 + sampleMarks.length}->${segs.length}`);
+  if (strategy !== DEFAULT_STRATEGY) trace.push(`strategy:${DEFAULT_STRATEGY}->${strategy}`);
+
+  const minCellW = Math.min(...packed.cells.map((c) => Math.round(c.w * canvas.width)));
+  const minCellH = Math.min(...packed.cells.map((c) => Math.round(c.h * canvas.height)));
+
   const planInfo = {
-    cells: groups.length > 1 ? Math.max(...groups.map((g) => g.length)) : cellRanges.length,
-    sheets: groups.length,
-    adaptive, pick, burn, minGap,
-    // 几何：清单据此报"每格多大、能看清到什么程度、这一张多少钱"。
-    // `maxPerSheet` 报**实际生效的上限**（调用方没指定时是按 budget+need 推出来的那个），
-    // 否则清单里会写一个没被用上的数。
-    budget, need, maxPerSheet: layout.perSheetCap,
-    ...(noTiling ? { noTiling: true } : {}),
-    ...(tileFirst ? { tileFirst: true } : {}),
-    ...(layout.filledFrom ? { filledFrom: layout.filledFrom } : {}),
-    reason: suggestion?.reason ?? 'explicit',
-    auto: layout.autoPlan,
-    // **判定的依据也交出去**。只给一个 musicDriven:true/false，模型没法判断该不该信；
-    // 给到"因为包络主导 4 Hz"或"因为 0.12 字/秒"，它就能自己复核。
-    musicDriven,
-    musicBasis: verdict.basis,
-    musicDetail: verdict.detail,
+    // 兼容字段：`cells` 现在是"单张最多几格"（实测值），`sheets` 是张数
+    cells: Math.max(...sheetRects.map((r) => r.length)),
+    sheets: packed.bins,
+    frames: segs.length,
+    produced: segs.length,
+    strategy,
+    strategyNote: STRATEGIES[strategy].note,
+    // 映射表写进清单：模型自己设的覆盖，复核时要能一眼看到
+    ...(tierMap && Object.keys(tierMap).length ? { tierMap } : {}),
+    // 清单里要把"不限"说出来：写个 0 会让模型以为只能取 0 帧
+    maxFrames: Number.isFinite(capFrames) ? capFrames : 0,
+    markBoost: MARK_BOOST,
+    budget,
+    canvas: { width: canvas.width, height: canvas.height },
+    // **最小格**是清单该报的那个数：模型看到的就是最小那格的可读性
+    cell: {
+      w: minCellW, h: minCellH,
+      readability: readabilityOf(minCellW, minCellH),
+    },
+    fill: +(packed.fill * 100).toFixed(1),
+    // 每张图的填充率：**只有平均值会骗人** —— 平均 79% 可能是"四张 95% + 一张 50%"，
+    // 那最后一张有一半是灰条，模型会以为图里没东西。
+    sheetFill: sheetRects.map((r) => {
+      const a = r.reduce((n, x) => n + (x.pw * x.ph) / (canvas.width * canvas.height), 0);
+      return +(a * 100).toFixed(0);
+    }),
+    tiers: tierHistogram(tiers),
+    rawTiers: tierHistogram(rawTiers),
+    sampleMarks: sampleMarks.length,
+    pick, burn, scanGap: capGap,
+    adaptive: false,
+    trace,
     inputs: {
       duration: +winDur.toFixed(2),
       scanThreshold: scan.threshold,
-      meanLufs: Number.isFinite(audio?.mean) ? +audio.mean.toFixed(1) : null,
-      speechRate: +speechRate.toFixed(2),
-      hasSpeech,
-      rhythm: rhythm && Number.isFinite(rhythm.peakHz)
-        ? { peakHz: rhythm.peakHz, rhythmRatio: rhythm.rhythmRatio, windows: rhythm.windows }
-        : null,
       motion: +(Number(scan.summary?.p90) || 0).toFixed(1),
       cuts: cuts.length,
       hasSubtitle: Boolean(info.hasSubtitle),
+      meanLufs: Number.isFinite(audio?.mean) ? +audio.mean.toFixed(1) : null,
     },
-    thresholds: { ...PLAN_THRESHOLDS, ...(planThresholds ?? {}) },
-    sampleMarks: sampleMarks.length,
-    requested: layout.requested,
-    trace,
-    // **planner 认为会出多少帧**。渲染时必须与这个数一致（同一个 measureGroup 得出的），
-    // 所以它是一个可验收的量：清单里 Σ(cell.sub²) 应该正好等于它。
-    frames: layout.frames,
+    fps: info.fps,
   };
 
-  // textOnly：只重算"格 → 时间段 → 台词"，一帧都不解、一张图都不拼。
-  // 用途：总览文本被宿主截断后，按 cellRange 分批把剩下的台词取回来（第二次调用命中缓存，几乎瞬时）。
+  // textOnly：只算"帧 → 台词"，一帧都不解、一张图都不拼。
   if (textOnly) {
-    const cellsMeta = [];
-    let n = 0;
-    for (const group of groups) {
-      const aligned = alignCells(group, transcriptInfo?.segments ?? []);
-      group.forEach(({ from: a, to: b }, gi) => {
-        n += 1;
-        const t = aligned[gi] ?? null;
-        cellsMeta.push({
-          i: n,
-          t_start: +a.toFixed(3),
-          t_end: +b.toFixed(3),
-          ...(t?.text ? { text: t.text, charsPerSec: t.charsPerSec } : {}),
-        });
-      });
-    }
+    const aligned = alignCells(segs, transcriptInfo?.segments ?? []);
+    const cellsMeta = segs.map((s, i) => {
+      const t = aligned[i] ?? null;
+      return {
+        i: i + 1,
+        t_start: +s.from.toFixed(3),
+        t_end: +s.to.toFixed(3),
+        tier: tiers[i],
+        ...(t?.text ? { text: t.text, charsPerSec: t.charsPerSec } : {}),
+        ...(t?.lines?.length > 1 ? { lines: t.lines } : {}),
+      };
+    });
     return {
       info,
       window: { from: winStart, to: winStart + winDur, duration: winDur },
       cuts,
       summary: scan.summary,
       threshold: scan.threshold,
-    ...(scan.degraded ? { degraded: scan.degraded } : {}),
+      ...(scan.degraded ? { degraded: scan.degraded } : {}),
       cached: Boolean(scan.cached),
       audio: null,
       transcript: transcriptInfo
@@ -580,126 +720,185 @@ export async function runStoryboard(opts) {
       cells: cellsMeta,
       textOnly: true,
       ...(sourceInfo ? { source: sourceInfo } : {}),
-    // 哪些窗口被细扫过、粗扫/细扫各数出多少刀 —— 清单要据此说明"这段的镜头数可信"
-    ...(refinedBursts.length ? { refinedBursts } : {}),
-      totalDuration: +cellRanges.reduce((n2, r) => n2 + (r.to - r.from), 0).toFixed(3),
+      ...(refinedBursts.length ? { refinedBursts } : {}),
+      totalDuration: +segs.reduce((n, s) => n + (s.to - s.from), 0).toFixed(3),
     };
   }
 
+  // ---- 5) 取帧 + 拼图
+  //
+  // **取帧跨张全铺开**（2026-11-01）。旧版是"逐张 mapPool"：一张图 9–17 帧、8 路并发，
+  // 每张只跑 2–3 轮就有大半线程空转，13 张之间还互相等。实测 154 帧：
+  // 逐张 7.8s，全铺开 16 路 5.6s。帧之间本来就互不依赖（每次 ffmpeg 只解一帧），
+  // 没有理由按张分段。
+  //
+  // 唯一要管的是内存：一帧 = pw×ph×3 字节，800×450 的大格子约 1MB，
+  // 长片几千帧全塞进内存会顶到 GB 级。所以按**像素预算**切块（默认 96MB ≈ 100 张满格），
+  // 块内一次并发跑完，块间串行。
   const out = [];
-  let index = 0;
   let fallbacks = 0;
-  for (const [si, group] of groups.entries()) {
-    if (group.length === 0) continue;
-    // **同一份测量**：布局、每格的 k、总帧数都是 planLayout 里量过的那一份，直接取。
-    // 以前这里是"算 frames 时量一遍、渲染前再量一遍"，参数一模一样 —— 纯白算；
-    // 而一旦两处参数漂移（漏传 printCtx / need），切张的 k 就和渲染的 k 不同。
-    const measured = layout.measurements[si];
-    // cellBudget 也要用 measure 那个：composeSheet 与 layoutCanvas 必须是同一个预算，
-    // 差 10% 会让取帧尺寸和拼图尺寸不一致（图会变成斜条纹）。
-    const { cols, rows, width, height, cellW, cellH, cellBudget } = measured;
-    const aligned = alignCells(group, transcriptInfo?.segments ?? []);
+  let globalIndex = 0;
+
+  const jobs = [];
+  for (let si = 0; si < sheetRects.length; si += 1) {
+    for (let k = 0; k < sheetRects[si].length; k += 1) {
+      const r = sheetRects[si][k];
+      jobs.push({ si, k, rect: r, cell: cellFrames[r.seq] });
+    }
+  }
+  // 一块最多 EXTRA 轮并发（轮数太多不利于"最先失败的先报"），也受像素预算约束
+  const EXTRACT_BUDGET = 96 << 20;
+  const batches = [];
+  {
+    let cur = [];
+    let bytes = 0;
+    const maxJobs = Math.max(1, frameConcurrency) * 4;
+    for (const j of jobs) {
+      const b = j.rect.pw * j.rect.ph * 3;
+      if (cur.length && (bytes + b > EXTRACT_BUDGET || cur.length >= maxJobs)) {
+        batches.push(cur); cur = []; bytes = 0;
+      }
+      cur.push(j); bytes += b;
+    }
+    if (cur.length) batches.push(cur);
+  }
+  const shotOf = new Map();
+  const _ex0 = Date.now();
+  // 批量路径（一次 ffmpeg 取多帧）只在**本地 + 不做锐度挑选**时可用：
+  // - 远程直链要带 header、一次 HTTP seek 1.9s，批量反而更糟；
+  // - pick='sharp' 要每格解 3 个候选帧再挑最锐的，和"一次解码"是两套语义。
+  //
+  // `DSH_EXTRACT_MODE=single` 强制逐帧：批量路径的像素是"先缩到源比例、再盒式 cover 到目标格"
+  // （两次采样 ≈ 一次采样），需要逐位复现旧输出、或怀疑某片源 select 帧号对不上时用它。
+  const useBatch = pick === 'mid' && !remoteFrame && process.env.DSH_EXTRACT_MODE !== 'single';
+  if (useBatch) {
+    const list = jobs.map((j) => ({
+      at: j.cell.t, cellW: j.rect.pw, cellH: j.rect.ph, key: `${j.si}:${j.k}`,
+    }));
+    const got = await extractFramesBatched({
+      input, jobs: list, fps: info.fps, ffmpegPath,
+      srcW: info.width, srcH: info.height,
+      // 扫描已经按 (ffmpeg, input) 探过一次，这里直接命中进程内缓存；没探过就是 null
+      hwaccel: await resolveHwaccel({ ffmpegPath, input }),
+      // 批量块是"解码 20 秒"的重活，开太多路会互相抢解码器；实测 4 路已接近线性
+      concurrency: Math.max(2, Math.min(4, Math.round(frameConcurrency / 3))),
+      fallback: async (j) => extractFrameWithFallback({
+        input, remote: null, at: j.at, dur: 0,
+        cellW: j.cellW, cellH: j.cellH, ffmpegPath, pick,
+      }),
+    });
+    for (const [k, v] of got) shotOf.set(k, v);
+  } else {
+    for (const batch of batches) {
+      const shots = await mapPool(batch, frameConcurrency, async (j) => extractFrameWithFallback({
+        input, remote: remoteFrame, at: j.cell.t, dur: 0,
+        cellW: j.rect.pw, cellH: j.rect.ph, ffmpegPath, pick,
+      }));
+      for (let i = 0; i < batch.length; i += 1) shotOf.set(`${batch[i].si}:${batch[i].k}`, shots[i]);
+    }
+  }
+  timing.extract = (Date.now() - _ex0) / 1000;
+
+  for (let si = 0; si < sheetRects.length; si += 1) {
+    const rects = sheetRects[si];
+    const aligned = alignCells(rects.map((r) => cellFrames[r.seq]), transcriptInfo?.segments ?? []);
+
     const frames = [];
     const cellMeta = [];
-    // ---- 取帧：先算完所有格子的参数，再并发取帧，最后按顺序组装。
-    // 原来是一格一格 await（9 格串行，短视频里占 60% 的时间）。ffmpeg 每次只解一帧，
-    // 彼此没有依赖，并发 3 路就能把这部分压掉一半以上。
-    const plan = measured.cells.map((c, gi) => ({
-      gi, a: c.from, b: c.to, cellCuts: c.cellCuts,
-      cutTimes: c.cutTimes, sub: c.k, want: c.want, rate: c.rate,
-    }));
-
-    const _ex0 = Date.now();
-    const shots = await mapPool(plan, frameConcurrency, async ({ a, b, sub, cutTimes }) => {
-      if (sub > 1) {
-        // 快闪格：摊成 k×k，一张图交代 k² 个瞬间（token 不变）
-        return extractSubTile({
-          input, remote: remoteFrame, a, b, k: sub, cellW, cellH, ffmpegPath,
-          shots: cutTimes,
-        });
-      }
-      return extractFrameWithFallback({
-        input, remote: remoteFrame, at: a, dur: b - a, cellW, cellH, ffmpegPath, pick,
-      });
-    });
-
-    timing.extract = (timing.extract ?? 0) + (Date.now() - _ex0) / 1000;
-    for (const [ki, { gi, a, b, cellCuts, sub }] of plan.entries()) {
-      index += 1;
-      const frame = shots[ki];
-      if (frame.via === 'local-fallback') fallbacks += 1;
-      frames.push({ buffer: frame.buffer, index });
-      const text = aligned[gi] ?? null;
+    for (let k = 0; k < rects.length; k += 1) {
+      const r = rects[k];
+      const f = cellFrames[r.seq];
+      const shot = shotOf.get(`${si}:${k}`) ?? null;
+      if (!shot) throw new Error(`internal: frame for sheet ${si + 1} cell ${k + 1} was never extracted`);
+      if (shot.via === 'local-fallback') fallbacks += 1;
+      globalIndex += 1;
+      frames.push({ buffer: shot.buffer, w: r.pw, h: r.ph });
+      const text = aligned[k] ?? null;
+      const cutCount = absCuts.filter((t) => t >= f.from && t < f.to).length;
       cellMeta.push({
-        i: index,
+        i: globalIndex,
         sheet: si + 1,
-        t_start: +a.toFixed(3),
-        t_end: +b.toFixed(3),
-        // 平铺格的画面是 k² 个瞬间，不存在"这一格的取帧时刻"；
-        // 不写 t_frame，清单和 evidence 都不会给出误导性的 frame@。
-        ...(sub > 1 ? { sub } : { t_frame: +frame.t.toFixed(3) }),
-        // 黑场格：整段没有内容，清单要写明，否则模型会以为"这一格是空的、可能采样失败"
-        ...(group[gi]?.dark ? { dark: true } : {}),
-        ...(cellCuts > 0 ? { cuts: cellCuts } : {}),
-        // 格内平均画面变化（0–255 的分数）：诊断"为什么这格摊 3×3 而那格只摊 2×2"
-        ...(Number.isFinite(measured.cells[gi]?.meanMotion)
-          ? { meanMotion: measured.cells[gi].meanMotion } : {}),
-        // **摊开的 4 张到底差多少**（16×9 指纹两两平均差）。这是"该不该摊"的直接证据，
-        // 比 meanMotion 可信（后者测的是段内运动，方向常相反）。不报的话，
-        // 模型看到一格只给整帧会以为是漏采，实际上是因为那 4 张本来就一样。
-        ...(Number.isFinite(measured.cells[gi]?.frameDiv)
-          ? { frameDiv: measured.cells[gi].frameDiv } : {}),
-        ...(frame.sharp !== undefined ? { sharp: +frame.sharp.toFixed(1) } : {}),
+        // 积分假切点：图上不烧编号（它不是"换镜头"），清单里标出来让调用方能对上
+        ...(f.via === 'mark' ? { via: 'mark' } : {}),
+        // 绝对时间（zoom 的 cellId 直接寻址要用它）
+        t_start: +f.from.toFixed(3),
+        t_end: +f.to.toFixed(3),
+        t_frame: +shot.t.toFixed(3),
+        tier: f.tier,
+        cell: { w: r.pw, h: r.ph },
+        ...(cutCount > 0 ? { cuts: cutCount } : {}),
+        ...(shot.sharp !== undefined ? { sharp: +shot.sharp.toFixed(1) } : {}),
         ...(text?.text ? { text: text.text, charsPerSec: text.charsPerSec } : {}),
+        // 一格里有 **≥2 句**才带上每句自己的时间。单句时格时间就够（模型能算中点）；
+        // 多句时不给时间，模型只能把整段当成"从格首开始"—— 而 ASR 段起点实测比真实开口
+        // 早 0.3–1 s（VAD 会把起音前的气口算进去），一句话挂到上一格就是这么来的。
+        ...(text?.lines?.length > 1 ? { lines: text.lines } : {}),
       });
     }
-    let sheet = composeSheet({
-      frames, cols, rows, cellAspect: info.aspect, budget: cellBudget, burn, badgeRatio,
+
+    // **把画布裁到内容的外接矩形**：底部/右侧的灰条不是"没内容"，是"这张图就排到这"。
+    // 裁掉之后每张图的高宽比由它自己的行数决定（800×450 / 800×300 / 800×380…），
+    // 内容一点不少、token 还更省，而且**抓帧尺寸完全不变**（rect 是按原画布算的）。
+    const contentW = Math.max(...rects.map((r) => r.px + r.pw));
+    const contentH = Math.max(...rects.map((r) => r.py + r.ph));
+    const sheetW = Math.max(64, Math.min(canvas.width, contentW));
+    const sheetH = Math.max(36, Math.min(canvas.height, contentH));
+
+    let sheet = composePacked({
+      frames, rects, width: sheetW, height: sheetH, burn,
     });
-    // 抬头：这张覆盖哪一段、一共几张。多张图时模型很容易把它们串成一条时间轴，
-    // 而格子里只有全局递增的序号（第 12 格像"一张长图的第 12 格"）。烧在图上最省 token。
-    const sheetFrom = group[0]?.from ?? winStart;
-    const sheetTo = group.at(-1)?.to ?? winStart + winDur;
+    const sheetFrom = cellFrames[rects[0].seq].from;
+    const last = cellFrames[rects[rects.length - 1].seq];
     sheet = addSheetHeader(sheet, {
-      text: `${clock(sheetFrom)}-${clock(sheetTo)} ${si + 1}/${groups.length}`,
+      text: `${clock(sheetFrom)}-${clock(last.to)} ${si + 1}/${sheetRects.length}`,
     });
-    // 条带只在**有东西可画**时才画：整段静音 / 响度测不出来时，它就是一块空白，
-    // 白占一条 71px 的画布（圆圈不卷反馈"没台词时那条 strip 是空的"）。
-    // 判据用响度本身，而不是"有没有台词"—— 没配 ASR 但有对白的片子，波形仍然有用。
     const stripHasSignal = hasAudibleSamples(stripAudio);
     if (stripHasSignal) {
-      // 条带高度按"宽的 5.5%"会在大长条上失控（2476px 宽 → 136px 高，占掉 37% 画面），
-      // 所以同时受格高的 40% 约束。
-      const stripH = Math.max(24, Math.min(Math.round(width * 0.055), Math.round(cellH * 0.28)));
+      // 条带高度不能超过最小格高的一半：1/8 档的格子只有 56px 高，条带再高就喧宾夺主
+      const stripH = Math.max(20, Math.min(Math.round(sheetW * 0.05), Math.round(minCellH * 0.5)));
       sheet = addAudioStrip(sheet, {
-        loudness: stripAudio, silences: stripAudio.silences, cuts: cuts.map((c) => c.t),
+        loudness: stripAudio, silences: stripAudio.silences, cuts: absCuts,
         window: { from: winStart, to: winStart + winDur }, stripH,
       });
-    } else if (stripAudio) {
-      // 说清楚"为什么没有条带"，免得被当成渲染失败
-      trace.push('strip:skipped (no audible samples)');
     }
     out.push({
-      sheet: si + 1, cols, rows, cellW, cellH,
-      width: sheet.width, height: sheet.height, buffer: sheet.buffer, cells: cellMeta,
+      sheet: si + 1,
+      cols: 0,
+      rows: 0,
+      cellW: minCellW,
+      cellH: minCellH,
+      width: sheet.width,
+      // 裁切前的理想画布：清单里能看出"这张图裁掉了多少空白"
+      ...(sheetW !== canvas.width || sheetH !== canvas.height
+        ? { croppedFrom: `${canvas.width}x${canvas.height}` } : {}),
+      height: sheet.height,
+      buffer: sheet.buffer,
+      cells: cellMeta,
       ...(sheet.headerH ? { headerH: sheet.headerH } : {}),
       ...(sheet.stripH ? { stripH: sheet.stripH } : {}),
-      ...(encode ? { png: await encodePngBuffer(sheet.buffer, sheet.width, sheet.height, { ffmpegPath }) } : {}),
     });
   }
 
-  const totalDuration = +cellRanges.reduce((n, r) => n + (r.to - r.from), 0).toFixed(3);
+  // PNG 编码**并行**：每张是一次独立 ffmpeg（rawvideo → PNG），彼此无关。
+  // 串行时 13 张 ≈ 2.6s，占整次导出的 15%，纯粹是排队等。
+  if (encode) {
+    const _en0 = Date.now();
+    // 一张 PNG 要 150–200ms，跟取帧不是同一层资源（纯 CPU + zlib），
+    // 所以给到核数一半：16 核 → 8 路，13 张只需两轮。
+    const pngs = await mapPool(out, Math.min(8, Math.max(2, Math.floor(cpus().length / 2))),
+      (s) => encodePngBuffer(s.buffer, s.width, s.height, { ffmpegPath }));
+    for (let i = 0; i < out.length; i += 1) out[i].png = pngs[i];
+    timing.encode = (Date.now() - _en0) / 1000;
+  }
 
-  // 记一笔"看过什么"：下次 probe 能告诉模型"这部片子你看过"，避免重新描述一遍。
-  // 失败不影响结果（记忆是锦上添花）。
-  // 必须 await：不 await 的话下一次 probe 可能读不到这一笔（实测踩到，少了一整段）
+  const totalDuration = +segs.reduce((n, s) => n + (s.to - s.from), 0).toFixed(3);
+
+  // 记一笔"看过什么"：下次 probe 能告诉模型"这部片子你看过"。
   await remember(info, {
-    from: winStart, to: winStart + winDur, cells: cellRanges.length, cuts: cuts.length,
+    from: winStart, to: winStart + winDur, cells: segs.length, cuts: cuts.length,
   }).catch(() => {});
 
   mark('frames');
-  // 本次运行结束：如果是我们拉起的本地 ASR，安排它空闲后自动退出
-  // （own 的才停 —— 别人启动的实例无权杀，杀了会打断正在用它的任务）
   if (asrLife?.owned || isOwned()) {
     const c = resolveAsrConfig();
     scheduleStop({
@@ -708,10 +907,6 @@ export async function runStoryboard(opts) {
     });
   }
 
-  // **这里是赋值，不是 return。**
-  // 原来是 `return {`：函数当场结束，后面记 cell 表的 `saveCells()` 和 `return result`
-  // 全成了死代码 —— 所以 0.4.4 的 cell 表**从来没写进去过**，
-  // `video_zoom({ cellId })` 一直找不到格子，只能退回 from/to。
   const result = {
     timing,
     ...(ocrReport ? { ocr: ocrReport } : {}),
@@ -723,18 +918,11 @@ export async function runStoryboard(opts) {
     threshold: scan.threshold,
     ...(scan.degraded ? { degraded: scan.degraded } : {}),
     cached: Boolean(scan.cached),
-    // 链接来源的元信息（本地文件时没有这一段）。直链不在里面，那是临时凭证。
     ...(sourceInfo ? { source: sourceInfo } : {}),
-    // 哪些窗口被细扫过、粗扫/细扫各数出多少刀 —— 清单要据此说明"这段的镜头数可信"
     ...(refinedBursts.length ? { refinedBursts } : {}),
-    // 有高清直链却有格子落了回来 —— 要报，否则"这格怎么这么糊"没有解释
     ...(fallbacks > 0 ? { frameFallbacks: fallbacks } : {}),
     audio: stripAudio
-      ? {
-        ...stripAudio,
-        events: allEvents,
-        summary: describeAudio(stripAudio, winDur),
-      }
+      ? { ...stripAudio, summary: describeAudio(stripAudio, winDur) }
       : null,
     transcript: transcriptInfo
       ? { source: transcriptInfo.source, model: transcriptInfo.model ?? null,
@@ -751,52 +939,9 @@ export async function runStoryboard(opts) {
         ...(asrSeconds !== null ? { asrSeconds, asrCached: asrCached === true } : {}),
         ...(transcriptInfo.error ? { error: transcriptInfo.error } : {}) }
       : null,
-    plan: {
-      ...planInfo,
-      // **每格实际多大、能看清到什么程度**：清单的头等大事。
-      // 旧清单只报 image= 和 cell=，模型得自己做除法才知道 286×118 已经读不了字。
-      ...(out[0] ? {
-        cell: {
-          w: out[0].cellW, h: out[0].cellH,
-          readability: readabilityOf(out[0].cellW, out[0].cellH),
-        },
-        // **摊开之后的真实尺寸**。`cell=` 报的是"一个大格"，模型看到 341×189 就默认能认脸；
-        // 可一格摊 2×2 时，它真正看到的是 4 张 170×94 —— 那只能分辨"是不是同一个镜头"。
-        // 不报这个数，模型会按 cell 的高估去描述画面，说出来的东西就是编的。
-        //
-        // **必须跨所有张取最坏**，不能只看 out[0]：多张时第一张常是最"密"的那张，
-        // 而第二/第三张格子更大、更容易摊到 3×3 / 4×4。实测 1.2M + maxPerSheet 12：
-        // 第 1 张全是 2×2（197×110），第 2 张有 4 格 3×3（131×73）—— 只报第一张的话，
-        // 清单会写"197×110 能分辨镜头"，而模型手上那 4 格其实是 131×73 的色块。
-        ...(() => {
-          let worst = null;
-          for (const s of out) {
-            for (const c of s.cells ?? []) {
-              const k = c.sub ?? 1;
-              if (k <= 1) continue;
-              const w = Math.floor(s.cellW / k);
-              const h = Math.floor(s.cellH / k);
-              if (!worst || w * h < worst.w * worst.h) worst = { k, w, h };
-            }
-          }
-          if (!worst) return {};
-          return {
-            sub: { k: worst.k, w: worst.w, h: worst.h, readability: readabilityOf(worst.w, worst.h) },
-          };
-        })(),
-      } : {}),
-      // 实际出片格数：minGap 会把"要 16 格"压成 8 格，清单必须两个数都给，
-      // 否则首行写 16、末尾写 total 8，读起来像是出错了。
-      produced: cellRanges.length,
-      bursts: findBursts(relCuts, winDur).map((b) => ({
-        from: +(b.from + winStart).toFixed(2), to: +(b.to + winStart).toFixed(2),
-        shots: b.shots, density: b.density,
-      })),
-    },
+    plan: planInfo,
     sheets: out,
     totalDuration,
-    // SEQUENCE 的进度：只传 from 时，调用方不用自己记"下一段从哪开始"。
-    // index/total 用固定 segment 推，最后一段可能短于 segment。
     ...(segSec > 0 ? {
       segment: {
         sec: segSec,
@@ -810,19 +955,11 @@ export async function runStoryboard(opts) {
   };
 
   // 记下"这一格 = 这段**绝对**时间"，供 video_zoom({ cellId }) 直接寻址。
-  // **t_start 本来就是绝对时间**：`planRanges()` 的两条路都把 winStart 加过了
-  // （密度分支 `r.from + winStart`、切点分支 `segmentsFromCuts(..., winStart)`），
-  // 这里再加一次就是 issue #37 —— 第 5 格会变成 102.71s 而不是 52.71s，zoom 直接跳错位置。
-  // 不 await：写失败不该影响出图，寻址会退回 from/to。
   if (!textOnly) {
     const cellTimes = [];
     for (const sheet of out) {
-      for (const c of sheet.cells) {
-        cellTimes.push({ i: c.i, from: c.t_start, to: c.t_end });
-      }
+      for (const c of sheet.cells) cellTimes.push({ i: c.i, from: c.t_start, to: c.t_end });
     }
-    // 必须 await：紧接着的 video_zoom({cellId}) 可能立刻来查；saveCells 自己吞写失败，
-    // 不会影响出图。URL 输入还要拿原始 URL 当别名（此时 input 已是下载到本地的路径）。
     await saveCells([inputRaw, input].filter(Boolean), cellTimes);
   }
 
@@ -831,7 +968,7 @@ export async function runStoryboard(opts) {
 
 /* ---- 兼容入口 ---------------------------------------------------------------
  * `./pipeline` 是 package.json 里公开的子路径（老版本把清单渲染也放在这里）。
- * 内部代码一律直接从 format.js / frames.js / scan.js 取；这一段只为不让已经
+ * 内部代码一律直接从 format.js / scan.js 取；这一段只为不让已经
  * `import { formatManifest } from 'dsh-video-storyboard/pipeline'` 的调用方断掉。
  */
 export {
@@ -839,6 +976,4 @@ export {
   formatProbe, formatRemoteProbe, formatTimeline, saveStoryboards, truncateAtSentence,
   withSheetSuffix,
 } from './format.js';
-export { chooseSubGrid } from './frames.js';
 export { refineCutsByWindow } from './scan.js';
-

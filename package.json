@@ -1,7 +1,7 @@
 {
   "name": "dsh-video-storyboard",
-  "version": "0.5.12",
-  "description": "Scene-aware storyboard for DeepSeek Harness: one addressable grid per video (numbered cells, timestamps, transcript, audio envelope) so a text-only agent can look at the video itself instead of being told a summary.",
+  "version": "0.6.0",
+  "description": "Turn a video into storyboard images you can cite: one frame per shot, cell size follows cut density (1/1 … 1/8), row-packed into as few images as possible, with a timestamped index the model can quote and a tier map it can override.",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -9,6 +9,8 @@
     "video",
     "storyboard",
     "contact-sheet",
+    "shot-detection",
+    "scene-detection",
     "ffmpeg",
     "multimodal",
     "asr"
@@ -71,10 +73,11 @@
   },
   "scripts": {
     "test": "node --test",
-    "prepublishOnly": "npm test",
+    "prepublishOnly": "node scripts/guard-publish.mjs && npm test",
     "check": "node scripts/check-syntax.mjs",
     "doctor": "node bin/doctor.mjs",
-    "asrcheck": "node bin/asr-check.mjs"
+    "asrcheck": "node bin/asr-check.mjs",
+    "guard": "node scripts/guard-publish.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.7"

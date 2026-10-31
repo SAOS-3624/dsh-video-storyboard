@@ -1,5 +1,10 @@
 # 安装与使用（详细版）
 
+> ⚠️ **本文写于 0.5.x。** 0.6.0 重写了切点之后的整条链路：`cells` / `sheets` / `need` /
+> `maxPerSheet` / `adaptive` / `tileFirst` 已删除，换成 `maxFrames` / `strategy` / `maxSheets` / `tierMap`；
+> 一格现在等于一个镜头，格子大小由切点密度决定（1/1 … 1/8）。
+> 参数与输出格式以 [README](../README.md) 和 [CHANGELOG](../CHANGELOG.md) 为准。
+
 > 面向第一次用的人。所有命令都能直接复制执行；括号里是"为什么"。
 > English version: [USAGE.md](./USAGE.md)
 

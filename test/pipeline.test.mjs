@@ -14,7 +14,6 @@ import { promisify } from 'node:util';
 import { runStoryboard, formatManifest, saveStoryboards } from '../src/storyboard/pipeline.js';
 import { lookupCell } from '../src/storyboard/cells.js';
 import { DEFAULT_FFMPEG } from '../src/storyboard/probe.js';
-import { imageTokens } from '../src/storyboard/plan.js';
 
 const run = promisify(execFile);
 let hasFfmpeg = false;
@@ -40,10 +39,9 @@ test('e2e: runStoryboard 出一张图 + 完整清单', async (t) => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = await makeFixture(dir);
 
-  const r = await runStoryboard({ input: file, cells: 4, pick: 'sharp', sourceHash: true });
+  const r = await runStoryboard({ input: file, maxFrames: 4, pick: 'sharp', sourceHash: true });
   assert.equal(r.sheets.length, 1);
   const sheet = r.sheets[0];
-  assert.equal(sheet.cols * sheet.rows, 4);
   assert.equal(sheet.buffer.length, sheet.width * sheet.height * 3);
   assert.equal(sheet.cells.length, 4);
   assert.ok(sheet.width * sheet.height <= 640_000, '不该超像素预算');
@@ -51,24 +49,24 @@ test('e2e: runStoryboard 出一张图 + 完整清单', async (t) => {
   // 时间码单调、首尾相接、落在窗口内
   for (let i = 1; i < sheet.cells.length; i++) {
     assert.equal(sheet.cells[i].t_start, sheet.cells[i - 1].t_end);
-    // 摊开的格（有 sub 字段）**没有 t_frame**：它的画面是 k² 个瞬间，
-    // 不存在"这一格的取帧时刻"。所以只比较两个都有 t_frame 的相邻格。
-    if (sheet.cells[i].t_frame === undefined || sheet.cells[i - 1].t_frame === undefined) continue;
     assert.ok(sheet.cells[i].t_frame > sheet.cells[i - 1].t_frame);
+    assert.ok(sheet.cells[i].tier >= 1 && sheet.cells[i].tier <= 8, '每格都要有档位');
   }
   assert.equal(sheet.cells[0].t_start, 0);
   assert.ok(Math.abs(r.window.to - 6) < 0.2);
 
   const text = formatManifest(r);
-  assert.match(text, new RegExp(`cell="${sheet.cellW}x${sheet.cellH}"`));
+  // 清单报的是**最小格**（模型看到的最糊那张），不是平均值
+  assert.match(text, new RegExp(`cell>=${sheet.cellW}x${sheet.cellH}`));
   // token 必须按**实际像素**算，不是一个常数（384 只对 640k 的图成立）。
   // 这里不写死具体数字：图高会随"顶部时间抬头"这类装饰带变化，写死了每次都得起改。
-  const expectTokens = imageTokens(sheet.width, sheet.height);
-  assert.match(text, new RegExp(`tokens="${expectTokens} \\(est@${expectTokens}/img`),
-    `要按实际像素算 token（${sheet.width}x${sheet.height} → ${expectTokens}）`);
+  const expectTokens = 384; // DS 的视觉上限，一张图固定这么多
+  assert.match(text, new RegExp(`tokens="${expectTokens} \\(${expectTokens}/img`),
+    `一张图固定 384 token（${sheet.width}x${sheet.height}）`);
   assert.match(text, /ffmpeg="[^"]+"/);
   assert.match(text, /sha256="[0-9a-f]{64}"/);
-  assert.match(text, /plan: explicit 4 cells/);
+  assert.match(text, /plan: strategy=balanced/);
+  assert.match(text, /tiers /, '档位分布要写进清单');
 });
 
 test('e2e: 交给附件的必须是真 PNG（裸 RGB 会被判 malformed）', async (t) => {
@@ -77,7 +75,7 @@ test('e2e: 交给附件的必须是真 PNG（裸 RGB 会被判 malformed）', as
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = await makeFixture(dir);
 
-  const r = await runStoryboard({ input: file, cells: 4 });
+  const r = await runStoryboard({ input: file, maxFrames: 4 });
   const { png, buffer, width, height } = r.sheets[0];
   assert.ok(png && png.length > 0, '必须带 PNG 字节');
   assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'PNG 魔数');
@@ -91,7 +89,7 @@ test('e2e: encode=false 时不产生 PNG（CLI 自己落盘）', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = await makeFixture(dir);
-  const r = await runStoryboard({ input: file, cells: 4, encode: false });
+  const r = await runStoryboard({ input: file, maxFrames: 4, encode: false });
   assert.equal(r.sheets[0].png, undefined);
 });
 
@@ -101,7 +99,7 @@ test('e2e: 时间窗只覆盖窗口内，清单首行写明 window', async (t) =
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = await makeFixture(dir);
 
-  const r = await runStoryboard({ input: file, from: 2, to: 4, cells: 4 });
+  const r = await runStoryboard({ input: file, from: 2, to: 4, maxFrames: 4 });
   assert.ok(r.window.from >= 1.99 && r.window.from <= 2.01);
   for (const c of r.sheets[0].cells) {
     assert.ok(c.t_frame >= 1.9 && c.t_frame <= 4.1, `帧 ${c.t_frame} 跑出窗口`);
@@ -109,7 +107,8 @@ test('e2e: 时间窗只覆盖窗口内，清单首行写明 window', async (t) =
   const text = formatManifest(r);
   assert.match(text, /window="2\.00-4\.00"/);
   // 单图时不再写 "image 1"（纯冗余），多图时才带
-  assert.match(text, /cell 1 \(r1c1\)/);
+  assert.match(text, /cell 1 = /);
+  assert.match(text, /k=\d/);
   assert.match(text, /unlabeled cells are padding/);
 });
 
@@ -119,11 +118,13 @@ test('e2e: saveStoryboards 落盘（多张时带序号）', async (t) => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = await makeFixture(dir);
 
-  const r = await runStoryboard({ input: file, cells: 4, sheets: 2 });
-  assert.equal(r.sheets.length, 2);
+  // 张数不再由参数决定，是排布器算出来的；这里只验证"落盘数量 = 张数"
+  const r = await runStoryboard({ input: file, maxFrames: 30, strategy: 'quality' });
+  assert.ok(r.sheets.length >= 1);
   const paths = await saveStoryboards(r, join(dir, 'out.png'));
-  assert.equal(paths.length, 2);
-  assert.ok(paths[1].endsWith('out-2.png'));
+  assert.equal(paths.length, r.sheets.length);
+  if (paths.length > 1) assert.ok(paths[1].endsWith('out-2.png'));
+  else assert.ok(paths[0].endsWith('out.png'));
 });
 
 test('e2e: 第二次调用命中缓存（切点不重扫）', async (t) => {
@@ -140,8 +141,8 @@ test('e2e: 第二次调用命中缓存（切点不重扫）', async (t) => {
   });
   const file = await makeFixture(dir);
 
-  const first = await runStoryboard({ input: file, cells: 4, encode: false });
-  const second = await runStoryboard({ input: file, cells: 4, encode: false });
+  const first = await runStoryboard({ input: file, maxFrames: 4, encode: false });
+  const second = await runStoryboard({ input: file, maxFrames: 4, encode: false });
   assert.equal(first.cached, false);
   assert.equal(second.cached, true, '第二次应命中缓存');
   assert.deepEqual(first.cuts.map((c) => c.t), second.cuts.map((c) => c.t), '两次切点必须一致');
@@ -152,8 +153,8 @@ test('e2e: cache=false 时不读写缓存', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = await makeFixture(dir);
-  const r1 = await runStoryboard({ input: file, cells: 4, encode: false, cache: false });
-  const r2 = await runStoryboard({ input: file, cells: 4, encode: false, cache: false });
+  const r1 = await runStoryboard({ input: file, maxFrames: 4, encode: false, cache: false });
+  const r2 = await runStoryboard({ input: file, maxFrames: 4, encode: false, cache: false });
   assert.equal(r1.cached, false);
   assert.equal(r2.cached, false);
 });
@@ -197,7 +198,7 @@ test('插件接线: apply() 注册一个叫 video_storyboard 的工具', async (
     t.after(() => rm(dir2, { recursive: true, force: true }));
     const fixture = await makeFixture(dir2);
     const storyboard = registered.find((t) => t.name === 'video_storyboard');
-    const value = await storyboard.execute({ input: fixture, cells: 4 });
+    const value = await storyboard.execute({ input: fixture, maxFrames: 4 });
     assert.equal(saved.length, 1, '应提交一张图');
     assert.equal(saved[0].mediaType, 'image/png');
     assert.equal(saved[0].data.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', '必须是 PNG 魔数');
@@ -242,12 +243,12 @@ test('e2e: 传入 precomputed 时不再自己扫描', async (t) => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = await makeFixture(dir);          // 这段测试片本身有切点
 
-  const own = await runStoryboard({ input: file, cells: 4, encode: false });
+  const own = await runStoryboard({ input: file, maxFrames: 4, encode: false });
   assert.ok(own.cuts.length > 0, '正常扫描应找到切点');
 
   // 注入一份"窗口外的切点"：如果管线自己又扫了一遍，就会找到真实切点，测试失败
   const injected = await runStoryboard({
-    input: file, cells: 4, encode: false,
+    input: file, maxFrames: 4, encode: false,
     precomputed: { cuts: [{ t: 99 }], summary: { frames: 0, p90: 0 }, threshold: 12 },
   });
   assert.equal(injected.cuts.length, 0, '应完全采用注入的切点（且已按窗口过滤）');
@@ -331,7 +332,7 @@ test('manifest: 没配 ASR key 时报"没跑"，而不是"没有台词"', { skip
     process.env.DSH_HOME = emptyHome2;
     let r;
     try {
-      r = await runStoryboard({ input: out, cells: 2, cache: false, asrKey: null });
+      r = await runStoryboard({ input: out, maxFrames: 2, cache: false, asrKey: null });
     } finally {
       if (prevKey !== undefined) process.env.DSH_ASR_KEY = prevKey;
       if (prevBase !== undefined) process.env.DSH_ASR_BASE_URL = prevBase;
@@ -358,7 +359,7 @@ test('transcriptFile: 给了转写就不跑 ASR，没有音轨也能用', { skip
     const srt = join(dir, 'a.srt');
     await writeFile(srt, '1\n00:00:00,500 --> 00:00:02,000\n来自文件的第一句\n\n' +
       '2\n00:00:02,000 --> 00:00:04,000\n第二句\n', 'utf8');
-    const r = await runStoryboard({ input: file, cells: 4, transcriptFile: srt, cache: false });
+    const r = await runStoryboard({ input: file, maxFrames: 4, transcriptFile: srt, cache: false });
     assert.equal(r.transcript.source, 'file');
     assert.equal(r.transcript.segments, 2);
     assert.equal(r.transcript.chars, 11);
@@ -378,7 +379,7 @@ test('transcriptFile: 窗口统计只算窗口内的台词，不把整片字数�
     await writeFile(srt, '1\n00:00:00,000 --> 00:00:02,000\n' + '甲'.repeat(60) + '\n\n' +
       '2\n00:00:02,000 --> 00:00:04,000\n甲乙丙丁\n', 'utf8');
     const r = await runStoryboard({
-      input: file, from: 2, to: 4, cells: 4, transcriptFile: srt, cache: false,
+      input: file, from: 2, to: 4, maxFrames: 4, transcriptFile: srt, cache: false,
     });
     assert.equal(r.transcript.segments, 1, '窗口内只应剩第二段');
     assert.equal(r.transcript.chars, 4, '不能把窗口外的 60 字算进来');
@@ -393,7 +394,7 @@ test('transcriptFile: 文件不存在时标 file-failed，不让整次调用失�
   try {
     const file = await makeFixture(dir);
     const r = await runStoryboard({
-      input: file, cells: 4, transcriptFile: join(dir, 'nope.srt'), cache: false,
+      input: file, maxFrames: 4, transcriptFile: join(dir, 'nope.srt'), cache: false,
     });
     assert.equal(r.transcript.source, 'file-failed');
     assert.match(r.transcript.error, /ENOENT|no such file/i);
@@ -468,21 +469,6 @@ test('refineCutsByWindow: 采纳门槛保持绝对值（相对基线会把一拍
   assert.ok(r2.cuts.length >= 10, `应细判出多刀，实得 ${r2.cuts.length}`);
 });
 
-test('chooseSubGrid: 子帧小于 200×112 就降档（3×3 / 4×4 都不再摊）', async () => {
-  const { chooseSubGrid } = await import('../src/storyboard/pipeline.js');
-  // 331/2 = 165 < 200 → 3×3 的格子一点都不摊（实测 165×92 认不出字）
-  assert.equal(chooseSubGrid({ shots: 20, dur: 5, cellW: 331, cellH: 184 }), 1);
-  // 499/2 = 249 ≥ 200、139 ≥ 112 → 2×2 成立，但 499/3 = 166 < 200 → 封在 2
-  assert.equal(chooseSubGrid({ shots: 20, dur: 5, cellW: 499, cellH: 278 }), 2);
-  // 太小的格子完全不摊
-  assert.equal(chooseSubGrid({ shots: 20, dur: 5, cellW: 180, cellH: 100 }), 1);
-});
-
-test('chooseSubGrid: 镜头少到不值得摊时保持整格', async () => {
-  const { chooseSubGrid } = await import('../src/storyboard/pipeline.js');
-  assert.equal(chooseSubGrid({ shots: 2, dur: 1, cellW: 499, cellH: 278 }), 1);
-});
-
 test('e2e: cells:1 就真的给一帧 —— 不摊 2×2，清单也不说谎', async (t) => {
   if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
   const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
@@ -490,34 +476,17 @@ test('e2e: cells:1 就真的给一帧 —— 不摊 2×2，清单也不说谎', 
   const file = await makeFixture(dir);
   const cuts = Array.from({ length: 9 }, (_, i) => ({ t: 0.2 + i * 0.2, score: 50 }));
   const r = await runStoryboard({
-    input: file, from: 0, to: 2, cells: 1, encode: false,
+    input: file, from: 0, to: 2, maxFrames: 1, encode: false,
     precomputed: { cuts, summary: { p90: 50 }, threshold: 5 },
   });
-  assert.equal(r.sheets[0].cells.length, 1, '只要 1 格就只出 1 格');
+  assert.equal(r.sheets[0].cells.length, 1, 'maxFrames:1 就只出 1 帧');
   const cell = r.sheets[0].cells[0];
-  assert.equal(cell.sub, undefined, 'cells:1 是"就要这一帧"，不该在格内拼 2×2');
+  assert.equal(cell.sub, undefined, '新架构没有格内摊开，永远一格一帧');
   assert.ok(Number.isFinite(cell.t_frame), '单帧必须给 frame@');
   const text = formatManifest(r);
-  assert.match(text, /grid="1 cells x 1 image\(s\)"/);
-  assert.ok(!/frames \(2×2\)/.test(text), '清单不能一边说 1 格一边画 4 帧');
+  assert.match(text, /grid="1 frames on 1 image\(s\)"/);
 });
 
-test('e2e: 平铺格仍然不写 t_frame，清单也不出现 frame@', async (t) => {
-  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
-  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const file = await makeFixture(dir);
-  const cuts = Array.from({ length: 9 }, (_, i) => ({ t: 0.2 + i * 0.2, score: 50 }));
-  const r = await runStoryboard({
-    input: file, from: 0, to: 2, cells: 6, encode: false,
-    precomputed: { cuts, summary: { p90: 50 }, threshold: 5 },
-  });
-  const tiled = r.sheets.flatMap((s) => s.cells).find((c) => c.sub >= 2);
-  assert.ok(tiled, '这一格应被摊开');
-  assert.equal(tiled.t_frame, undefined, '平铺格没有单一取帧时刻');
-  const text = formatManifest(r);
-  assert.ok(!/frame@/.test(text), '平铺格不该写 frame@');
-});
 
 /**
  * 极静素材的回归守卫。
@@ -541,7 +510,7 @@ test('e2e: 极静素材（PPT 型）也能找到那一刀', async (t) => {
     '-vf', "drawbox=x=160:y=80:w=90:h=50:color=0xffee66:t=fill:enable='gte(t,2)'",
     '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', out,
   ]);
-  const r = await runStoryboard({ input: out, cells: 2, encode: false, transcript: 'off', cache: false });
+  const r = await runStoryboard({ input: out, maxFrames: 2, encode: false, transcript: 'off', cache: false });
   assert.ok(r.cuts.length >= 1, `极静素材上的小改动应该被抓到，实得 ${r.cuts.length} 刀`);
   assert.ok(r.cuts.some((c) => Math.abs(c.t - 2) < 0.6), `切点应落在 2 秒附近，实得 ${r.cuts.map((c) => c.t.toFixed(2))}`);
 });
@@ -567,7 +536,7 @@ test('e2e 不变量: 切张后时间覆盖与顺序原样不变', async (t) => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = await makeFixture(dir);
 
-  const r = await runStoryboard({ input: file, cells: 0, pick: 'sharp' });
+  const r = await runStoryboard({ input: file, maxFrames: 0, pick: 'sharp' });
   const cells = r.sheets.flatMap((s) => s.cells);
   // 顺序：起始时间严格递增
   for (let i = 1; i < cells.length; i++) {
@@ -589,7 +558,7 @@ test('e2e: 只传 from + segment 就自动推窗，并在结果里回显进度',
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = await makeFixture(dir);
   const r = await runStoryboard({
-    input: file, from: 1, segment: 4, cells: 4, encode: false,
+    input: file, from: 1, segment: 4, maxFrames: 4, encode: false,
   });
   assert.equal(r.window.from, 1);
   assert.ok(r.window.to <= 5.01, `segment 4 应该在第 5 秒结束，实得 ${r.window.to}`);
@@ -613,7 +582,7 @@ test('e2e: from>0 时 cell 表存绝对时间，不重复加窗口起点（issue
     await rm(dir, { recursive: true, force: true });
   });
   const file = await makeFixture(dir);
-  const r = await runStoryboard({ input: file, from: 2, to: 4, cells: 2, encode: false });
+  const r = await runStoryboard({ input: file, from: 2, to: 4, maxFrames: 2, encode: false });
   const cell = r.sheets[0].cells[0];
   assert.ok(cell.t_start >= 1.9 && cell.t_start < 2.2,
     `t_start 应该是绝对的 2s，实得 ${cell.t_start}（说明窗口起点被加了两次）`);

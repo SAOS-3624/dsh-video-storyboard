@@ -1,14 +1,16 @@
 /**
- * sheet.js — 取帧 + 拼图 + 烧编号。零图像库：全部在 rawvideo RGB 缓冲上做。
+ * sheet.js — 拼图：把已经抓好的帧按**可变矩形**贴到画布上，再烧编号。
+ *
+ * 零图像库：全部在 rawvideo RGB 缓冲上做。
  *
  * 为什么不用 ffmpeg 的 `tile` + `drawtext`：
  *  - drawtext 需要字体文件 + fontconfig + 平台相关的路径转义，装到别人机器上就得炸；
  *  - 我们只需要画 0-9 和一道横杠，用内置点阵字形更可控，且在低分辨率压缩后更抗糊。
  *
- * 布局约定（与 plan.js 一致）：
- *  - 每格按 cover 方式缩放裁切（不变形，溢出部分裁掉）
- *  - 整图面积 <= budget（默认 640k），间隙 4px
- *  - 空位填中性灰 + “—”，且不编号
+ * 布局约定（与 pack.js 一致）：
+ *  - 每格按 cover 方式缩放裁切（不变形，溢出部分裁掉）—— 缩放发生在**取帧那一步**，
+ *    这里只做搬运：抓回来的 buffer 尺寸就等于格子尺寸
+ *  - 格子之间留 1px 缝（画布底色透出来），否则小格子会连成一片
  */
 
 import { spawn } from 'node:child_process';
@@ -18,10 +20,9 @@ import { DEFAULT_FFMPEG } from './probe.js';
 export const BACKGROUND = [18, 18, 20];
 export const PAD_FILL = [42, 42, 46];
 export const PAD_GLYPH = [110, 110, 116];
-export const BADGE_BG = [0, 0, 0];
 export const BADGE_FG = [255, 235, 59];
-export const GUTTER = 4;
-export const BADGE_ALPHA = 0.85;
+/** 格子之间的缝（像素）。1px 就够把相邻小格分开，再宽就吃掉画面。 */
+export const SEAM = 1;
 
 /** 5×7 点阵，只有 0-9 与时间码要用的 `:` `/`。scale 必须是整数，保证放大后边缘锐利。 */
 export const DIGITS = {
@@ -48,28 +49,6 @@ export const DIGIT_H = 7;
  */
 export function headerHeight(width) {
   return Math.max(18, Math.round(width * 0.024));
-}
-
-/**
- * 画布尺寸：整图面积 <= budget，格宽高按剩余空间均分。
- * @returns {{width:number,height:number,cellW:number,cellH:number}}
- */
-export function layoutCanvas(cols, rows, cellAspect, budget = 640_000, gutter = GUTTER) {
-  const aspect = (cols * cellAspect) / rows;
-  const gw = Math.sqrt(budget * aspect);
-  const gh = gw / aspect;
-  // 每张图顶部有一条时间抬头（见 addSheetHeader）。它的高度必须**先扣掉**，
-  // 否则"整图面积 <= budget"就成了假话（3×3 实测会超 3%）。
-  // 扣完之后用**格高反推格宽**，比例才不会被这条带子拉偏（1×1 会从 1.78 变成 1.84）。
-  const band = Math.ceil(headerHeight(gw));
-  const cellH = Math.max(1, Math.floor((Math.max(rows, gh - band) - gutter * (rows + 1)) / rows));
-  const cellW = Math.max(1, Math.floor(cellH * cellAspect));
-  return {
-    width: cols * cellW + gutter * (cols + 1),
-    height: rows * cellH + gutter * (rows + 1),
-    cellW,
-    cellH,
-  };
 }
 
 const clamp255 = (v) => (v < 0 ? 0 : v > 255 ? 255 : v | 0);
@@ -121,30 +100,33 @@ export function drawGlyphs(buf, width, height, text, x, y, scale, color) {
 }
 
 /**
- * 字形的整数缩放比：字号约占格高 22%，同时不超过格宽的 30%（两位编号时尤其重要）。
- * 大一点更抗压缩——低分辨率下"认一个字符"比"数格子"稳得多。
+ * 编号的字号（点阵整数倍）。
+ *
+ * 交接文档的盲测结论：**scale 3 是可靠下限**，scale 2 会把 86 读成 88
+ * （内置 5×7 点阵里 6 和 8 只差两个像素）。所以画布 800 宽也保底 3。
+ * 上限 5 —— 再大就在小格上喧宾夺主。
  */
-export function badgeScale(cellH, cellW = Infinity, digits = 1, ratio = 0.18) {
-  const byHeight = Math.floor((cellH * ratio) / DIGIT_H);
-  const byWidth = Number.isFinite(cellW)
-    ? Math.floor((cellW * 0.26) / (Math.max(1, digits) * (DIGIT_W + 1)))
-    : byHeight;
-  return Math.max(2, Math.min(byHeight, byWidth));
+export function badgeScale(width) {
+  return Math.max(3, Math.min(5, Math.round(width / 280)));
 }
 
 /**
- * 在一格里画编号徽标（黑底 + 黄字，左上角固定位置）。
- * 不透明优先：半透明底块在白板/雪景上会直接消失（实测见设计方案 §3.5）。
+ * 带描边的点阵字：先在 8 个方向画深色，再叠彩色，保证在亮/暗画面上都看得清。
+ * 用于"小格子不画黑底"的编号 —— 黑底在小格上视觉噪音太大，但纯黄字在亮画面上会瞎。
  */
-export function drawBadge(buf, width, height, x, y, cellW, cellH, label, ratio = 0.18) {
-  const digits = String(label).length;
-  const scale = badgeScale(cellH, cellW, digits, ratio);
-  const pad = Math.max(2, Math.round(cellH * 0.025));
-  const textW = digits * (DIGIT_W + 1) * scale - scale;
-  const textH = DIGIT_H * scale;
-  fillRect(buf, width, height, x, y, textW + pad * 2, textH + pad * 2, BADGE_BG, BADGE_ALPHA);
-  drawGlyphs(buf, width, height, label, x + pad, y + pad, scale, BADGE_FG);
-  return { w: textW + pad * 2, h: textH + pad * 2 };
+export function drawGlyphsOutlined(buf, width, height, text, x, y, scale, fg, outline = [0, 0, 0], dist = 1) {
+  for (const [dx, dy] of [[-dist, 0], [dist, 0], [0, -dist], [0, dist],
+    [-dist, -dist], [dist, -dist], [-dist, dist], [dist, dist]]) {
+    drawGlyphs(buf, width, height, text, x + dx, y + dy, scale, outline);
+  }
+  drawGlyphs(buf, width, height, text, x, y, scale, fg);
+}
+
+/** 无底版编号：只有描边数字，不画黑框 */
+export function drawBadgePlain(buf, width, height, x, y, label, scale) {
+  const text = String(label);
+  drawGlyphsOutlined(buf, width, height, text, x, y, scale, BADGE_FG, [0, 0, 0], Math.max(1, Math.round(scale / 2)));
+  return { w: text.length * (DIGIT_W + 1) * scale, h: DIGIT_H * scale };
 }
 
 /** 空位：灰底 + 居中横杠，且绝对不编号 */
@@ -158,73 +140,75 @@ export function drawPadding(buf, width, height, x, y, cellW, cellH) {
 }
 
 /**
- * 把若干帧（rawvideo rgb24）拼成一张画布。
- * @param {{frames:Array<{buffer:Buffer, index:number}|null>, cols:number, rows:number,
- *          cellAspect:number, budget?:number, gutter?:number, burn?:'index'|'none'}} opts
- *   frames 顺序对应格位 1..cols*rows；null = 空位（补灰）
- * @returns {{buffer:Buffer,width:number,height:number,cellW:number,cellH:number}}
+ * 把已经抓好的帧按**可变矩形**拼成一张画布。
+ *
+ * 与旧版 `composeSheet` 的区别：不再假设 cols×rows 的统一网格。矩形来自
+ * `pack.toRects()`（归一化 → 像素），每格大小可以不同，格子之间留 1px 缝。
+ *
+ * 帧的 buffer 尺寸必须**正好等于该格**（pw×ph）—— 缩放已经在取帧那一步做完
+ * （`coverFilter`），这里只负责搬运，不做二次缩放。
+ *
+ * @param {{frames:Array<{buffer:Buffer,w:number,h:number}|null>, rects:Array,
+ *          width:number, height:number, burn?:'index'|'none', seam?:number}} opts
+ * @returns {{buffer:Buffer,width:number,height:number}}
  */
-export function composeSheet(opts) {
-  const {
-    frames, cols, rows, cellAspect, budget = 640_000, gutter = GUTTER,
-    burn = 'index', badgeRatio = 0.18,
-  } = opts;
-  if (!Array.isArray(frames)) throw new TypeError('frames must be an array');
-  if (frames.length > cols * rows) throw new RangeError('more frames than cells');
-  const { width, height, cellW, cellH } = layoutCanvas(cols, rows, cellAspect, budget, gutter);
+export function composePacked({
+  frames, rects, width, height, burn = 'index', seam = SEAM,
+}) {
+  if (!Array.isArray(rects)) throw new TypeError('rects must be an array');
   const buf = Buffer.alloc(width * height * 3);
   for (let i = 0; i < buf.length; i += 3) {
     buf[i] = BACKGROUND[0]; buf[i + 1] = BACKGROUND[1]; buf[i + 2] = BACKGROUND[2];
   }
 
-  for (let pos = 0; pos < cols * rows; pos++) {
-    const r = Math.floor(pos / cols);
-    const c = pos % cols;
-    const x = gutter + c * (cellW + gutter);
-    const y = gutter + r * (cellH + gutter);
-    const frame = frames[pos];
+  // 第一轮：贴画面。留 1px 缝（右/下），底色透出来就是分隔线。
+  for (let i = 0; i < rects.length; i += 1) {
+    const r = rects[i];
+    const frame = frames[i];
+    const cw = Math.max(1, r.pw - seam);
+    const ch = Math.max(1, r.ph - seam);
     if (!frame) {
-      drawPadding(buf, width, height, x, y, cellW, cellH);
+      drawPadding(buf, width, height, r.px, r.py, cw, ch);
       continue;
     }
-    // 画面比格子小时（黑场格）居中摆放：黑屏里没有内容，占满一整格纯属浪费画布
-    const fw = frame.w ?? cellW;
-    const fh = frame.h ?? cellH;
-    if (fw < cellW || fh < cellH) {
-      const dx = x + Math.round((cellW - fw) / 2);
-      const dy = y + Math.round((cellH - fh) / 2);
-      blit(buf, width, height, dx, dy, fw, fh, frame.buffer, fw);
-    } else {
-      blit(buf, width, height, x, y, cellW, cellH, frame.buffer);
-    }
-    if (burn !== 'none') drawBadge(buf, width, height, x + 2, y + 2, cellW, cellH, frame.index, badgeRatio);
+    blit(buf, width, height, r.px, r.py, cw, ch, frame.buffer, frame.w ?? cw);
   }
-  return { buffer: buf, width, height, cellW, cellH };
-}
 
-/**
- * 把一格摊成 k×k 的小格（rawvideo rgb24），拼成一张 cellW×cellH 的图。
- *
- * 为什么这么做：快闪段里"这一格到底闪了几下"用一张代表帧说不清。把这一格再切成
- * 3×3 或 4×4，同样一张图（同样 384 token）就能交代 9 个或 16 个瞬间。
- * 代价是每个子帧只有 1/k² 的像素 —— 所以调用方必须先确认父格够大（见 chooseSubGrid）。
- *
- * @param {Buffer[]} tiles 长度必须等于 k*k，每个 tileW×tileH（rgb24）
- */
-export function tileSubFrames(tiles, k, cellW, cellH) {
-  const tileW = Math.floor(cellW / k);
-  const tileH = Math.floor(cellH / k);
-  const out = Buffer.alloc(cellW * cellH * 3);
-  for (let i = 0; i < k * k; i++) {
-    const src = tiles[i];
-    if (!src) continue;
-    const ox = (i % k) * tileW;
-    const oy = Math.floor(i / k) * tileH;
-    for (let row = 0; row < tileH; row++) {
-      src.copy(out, ((oy + row) * cellW + ox) * 3, row * tileW * 3, row * tileW * 3 + tileW * 3);
+  // **排布留白铺灰条**：每一行最后一个格子的右边、以及画布底部没被占的部分。
+  // 纯黑的空白看起来像渲染失败（"这图是不是没画完"），灰底 + 横杠才读得出"这里就是空的"。
+  const lines = new Map();
+  for (const r of rects) {
+    if (!lines.has(r.py)) lines.set(r.py, []);
+    lines.get(r.py).push(r);
+  }
+  for (const [py, list] of lines) {
+    const right = Math.max(...list.map((r) => r.px + r.pw));
+    const h = Math.max(...list.map((r) => r.ph));
+    if (width - right > 8) drawPadding(buf, width, height, right, py, width - right, h);
+  }
+  const bottom = rects.reduce((m, r) => Math.max(m, r.py + r.ph), 0);
+  if (height - bottom > 8) {
+    drawPadding(buf, width, height, 0, bottom, width, height - bottom);
+  }
+
+  // 第二轮：编号。**单独一轮**，否则后画的格子会盖掉前一格伸出来的描边。
+  //
+  // 两条规则：
+  //   1. **6 档及以上（1/6…1/8）用 scale 2**：格子只有 100px 宽，scale 3 的两位数要占 1/3，
+  //      缩到 2 才不压画面（这是用户明确要求的；大格仍用 3，保证盲测的"86 不会被读成 88"）。
+  //   2. **积分假切点的格子不编号**：它不是"换镜头"，只是"这一段一直在变"，
+  //      编号会让模型以为那是独立镜头。图上编号因此会跳号，清单里的 k= 和时间才是准的。
+  if (burn !== 'none') {
+    const base = badgeScale(width);
+    for (let i = 0; i < rects.length; i += 1) {
+      const r = rects[i];
+      if (!frames[i]) continue;
+      if (r.via === 'mark') continue;
+      const scale = Number(r.t) >= 6 ? Math.min(2, base) : base;
+      drawBadgePlain(buf, width, height, r.px + 2, r.py + 1, r.index, scale);
     }
   }
-  return out;
+  return { buffer: buf, width, height };
 }
 
 /** 把一格 rawvideo（尺寸必须等于 cellW×cellH）贴到画布上 */
@@ -498,9 +482,12 @@ export async function extractFrameRaw(opts) {
  * PNG，不能给 raw RGB（媒体类型写 image/png 但内容是裸像素 → "Unsupported or malformed image data"）。
  */
 export async function encodePngBuffer(buffer, width, height, opts = {}) {
-  const { ffmpegPath = DEFAULT_FFMPEG, timeoutMs = 60_000 } = opts;
+  // `-compression_level 3`：默认是 6。zlib 的档位在真实画面（大片渐变 + 文字）
+  // 上实测 193ms → 151ms/张，体积只涨 10% 上下 —— 13 张图省 0.5s，值得。
+  const { ffmpegPath = DEFAULT_FFMPEG, timeoutMs = 60_000, level = 3 } = opts;
   const { stdout } = await exec([ffmpegPath, '-hide_banner', '-v', 'error',
     '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', `${width}x${height}`, '-i', '-',
+    '-compression_level', String(level),
     '-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1',
   ], { input: buffer, timeoutMs });
   if (stdout.length < 8 || stdout[0] !== 0x89 || stdout.subarray(1, 4).toString() !== 'PNG') {

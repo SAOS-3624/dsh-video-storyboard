@@ -29,20 +29,21 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 
 import { probeVideo } from '../src/storyboard/probe.js';
+import { resolveInput } from '../src/storyboard/fetch.js';
 import {
   refineCutsByWindow, scanShots, spikeCuts, suppressClose,
 } from '../src/storyboard/scan.js';
 
-const USAGE = `usage: node scripts/export-cuts-mat.mjs <video> [--out dir] [--rate hz] [--from s] [--dur s]
-                                            [--threshold auto|12] [--min-gap 0.35]
+const USAGE = `usage: node scripts/export-cuts-mat.mjs <video|url> [--out dir] [--rate hz] [--from s] [--dur s]
+                                            [--threshold auto|12] [--min-gap 0.35] [--height 720] [--name stem]
                                             [--no-refine] [--no-spike] [--ffmpeg path]`;
 
 function parseArgs(argv) {
   const input = argv[0];
   const opt = {
     out: 'cuts-out', rate: 0, from: 0, dur: 0,
-    threshold: 'auto', minGap: 0.35,
-    refine: true, spike: true, ffmpeg: undefined,
+    threshold: 'auto', minGap: 0.35, height: 0,
+    refine: true, spike: true, ffmpeg: undefined, name: '',
   };
   const num = (raw, name) => {
     const v = Number(raw);
@@ -67,6 +68,8 @@ function parseArgs(argv) {
       case '--from': opt.from = num(takeValue(), key); break;
       case '--dur': opt.dur = num(takeValue(), key); break;
       case '--min-gap': opt.minGap = num(takeValue(), key); break;
+      case '--height': opt.height = num(takeValue(), key); break;
+      case '--name': opt.name = takeValue(); break;
       case '--ffmpeg': opt.ffmpeg = takeValue(); break;
       case '--threshold': {
         const raw = takeValue();
@@ -130,7 +133,30 @@ async function main() {
   }
   const { input, opt } = parseArgs(argv);
   if (opt.rate > 0 && opt.rate < 1) throw new Error(`--rate 至少 1 Hz（收到 ${opt.rate}），否则切点会并成一格`);
-  const file = resolve(input);
+
+  // 链接走插件自己的下载路径（cookies / 清晰度 / 音轨合流都由它管），本地文件原样用。
+  const isUrl = /^https?:\/\//i.test(input);
+  let file;
+  let source = null;
+  if (isUrl) {
+    const got = await resolveInput(input, {
+      ffmpegPath: opt.ffmpeg,
+      // 0 = 不指定，用 ~/.dsh/video.json 的 scanHeight（默认 360）
+      ...(opt.height > 0 ? { scanHeight: opt.height } : {}),
+      onProgress: process.stderr.isTTY ? ({ phase, bytes }) => {
+        if (phase === 'done' || !bytes) return;
+        process.stderr.write(`\r[fetch] ${(bytes / 1048576).toFixed(1)} MB   `);
+      } : undefined,
+    });
+    file = got.path;
+    source = got.source ?? null;
+    process.stderr.write('\r\x1b[K');
+    console.log(`[fetch] ${source?.cached ? '缓存命中' : '已下载'} ${source?.scanActual ?? '?'}p ` +
+      `${((source?.bytes ?? 0) / 1048576).toFixed(1)}MB  auth=${source?.auth ?? '?'}`);
+    if (source?.title) console.log(`[title] ${source.title}`);
+  } else {
+    file = resolve(input);
+  }
 
   const info = await probeVideo(file);
   if (!(info.fps > 0)) throw new Error('探测不到帧率，无法扫描');
@@ -222,7 +248,10 @@ async function main() {
   // ---- 落盘
   const outDir = resolve(opt.out);
   mkdirSync(outDir, { recursive: true });
-  const stem = basename(file, extname(file));
+  // 链接下载来的副本在缓存里一律叫 video.mp4 —— 用 BV 号当文件名，否则几个片子会互相覆盖
+  const stem = opt.name || (isUrl
+    ? (/\/(BV[0-9A-Za-z]{10})/.exec(input)?.[1] ?? `url-${Date.now().toString(36)}`)
+    : basename(file, extname(file)));
   const matPath = join(outDir, `${stem}.cut.mat`);
   const csvPath = join(outDir, `${stem}.cut.csv`);
 

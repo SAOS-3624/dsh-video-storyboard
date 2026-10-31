@@ -180,6 +180,31 @@ export async function readBand({ python, images }) {
 }
 
 /**
+ * **一次调用做完 detect + read**：探针帧定字幕带，再按这条带子裁图识别。
+ *
+ * 为什么值得单独一条路：起一次 Python 要重新加载三个 onnx 模型（≈1.5 s），
+ * 而老链路是两次调用（detect 一次、read 一次）。合并后整条 OCR 从 ~5.0 s 到 ~3.4 s，
+ * 而且裁图也交给 Python（Node 侧少起 N 次 ffmpeg）。
+ *
+ * @param {{python:string, probes:string[], targets:string[]}} o
+ * @returns {Promise<{ok:true, detected:boolean, band:number[], items:object[]} | {ok:false, kind:string, message:string}>}
+ */
+export async function detectAndRead({ python, probes, targets = [] }) {
+  if (!python) return { ok: false, kind: 'no-python', message: 'no python with rapidocr' };
+  if (!probes?.length) return { ok: false, kind: 'no-frames', message: 'no probe frames' };
+  const res = await runBridge({ python, mode: 'subs', images: [String(probes.length), ...probes, ...targets] });
+  if (!res.ok) return res;
+  if (!res.data?.band) return { ok: false, kind: 'no-band', message: 'detect returned no band' };
+  return {
+    ok: true,
+    detected: Boolean(res.data.detected),
+    band: res.data.band,
+    boxes: res.data.boxes ?? [],
+    items: res.data.items ?? [],
+  };
+}
+
+/**
  * 文本相似度：用「公共子序列长度 / 较长者长度」做粗判。
  * 不用编辑距离的绝对值 —— 两句 20 字的台词差 2 个字和两句 8 字的台词差 2 个字，含义完全不同。
  */
@@ -252,6 +277,15 @@ export function shouldReplace({ asr, ocr, conf }) {
   // 如果 OCR 更长，可能是 ASR 漏了字（例如“错字”→“错别字”），不能直接判 agree。
   if (cover > 0.98 && best.piece.length <= best.clauseClean.length) {
     return { replace: false, reason: 'agree' };
+  }
+  // **长度完全相同、只差一个字** → 不换。
+  // 这一档分不清是"ASR 同音字错"还是"OCR 形近字错"，而两种代价不对称：
+  // 不换最多留着 ASR 的已知错字，换了则可能亲手把对的字改错。
+  // 真实事故：OCR 把"这是一句…"读成"这是一旬…"（13 字对 13 字，cover 0.92），旧逻辑照换，
+  // 于是一条本来完全正确的台词被"校正"成了错字。
+  // 只认长度完全相同：ASR 漏一个字的场景（10 字 vs 11 字，cover 1.0）照旧要换。
+  if (cover >= 0.88 && best.piece.length === best.clauseClean.length) {
+    return { replace: false, reason: 'agree-near', cover: +cover.toFixed(2) };
   }
   // 多分句时只替换其中一句，命中门槛要比单句更保守，降低“抽错帧还改了一句”的风险。
   const minCover = units.length > 1 ? 0.7 : 0.6;

@@ -1,20 +1,33 @@
 /**
- * frames.js — **取像素**：本地 / 高清直链两条路、单帧 / 摊格两种形状、固定并发。
+ * frames.js — **取像素**：本地 / 高清直链两条路、固定并发。
  *
- * 从 pipeline.js 拆出来的。这一层只做一件事：给定时间段，交出 RGB buffer。
- * 它不知道转写、不知道排布、不知道清单 —— 所以能单独压测（换并发的收益都是在这一层量出来的）。
+ * 从 pipeline.js 拆出来的。这一层只做一件事：给定时刻和格子像素，交出 RGB buffer。
+ * 它不知道转写、不知道排布、不知道清单 —— 所以能单独压测。
+ *
+ * 2026-11-01 砍掉的东西：`chooseSubGrid` / `subTileTimes` / `splitByWeight` / `extractSubTile`
+ * —— 格内摊开（一格拼 k×k 个小帧）整个方案被"档位"取代：**一个镜头就是一格**，
+ * 快的地方档位高、格子小，靠排布器一张图里塞几十格，不再在格内再切一次。
  */
 
-import { extractFrameRaw, extractSharpest, tileSubFrames } from './sheet.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+import { extractFrameRaw, extractSharpest } from './sheet.js';
+import { DEFAULT_FFMPEG } from './probe.js';
+
+const runFile = promisify(execFile);
 
 /**
  * 取一帧：有高清直链就先走远程，失败回落本地低清。
  *
- * **远程时把候选帧降到 1。** 一次 HTTP seek 实测 1.92 s，3 候选即使并发也要 3–4 s/格，
- * 6 格就是 20 秒以上；而 zoom 的窗口本来就短、格间距小，段中点足够代表。
- * 本地文件仍然用 3 候选（0.35 s/次，几乎免费，且段内可能有转场帧）。
+ * **默认 pick='mid'**：新架构里每格只有 100~800 像素宽，锐度挑选那 3 倍开销
+ * （每格 3 次解码）换不来可见收益；真需要时显式传 `pick:'sharp'`。
+ *
+ * 远程时把候选帧降到 1：一次 HTTP seek 实测 1.92 s，3 候选即使并发也要 3–4 s/格。
  */
-export async function extractFrameWithFallback({ input, remote, at, dur, cellW, cellH, ffmpegPath, pick }) {
+export async function extractFrameWithFallback({
+  input, remote, at, dur, cellW, cellH, ffmpegPath, pick = 'mid',
+}) {
   const grab = (src, http, candidates) => {
     if (pick === 'sharp') {
       return extractSharpest({ input: src, at, dur, cellW, cellH, ffmpegPath, http, candidates });
@@ -31,7 +44,7 @@ export async function extractFrameWithFallback({ input, remote, at, dur, cellW, 
       /* 直链过期或 CDN 抖动：不整次失败，落到本地那份低清 */
     }
   }
-  return { ...(await grab(input, null, 3)), via: remote?.uri ? 'local-fallback' : 'local' };
+  return { ...(await grab(input, null, pick === 'sharp' ? 3 : 1)), via: remote?.uri ? 'local-fallback' : 'local' };
 }
 
 /**
@@ -52,258 +65,206 @@ export async function mapPool(items, limit, fn) {
   return out;
 }
 
-/**
- * 这一格要不要摊成 k×k 子格？返回 k（1 = 不摊）。
- *
- * 判据（都来自实测）：
- *  - 镜头数少不值得摊：4 个镜头以下摊开只是把画面切碎；
- *  - k ≈ ceil(sqrt(镜头数))，上限 4 —— 让子帧数刚好覆盖镜头数，不多抽重复帧；
- *  - 子帧不能小于 200×112：再小就只剩色块。
- *    2026-10-30 对比测试实测（640×360 扫描源、640k 画布预算）：
- *      4×4 格 247×137 → 摊 2×2 得 123×68，字幕和 UI 标签**完全认不出**（盲评可读 1~2 分）；
- *      3×3 格 331×184 → 摊 2×2 得 165×92，仍然只能"看出是不同镜头"，认不出字（可读 2 分）；
- *      2×2 格 505×312 → 摊 2×2 得 252×156，可读。
- *    所以摊开的门槛不是"能分辨镜头"（110×61），而是"能认出内容"。原来写 100×56 的那条注释
- *    用的是"能分辨不同镜头"的标准，在文字密集的素材上等于把 16 格里 12 格换成噪点。
- */
-
-/** "够热闹"：≥ 它才升到 3×3（9 个小图）。段内逐帧分数均值，快剪 8~15、摇镜 2~4、静止 <1。 */
-export const BUSY_MOTION = 8;
-
-/** "看得出来在动"：≥ 它就允许二重细分（子帧可以压到 110×56）。低于它的格子只给整帧。 */
-export const TILE_MOTION = 3;
+/* ---------------------------------------------------------------- 批量取帧 */
 
 /**
- * **子帧之间最多隔多少秒**：超过它，摊开就不是"看过程"而是"抽签"，一律退回整帧。
+ * **一次 ffmpeg 取多帧**（`select='eq(n,k)+…'`），返回该块内所有目标帧。
  *
- * 摊开的本意是"一格 8 个镜头，4 张盖住 4 个"。它成立的前提是**这 4 张之间有连续的时间关系**：
- *   - 5 分钟 PV：每格 25 秒，2×2 → 6.25 秒一张，能看出节奏；
- *   - 30 分钟番剧：每格 50 秒，2×2 → 12.5 秒一张，勉强；
- *   - 112 分钟片子：每格 84 秒，2×2 → **21 秒一张**，抽出来的 4 张是 4 个互不相干的镜头，
- *     既没有时间连续性，又把像素分掉 4 倍 —— 实测 80 格全摊 = 320 张 170×94，
- *     模型的反馈是"根本看不清楚"；同一部片不摊 = 80 张 341×189，能认出场景。
+ * ## 为什么值
  *
- * 15 秒是实测的拐点：番剧 12.5 秒照摊，长片 21 秒就不摊。它比"缩小到看不清"更早生效，
- * 所以是**最后一道闸**，放在像素下限之后。
+ * Windows 上起一次 ffmpeg 是 **240 ms**（85 MB 的可执行文件，实测 `-version` 跑 30 次
+ * 都在 236–248 ms），而解一帧 133×63 几乎不花时间。于是"一帧一进程"的耗时
+ * **几乎全在进程启动上**：154 帧串行 = 36 s，12 路并发才压到 5.8 s。
+ * 一次进程解 20 秒出 14 帧，把这笔启动费摊掉，实测 5.8 s → 1.6 s。
+ *
+ * ## 帧号怎么算（这里错一帧，整张图的编号就全错位）
+ *
+ * `-ss T -frames:v 1` 取的是**第一个 ≥ T 的帧**，等价于帧号 `ceil(T*fps)`；
+ * 而 `select='eq(n,k)'` 的 `n` 是 `-ss lo` 之后从 0 开始数的。两者必须用同一套语义，
+ * 所以 k = `ceil((at - lo) * fps)`，并且减一个极小量吃掉浮点误差
+ * （实测 `(103.3-95)*25` 在 JS 里是 207.49999999999994，`Math.round` 会算成 207，
+ * 差一帧 → select 少输出一帧 → 后面每一帧都错位）。
+ *
+ * ## 为什么统一输出尺寸
+ *
+ * 一格一个尺寸（1/2 档 400×225、1/3 档 267×150…），而一次过滤链只能给一个尺寸。
+ * 所以统一取**本块里最大的格子尺寸**，再由 JS 用 `boxResize` 缩到各自的格子，
+ * 两次盒式平均 ≈ 一次盒式平均，肉眼无差。多出来的只有管道里的字节数。
+ *
+ * 输出帧数一旦对不上就**整块回落到逐帧路径** —— 宁可慢，不能让编号错位。
  */
-export const MAX_FRAME_GAP = 15;
 
-/**
- * **指纹差的两个门槛**。`frameDiv` 是"这一格摊成 2×2 时，那 4 张画面彼此差多少"
- * （16×9 灰度指纹的两两绝对差，0–255），由 measure.frameDiversityOf 从扫描时算好的指纹直接读出。
- *
- * 为什么它比 meanMotion 可信：meanMotion 测的是**相邻帧**的差（段内运动），
- * 而"摊开有没有意义"问的是**隔很远的 k² 帧**彼此像不像（段间差异）。两者经常反向 ——
- * 长镜头帧差小、但每 5 秒截一张是 4 个不同镜头；连续动作帧差大、但 4 张是同一动作的 4 个瞬间。
- *
- * 实测（记管MAD02，27 个摊开格，ground truth = 宫格图里切出的子帧两两差）：
- *   meanMotion  −0.19 · p90Motion −0.20 · cutScore +0.23
- *   SI +0.34 · 熵 −0.23 · 分块方差 +0.39 · **16×9 指纹 +0.51**
- * 所以有指纹就优先用它，没有（缓存命中时拿不到）才退回 meanMotion。
- *
- * 门槛来自同一批数据的分布（16×9 指纹）：27 格里最低 34、最高 119。
- * **没有一格低于 25** —— 所以 divLow 定 25 等于永不触发。改成 45（砍掉最相似的 ~15%），
- * divMid 定 70（3×3 要"又快又真的不一样"，只有真正的快剪爆发拿得到）。
- */
-export const FRAME_DIV_LOW = 45;
-export const FRAME_DIV_MID = 70;
+const MAX_SPAN_SEC = 20;
+const MAX_FRAMES_PER_CALL = 40;
 
-export function chooseSubGrid({
-  shots, cellW, cellH, dur, cutScore = Infinity, meanMotion = 0,
-  // **直接测出来的"摊开有没有东西"**（见 FRAME_DIV_LOW）。null = 这次拿不到指纹，
-  // 退回 meanMotion 那套老判据（缓存命中/precomputed 时就是这样）。
-  frameDiv = null,
-  // minShots 从 4 降到 3：这个门槛以前会把"1 秒 3 镜（3 刀/秒）"挡掉，
-  // 而它比"10 秒 4 镜（0.4 刀/秒）"密 7 倍 —— 真正该摊的是前者。
-  // 密度判据（minRate）已经能拦住"镜头少但时长长的正常叙事"，minShots 只防"1 镜没东西可摊"。
-  minShots = 3, minRate = 0.4, minSubScore = 30, minSubW = 200, minSubH = 112,
-  minMotion = 1.5, maxK = 4, busyMotion = BUSY_MOTION, maxFrameGap = MAX_FRAME_GAP,
-  divLow = FRAME_DIV_LOW, divMid = FRAME_DIV_MID,
-}) {
-  // 摊得越开，每一张代表的时间越长；超过 maxFrameGap 就不再是"看过程"。
-  // 单独写成一个函数是因为它有**两个出口**（单镜头特赦 / 常规路径），漏一个就等于没加。
-  const capByGap = (k) => {
-    if (!(dur > 0) || !(maxFrameGap > 0)) return k;
-    while (k > 1 && dur / (k * k) > maxFrameGap) k -= 1;
-    return k;
-  };
-  // **最硬的一条：直接量这 4 张像不像。**
-  // 有指纹数据时它排在所有代理指标之前 —— cutScore、minShots、minRate 全是在猜
-  // "这一格里可能有几个不同画面"，而 frameDiv 是**直接看**。
-  // 低于 divLow 就是"摊成 2×2 也是 4 张一样的"，那还摊它干什么。
-  if (frameDiv != null && frameDiv < divLow) return 1;
-  // **一个镜头、但画面一直在动**（摇镜、推拉、转场）：整段只取 1 帧会把运动过程全丢掉。
-  // meanMotion 是段内逐帧分数的均值 —— 静止画面约 0.2、匀速摇镜约 1.5~3。
-  // 有指纹时改由 frameDiv 判（摇镜的 4 张确实不同，frameDiv 会高）。
-  if (shots <= 1 && (frameDiv != null ? frameDiv >= divMid : meanMotion >= minMotion)) {
-    let k = 2;
-    while (k > 1 && (cellW / k < minSubW || cellH / k < minSubH)) k -= 1;
-    k = capByGap(k);
-    return k > 1 ? k : 1;
-  }
-  // **下面三条都是"没有直接证据时的代理判据"，有指纹时全部让位。**
-  // 它们猜的是"这一格里可能有几个不同画面"（刀够不够狠、镜头够不够多、密度够不够），
-  // 而 frameDiv 是直接量那 4 张差多少。既然有实物，就不再靠推断。
-  if (frameDiv == null) {
-    // 那些"刀"本身要有分量。2D 线稿动画、游戏 UI 这类内容每帧都在变一点，
-    // 刀数能到 0.7/s，但摊出来的 9 张几乎一模一样（实测 RETAS 演示片就是这样）——
-    // 摊开只有在"刀是硬切"时才有意义。
-    if (cutScore < minSubScore) return 1;
-    // minShots 从 4 降到 3：这个门槛以前会把"1 秒 3 镜（3 刀/秒）"挡掉，
-    // 而它比"10 秒 4 镜（0.4 刀/秒）"密 7 倍 —— 真正该摊的是前者。
-    if (!(shots >= minShots)) return 1;
-    // 密度门槛 0.7 → 0.4（平均 2.5 秒一个镜头就摊）：实测概念 PV 上 0.7 只摊 4/9 格，
-    // 41 个镜头里只覆盖 31 个；0.4 摊 6/9 格，覆盖 41/41。再往下放宽（0.35~0.2）
-    // 结果完全一样，所以 0.4 是拐点，不是越松越好。
-    // **长格子不受这条管**（2026-10-30 补）：24 秒 8 个镜头算出来是 0.33 刀/秒，
-    // 被当成"镜头稀"而整格只给 1 帧 —— 可它一秒都没浪费，只是镜头长。
-    // 12 秒以上一律放行，由后面的像素下限决定能摊几×几。
-    if (dur > 0 && dur < 12 && shots / dur < minRate) return 1;
-  }
-  // k 上限默认 4（3×3 是"变化快"的地方的主力档位，别动它）。
-  let k = Math.min(maxK, Math.max(2, Math.ceil(Math.sqrt(shots))));
-  // **画面不够热闹就停在 2×2，不摊 3×3**。两条理由：
-  //   - 9 个位置要把格子切成 110×61，只在"每张都不一样"时才划算；
-  //     安静的段落里 9 张本来就有几张是同一个画面，切小了反而看不清。
-  //   - 全片一律同一种粒度看着死板：快的地方 9 张小图、平稳的地方 4 张大图，
-  //     这张图本身就读得出"哪里快哪里慢"。
-  // meanMotion 是段内逐帧分数的均值（静止 ~0.2、摇镜 1.5~3、快剪 5~14）。
-  // 实测正式 PV 九格是 1.62 / 4.04 / 11.06 / 13.61 / 4.87 / 10.90 / 7.72 —— 差 8 倍，
-  // 足够把 2×2 和 3×3 拉开；阈值 8 让最热闹的三格用 3×3。
-  //
-  // **有指纹时改判，但只往"下"改，不往上抬。**
-  // 反向（指纹高就升级到 3×3）实测过一次：16 个格子从 2×2 升到 3×3，
-  // 子帧从 170×94 掉到 113×63 —— 画面更糊，和"看清"的目标相反。
-  // 原因：指纹差大只说明"这 4 张不同"，不说明"像素够分给 9 张"。
-  // 所以 3×3 仍然要求**原来的"够热闹"**（meanMotion）+ 指纹也证明确实不同，两个都要满足。
-  const busy = meanMotion >= busyMotion && (frameDiv == null || frameDiv >= divMid);
-  if (!busy && k > 2) k = 2;
-  // **格子数不该明显多过镜头数**：9 个位置去覆盖 5 个镜头，必然有 4 个位置是同一镜头的
-  // 不同时刻 —— 看着就是"重复帧"。宁可 2×2 少看一个，也别在 3×3 里塞四张一样的。
-  // 1.5 是实测取的：6 个镜头（9 帧）仍然留 3×3，5 个镜头 → 2×2（不然 4 张是同一镜头）。
-  // 快的地方镜头多，自然还是 3×3 —— 这条不影响"变化快就细看"。
-  while (k > 2 && k * k > shots * 1.5) k -= 1;
-  while (k > 1 && (cellW / k < minSubW || cellH / k < minSubH)) k -= 1;
-  // **最后一道闸：格子太长就别摊了。** 放在像素下限之后，是因为它管的是"摊了有没有意义"，
-  // 而像素下限管的是"摊了看不看得见"——两个都得过，先过哪个都行，但这条必须最后跑，
-  // 否则会被前面 while 循环里刚抬高又降回去的 k 绕过去。
-  k = capByGap(k);
-  return k > 1 ? k : 1;
+/** 帧号换算：`-ss T` 取的是**第一个 ≥ T 的帧**，即绝对帧号 `ceil(T*fps)` */
+export function frameAt(sec, fps) {
+  return Math.max(0, Math.ceil(Number(sec) * fps - 1e-9));
 }
 
 /**
- * 把 n 帧分给 segs 段：**每段保底 1 帧**，剩下的按 weights 加权。
+ * `select='eq(n,k)'` 里的 k：**绝对帧号之差**，不是"从 lo 起算的秒数×fps"。
  *
- * 保底这条是硬约束，不能交给"按积分分配"自然得出：一段几乎静止的镜头积分接近 0，
- * 纯按积分分就一帧都分不到 —— 而观众要看的就是"这个镜头长什么样"。
- * weights 是每段的累积变化量（今由 density.integralMarks 提前算成采样点，这里一般传 null）。
+ * 这两个算法在 lo 落在两帧之间时会差一帧，而差一帧在快剪段就是"整格画面全错"
+ * （实测 `lo=12.345, at=16.0`：相对算法给 92（帧 401 / 16.04s），
+ * 绝对差给 91（帧 400 / 16.00s），只有后者和 `-ss 16.0` 一致）。
  */
-export function splitByWeight(n, segs, weights = null) {
-  const per = new Array(segs).fill(0);
-  if (n <= segs) {
-    // 帧比镜头还少（预算被 subBudget 砍过就会这样）时，给前 n 个镜头各 1 帧。
-    // 试过两种"更聪明"的挑法，实测都更差：
-    //  - 按时间均匀挑：每次都挑中一格的第 1 个镜头，而那几个镜头积分是 0（暗场）→ 黑格；
-    //  - 按积分挑：缓慢叠化/淡入的镜头积分又长又均匀，会稳定压过真内容 → 挑出糊画面。
-    // 所以这里**故意保守**。真要让这 n 帧挑得更好，得先解决"格内有没有黑场镜头"这个分格问题。
-    for (let i = 0; i < Math.min(n, segs); i++) per[i] = 1;
-    return per;
-  }
-  if (!Array.isArray(weights) || weights.length !== segs) {
-    const base = Math.floor(n / segs);
-    const extra = n % segs;
-    for (let i = 0; i < segs; i++) per[i] = base + (i < extra ? 1 : 0);
-    return per;
-  }
-  const rest = n - segs;
-  const totalW = weights.reduce((x, y) => x + y, 0);
-  if (!(totalW > 0)) {
-    for (let i = 0; i < segs; i++) per[i] = 1 + Math.floor(rest / segs) + (i < rest % segs ? 1 : 0);
-    return per;
-  }
-  const raw = weights.map((w) => (w / totalW) * rest);
-  const fl = raw.map(Math.floor);
-  const left = rest - fl.reduce((x, y) => x + y, 0);
-  // 余数按小数部分从大到小补，保证总数刚好等于 n
-  const order = raw.map((v, i) => ({ i, frac: v - Math.floor(v) })).sort((x, y) => y.frac - x.frac);
-  for (let j = 0; j < left; j++) fl[order[j % segs].i] += 1;
-  for (let i = 0; i < segs; i++) per[i] = 1 + fl[i];
-  return per;
+export function frameIndexOf(at, lo, fps) {
+  return frameAt(at, fps) - frameAt(lo, fps);
 }
 
 /**
- * 一格里 k² 个子帧各取哪个时刻（**均匀版**）。
+ * 盒式平均缩小，**带 cover 裁切**：先按目标宽高比居中裁掉多余的一边，再缩放。
  *
- * 按镜头段分帧数（每段保底 1 帧），段内则**均匀**取点。
- * 积分触发不在这里做：它的产物是**额外的分段边界**（density.integralMarks），
- * 先并进 shots 再调这个函数，于是变化多的地方自然多分几段、多取几帧。
+ * 只缩不裁会**把画面拉变形** —— 格子比例不统一（规则格是 16:9，补位用的自由尺寸帧
+ * 宽高比另算），而批量路径的源尺寸是"本块最大的那个格子"，和目标格的比例通常不同。
+ * 这条也正是 batck ≈ 逐帧的验收判据：漏了裁切，平均像素差会到 7/255（肉眼就是歪的）。
+ *
+ * `dw × dh` 必须 ≤ 源尺寸的对应边（批量路径只缩小：源是最大格子）。
  */
-export function subTileTimes(a, b, n, shots = [], weights = null) {
-  const marks = Array.isArray(shots) && shots.length > 0
-    ? [a, ...shots.filter((t) => t > a && t < b).sort((x, y) => x - y), b]
-    : null;
-  const segs = marks ? marks.length - 1 : 0;
-
-  // 没有切点信息：整格就是一个镜头，均匀取 n 个点
-  if (!marks || segs < 1) {
-    return Array.from({ length: n }, (_, i) => a + (b - a) * ((i + 0.5) / n));
+export function boxResize(src, sw, sh, dw, dh) {
+  if (sw === dw && sh === dh) return src;
+  // cover：以目标比例为准，居中裁切源
+  const targetAspect = dw / dh;
+  const srcAspect = sw / sh;
+  let cx = 0; let cy = 0; let cw = sw; let ch = sh;
+  if (srcAspect > targetAspect) {
+    cw = Math.max(1, Math.round(sh * targetAspect));
+    cx = Math.floor((sw - cw) / 2);
+  } else if (srcAspect < targetAspect) {
+    ch = Math.max(1, Math.round(sw / targetAspect));
+    cy = Math.floor((sh - ch) / 2);
   }
-
-  const per = splitByWeight(n, segs, weights);
-  const out = [];
-  for (let i = 0; i < segs; i++) {
-    const s = marks[i];
-    const e = marks[i + 1];
-    if (per[i] === 0) continue;           // 段数 > 子帧数时才会出现，跳过
-    for (let j = 0; j < per[i]; j++) out.push(s + (e - s) * ((j + 0.5) / per[i]));
+  const out = Buffer.allocUnsafe(dw * dh * 3);
+  // 每个目标像素覆盖的源区间（预计算，避免内层乘法）
+  const xs = new Int32Array(dw + 1);
+  for (let x = 0; x <= dw; x += 1) xs[x] = cx + Math.floor((x * cw) / dw);
+  const ys = new Int32Array(dh + 1);
+  for (let y = 0; y <= dh; y += 1) ys[y] = cy + Math.floor((y * ch) / dh);
+  for (let y = 0; y < dh; y += 1) {
+    const y0 = ys[y];
+    const y1 = Math.max(y0 + 1, ys[y + 1]);
+    for (let x = 0; x < dw; x += 1) {
+      const x0 = xs[x];
+      const x1 = Math.max(x0 + 1, xs[x + 1]);
+      let r = 0; let g = 0; let b = 0;
+      let cnt = 0;
+      for (let yy = y0; yy < y1; yy += 1) {
+        let si = (yy * sw + x0) * 3;
+        for (let xx = x0; xx < x1; xx += 1) {
+          r += src[si]; g += src[si + 1]; b += src[si + 2];
+          si += 3; cnt += 1;
+        }
+      }
+      const di = (y * dw + x) * 3;
+      out[di] = (r / cnt) | 0; out[di + 1] = (g / cnt) | 0; out[di + 2] = (b / cnt) | 0;
+    }
   }
   return out;
 }
 
+/** 一个块：`[lo, hi)` 时间窗里的若干帧（都按同一次解码取） */
+function planBatches(jobs, { maxSpan, maxFrames }) {
+  const sorted = [...jobs].sort((a, b) => a.at - b.at);
+  const batches = [];
+  let cur = [];
+  for (const j of sorted) {
+    if (cur.length && (cur.length >= maxFrames || j.at - cur[0].at > maxSpan)) {
+      batches.push(cur); cur = [];
+    }
+    cur.push(j);
+  }
+  if (cur.length) batches.push(cur);
+  return batches;
+}
 
 /**
- * 把一格摊成 k×k：取 k² 个子帧，拼回一张 cellW×cellH 的图。
- * 子帧用 `mode:'mid'`（不做 3 候选锐度挑选）—— 一格里要取 9~16 张，再挑三倍会让这一步变成瓶颈。
+ * 批量取帧。`jobs` = `[{ at, cellW, cellH, key }]`，返回 `Map<key, {buffer, t}>`。
  *
- * `shots` 里除了真正的切点，还可能带着**积分采样点**（见 density.integralMarks）：
- * 变化攒够的地方会被当成额外的分段边界，于是那一段自然多分到几帧。
- * 这一层不知道两者的区别，也不需要知道。
+ * 任何一块解不出期望帧数，就把它退给 `fallback`（逐帧）—— 这一层的正确性
+ * 只有一条判据：**交出和逐帧路径一模一样的帧**。
+ *
+ * @returns {Promise<Map<any, {buffer:Buffer, t:number, via:string}>>}
  */
-export async function extractSubTile({
-  input, remote, a, b, k, cellW, cellH, ffmpegPath, shots = [],
+export async function extractFramesBatched({
+  input, jobs, fps, ffmpegPath = DEFAULT_FFMPEG, srcW = 0, srcH = 0, hwaccel = null,
+  maxSpan = MAX_SPAN_SEC, maxFrames = MAX_FRAMES_PER_CALL,
+  concurrency = 4, fallback,
 }) {
-  const tileW = Math.floor(cellW / k);
-  const tileH = Math.floor(cellH / k);
-  const n = k * k;
-
-  const times = subTileTimes(a, b, n, shots);
-  const tiles = [];
-  let fellBack = 0;
-  for (let i = 0; i < n; i++) {
-    const at = times[i];
-    // `remoteFrame` 的字段是 {uri, http:{userAgent, referer}} —— 之前这里读的是 url/headers，
-    // 两个都不存在，于是子帧静默退回本地低清副本、HTTP 头也丢了（issue #9）。
-    let tile = null;
-    if (remote?.uri) {
-      try {
-        tile = await extractFrameRaw({
-          input: remote.uri, at, dur: 0, cellW: tileW, cellH: tileH, ffmpegPath, http: remote.http, mode: 'mid',
-        });
-      } catch {
-        tile = null;      // 远程失败就回落本地，并记一笔，清单里会报 frameFallbacks
-      }
-    }
-    if (!tile) {
-      tile = await extractFrameRaw({
-        input, at, dur: 0, cellW: tileW, cellH: tileH, ffmpegPath, mode: 'mid',
-      });
-      if (remote?.uri) fellBack += 1;
-    }
-    tiles.push(tile.buffer);
+  const out = new Map();
+  if (!jobs.length) return out;
+  const batches = planBatches(jobs, { maxSpan, maxFrames });
+  // 每块的平均帧数太少（稀疏长片），批量反而比逐帧慢 —— 一次进程解 20 秒只出 1 帧，
+  // 那 240 ms 的启动费一点没摊薄。密度低于 4 帧/块时整体走逐帧。
+  //
+  // **但必须并发跑**：这里写成 `for … await fallback()` 的话，`--frames 12` 这种稀疏场景
+  // 会变成 12 次串行 ffmpeg（实测 extract 5.3s，比批量的 2.0s 还慢一倍），
+  // 而逐帧路径本来就是按并发设计的。
+  if (jobs.length / batches.length < 4) {
+    const shots = await mapPool(jobs, Math.max(2, concurrency * 3), (j) => fallback(j));
+    for (let i = 0; i < jobs.length; i += 1) out.set(jobs[i].key, { ...shots[i], via: shots[i]?.via ?? 'local' });
+    return out;
   }
-  return {
-    buffer: tileSubFrames(tiles, k, cellW, cellH),
-    t: a + (b - a) / 2,
-    via: fellBack > 0 ? 'local-fallback' : 'ok',
-  };
+
+  await mapPool(batches, concurrency, async (batch) => {
+    // ---- 第一步的尺寸：**保持源宽高比，一次都不裁**
+    //
+    // 这里是整条批量路径唯一容易错的地方。第一版写成"缩到本块最大格 = `scale=W:H:
+    // force_original_aspect_ratio=increase,crop=W:H`"，结果第一步就把画面按**最大格的比例**
+    // 裁了一圈，第二步 `boxResize` 再 cover 到目标格时又裁一圈 —— 画面被裁掉两次。
+    // 实测 213×100 这一档（目标比例 1.6，最大格 400×225 是 1.78）平均像素差 38.6/255，
+    // 就是上下各少了 8% 的画面。
+    //
+    // 正确做法：第一步只缩放不裁（`scale=W:-2`，-2 = 高按比例取偶数），
+    // 让 `boxResize` 的 cover 成为**唯一一次裁切**，几何就和逐帧路径完全一致。
+    //
+    // 宽取够大，保证任何目标格都能被 cover 住：W ≥ max(cellW) 且 W ≥ max(cellH × 源比例)。
+    const srcAspect = (srcW && srcH) ? srcW / srcH : 16 / 9;
+    const needW = Math.max(...batch.map((j) => Math.max(j.cellW, Math.ceil(j.cellH * srcAspect))));
+    // 偶数：yuv 系编码器要偶数，rgb24 不要求但统一取偶数省得记两套规则
+    const W = Math.max(2, needW + (needW % 2));
+    // **lo 对齐到帧边界**：让 n=0 确定地等于帧 K0，不依赖 ffmpeg 在两帧之间的丢弃策略
+    const K0 = frameAt(batch[0].at, fps);
+    const lo = K0 / fps;
+    const hi = batch[batch.length - 1].at;
+    const span = Math.max(0.5, hi - lo + 1);
+    const ks = batch.map((j) => Math.max(0, frameIndexOf(j.at, lo, fps)));
+    // 两个格子可能落在**同一帧**（极短段的相邻中点）：select 对同一个 n 只吐一次，
+    // 所以按唯一帧号去取，再把同一份 buffer 分给这几格。
+    const uniq = [...new Set(ks)].sort((a, b) => a - b);
+    const filter = `select='${uniq.map((k) => `eq(n,${k})`).join('+')}',`
+      + `scale=${W}:-2:flags=area`;
+    let stdout;
+    try {
+      ({ stdout } = await runFile(ffmpegPath, [
+        '-hide_banner', '-v', 'error', '-nostdin',
+        // 批量块是**连续解码**（一块 20 秒、几百帧），和扫描同性质，所以硬件解码在这里
+        // 也是赚的；单帧 seek 那种"每次新建 CUDA 上下文"的场景才不适合（见 hwaccel.js）。
+        ...(hwaccel ? ['-hwaccel', hwaccel] : []),
+        '-ss', String(lo), '-t', String(span), '-i', input,
+        '-an', '-sn', '-vf', filter, '-vsync', '0',
+        '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
+      ], { maxBuffer: Math.max(64 << 20, W * 2 * 3 * uniq.length * 8 + (8 << 20)), encoding: 'buffer' }));
+    } catch {
+      stdout = null;
+    }
+    // 帧数/行宽不对 = 帧号语义和 ffmpeg 的实际行为不一致。整块退回逐帧，不让编号错位。
+    const H = stdout ? Math.round(stdout.length / uniq.length / (W * 3)) : 0;
+    if (!stdout || H <= 0 || stdout.length !== W * H * 3 * uniq.length) {
+      for (const j of batch) out.set(j.key, { ...(await fallback(j)), via: 'local' });
+      return;
+    }
+    const atK = new Map(uniq.map((k, i) => [k, i]));
+    for (let i = 0; i < batch.length; i += 1) {
+      const j = batch[i];
+      const src = stdout.subarray(atK.get(ks[i]) * W * H * 3, (atK.get(ks[i]) + 1) * W * H * 3);
+      out.set(j.key, {
+        buffer: boxResize(src, W, H, j.cellW, j.cellH),
+        // 批量路径能算出**真实帧时间**（逐帧路径上报的是 seek 位置，差半帧）
+        t: lo + ks[i] / fps,
+        via: 'local',
+      });
+    }
+  });
+  return out;
 }
