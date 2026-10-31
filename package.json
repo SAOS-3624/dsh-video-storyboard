@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-storyboard",
-  "version": "0.5.9",
+  "version": "0.5.10",
   "description": "Scene-aware storyboard for DeepSeek Harness: one addressable grid per video (numbered cells, timestamps, transcript, audio envelope) so a text-only agent can look at the video itself instead of being told a summary.",
   "keywords": [
     "dsh",
@@ -44,7 +44,8 @@
     "./subtitles": "./src/storyboard/subtitles.js",
     "./ytdlp": "./src/storyboard/ytdlp.js",
     "./python": "./src/storyboard/python.js",
-    "./browser-time": "./src/storyboard/browser-time.js"
+    "./browser-time": "./src/storyboard/browser-time.js",
+    "./transcript-pass": "./src/storyboard/transcript-pass.js"
   },
   "bin": {
     "dsh-video-scan": "./bin/scan-video.mjs",

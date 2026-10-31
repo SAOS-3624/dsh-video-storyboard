@@ -503,3 +503,36 @@ test('SEQUENCE 的进度写进清单：不用调用方自己记时间', () => {
   assert.match(text, /segment 5\/22 · 13% watched · 82 min left/);
   assert.match(text, /next: from=1500/);
 });
+
+test('omitTranscript：格子只留时间，台词一个字都不贴（两段式投喂的第二段）', () => {
+  const r = makeResult({ cells: 16, textLen: 40 });
+  const on = formatManifest(r, { maxChars: 200_000 });
+  const off = formatManifest(r, { maxChars: 200_000, omitTranscript: true });
+
+  // 对照：默认是贴台词的
+  assert.ok(on.split('\n').some((l) => l.trim().startsWith('"')), '默认应该贴台词');
+
+  // 关掉之后：一行引号台词都不许剩
+  const quoted = off.split('\n').filter((l) => l.trim().startsWith('"'));
+  assert.deepEqual(quoted, [], `omitTranscript 下还贴了台词：${quoted[0] ?? ''}`);
+
+  // 但格子本身（时间码）必须还在 —— 这是模型把两边对上的唯一凭据
+  assert.equal(off.split('\n').filter((l) => l.startsWith('cell ')).length, 16, '格子不能跟着一起消失');
+  assert.match(off, /transcript omitted here/, '要明说句子去了哪里，否则模型以为这段没台词');
+  assert.match(off, /match them to cells by their timestamps/);
+
+  // 省下来的量是实打实的（头部/CSS 这些固定开销不随台词变，所以按"每格台词"算更稳）
+  const perCell = on.length - off.length;
+  assert.ok(perCell >= 16 * 40 * 0.8, `16 格 × ~40 字只省了 ${perCell} 字符，台词没真去掉`);
+  assert.ok(off.length < on.length * 0.8, `整份清单只省了 ${(1 - off.length / on.length).toFixed(0)}%`);
+});
+
+test('omitTranscript 时 ASR 的账照报，但要注明"词在别处"（不能让人以为没转写）', () => {
+  const r = makeResult({ cells: 16 });
+  r.transcript = { ...r.transcript, source: 'asr', asrSeconds: 192.4, asrCached: false };
+  assert.match(formatManifest(r, { maxChars: 200_000 }), /ASR 192\.4 s/);
+
+  const off = formatManifest(r, { maxChars: 200_000, omitTranscript: true });
+  assert.match(off, /ASR 192\.4 s/, '账要留着 —— 删了模型会以为这段没转写、再去转一次');
+  assert.match(off, /words sent separately/, '要说明白词去哪了');
+});

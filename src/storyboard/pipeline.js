@@ -15,15 +15,13 @@ import { cpus } from 'node:os';
 
 import { probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
 import { resolveInput } from './fetch.js';
-import { loadTranscriptFile } from './transcript-file.js';
 import {
   detectDarkRuns, packPrints, packedFps, refineCutsByWindow, scanShots, spikeCuts,
   suppressClose, unpackPrints,
 } from './scan.js';
 import { tagCuts } from './flash.js';
 import { rememberSegments } from './locate.js';
-import { ensureAsr, isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
-import { cachedTranscript, rememberTranscript } from './transcript-cache.js';
+import { isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import { musicDrivenVerdict, readabilityOf, suggest, PLAN_THRESHOLDS } from './plan.js';
 import { findBursts, integralMarks } from './density.js';
 // 一张图会产生多少帧，切张与渲染共用同一个答案（见 measure.js 顶部说明）。
@@ -32,11 +30,9 @@ import { findBursts, integralMarks } from './density.js';
 import { planLayout } from './layout.js';
 import { remember } from './memory.js';
 import { analyzeAudio, analyzeRhythm, describeAudio, detectOnsets, hasAudibleSamples } from './audio.js';
-import {
-  alignCells, applyTermMap, asrBackendId, canTranscribe, describeAsrTarget, explainFetchError,
-  extractSubtitleTrack, filterSuspectSegments, resolveAsrConfig, speechCurve, transcribeLong,
-} from './asr.js';
-import { fetchRemoteSubtitles } from './subtitles.js';
+import { alignCells, resolveAsrConfig, speechCurve } from './asr.js';
+// 转写的四条判据在 transcript-pass.js（和陪看的字幕轨共用同一套），这里只递上下文
+import { resolveTranscript } from './transcript-pass.js';
 import { cacheKey, withCache } from './cache.js';
 import { pruneStorage } from './storage.js';
 import { saveCells } from './cells.js';
@@ -45,7 +41,6 @@ import { findInjection } from './injection.js';
 import { addAudioStrip, addSheetHeader, clock, composeSheet, encodePngBuffer } from './sheet.js';
 import { extractFrameWithFallback, extractSubTile, mapPool } from './frames.js';
 import { correctByOnScreenSubs } from './ocr-subs.js';
-import { countTextInSilence } from './format.js';
 
 export const PICK_MODES = ['sharp', 'mid', 'thumb'];// 只有两种：时间码不烧进画面 —— 它占像素、压缩后先糊，而清单里已经有 0.01 秒精度的时间。
 // （历史上 `index+time` 在参数表里但从没实现过，等于一个会静默失效的选项。）
@@ -207,163 +202,18 @@ export async function runStoryboard(opts) {
 
   // 转写在**扫描的同时**跑：它只依赖音频静音位置，不依赖切点。
   // 21 分钟教程实测：扫描 133s、转写 58s，串起来 202s；并行后只等较慢的那个。
-  const transcriptP = (async () => {
-    // 这次调用到底会不会真的转写：云端没配 key 只是"跳过"的其中一种，本机服务不需要 key。
-    // 判据必须和 `transcribe()` 的门同源（见 asr.js 的 canTranscribe），否则清单会和实际行为相反。
-    const willTranscribe = () => canTranscribe(resolveAsrConfig(), asrKey);
-    let transcriptInfo = null;
-    // 站点有字幕轨但要登录 —— 清单要说明"现在用的是 ASR，不是这视频没字幕"
-    let subtitleNeedsLogin = false;
-    if (transcriptFile) {
-      // 显式给了转写就只用它：不查字幕轨、不跑 ASR。
-      // 接 B 站时这一步最省 —— 字幕本来就有，没必要再识别一遍（10 分钟口播省 60–120 秒）。
-      // 也**不跑幻觉过滤**：那是给 ASR 兜底的，用户递进来的文件按可信处理。
-      try {
-        const loaded = await loadTranscriptFile(transcriptFile);
-        const { segments: fixed, replaced } = applyTermMap(loaded.segments, resolveAsrConfig().terms);
-        transcriptInfo = {
-          ...(replaced > 0 ? { termsFixed: replaced } : {}),
-          source: fixed.length > 0 ? 'file' : 'file-empty',
-          model: `file:${loaded.format}`,
-          segments: fixed,
-          suspect: 0,
-          suspectDetail: [],
-        };
-      } catch (error) {
-        transcriptInfo = {
-          segments: [],
-          source: 'file-failed',
-          error: String(error?.message ?? error).slice(0, 300),
-        };
-      }
-    } else if (transcript !== 'off' && info.hasAudio) {
-      // **先试站点字幕轨**（B 站 CC）：作者写的文本比 ASR 准，还不烧 CPU。
-      // 以前只看"下载下来的 mp4 里有没有内嵌字幕流"，而 B 站的字幕是单独轨道，
-      // 于是永远判成"没有字幕"，白白退回 ASR。
-      // 站点字幕默认开（准、且省掉一次 ASR）；想省钱/想只走 ASR 时可以显式关：
-      //   fetchOptions: { siteSubtitles: false }
-      const remote = (sourceInfo?.url && fetchOptions?.siteSubtitles !== false)
-        ? await fetchRemoteSubtitles({ url: sourceInfo.url, cookies: fetchOptions?.cookies ?? null })
-        : null;
-      const subtitle = remote?.ok
-        ? remote.segments
-        : (info.hasSubtitle ? await extractSubtitleTrack({ input, ffmpegPath }) : null);
-      if (remote && !remote.ok && remote.reason === 'needs-login') {
-        // 有字幕但要登录：这个事实必须让用户看到，否则会以为"这视频没字幕"
-        subtitleNeedsLogin = true;
-      }
-      if (subtitle) {
-        transcriptInfo = {
-          segments: subtitle,
-          source: 'subtitle',
-          model: remote?.ok ? `site-cc${remote.lang ? `:${remote.lang}` : ''}` : 'embedded',
-        };
-      } else if (!willTranscribe()) {
-        // 压根不会转写（云端没配 key）—— 跟"跑了但没听懂"是两码事。
-        // 旧代码走的是 withCache → null 空壳 → asr.empty → 'asr-empty'，清单于是写
-        // "ASR ran and found no speech here"，一个字都没听过却说"这片子没人说话"。
-        transcriptInfo = { segments: [], source: 'no-key' };
-      } else {
-        try {
-          // 切片调用：单次请求过长会让时间码整体压早（实测 299s 压早 13s）。
-          // 结果按 (文件, 窗口, 后端, 切片长度) 缓存 —— 否则 textOnly 分页每翻一页都要重跑 ASR。
-          //
-          // **后端身份必须和实参同源**（issue #38）：没传 hotwords 时，实际用的是 asr.json 里的值，
-          // 旧键却写 '' —— 改了热词仍命中旧缓存。现在先把 hotwords/language 解析成这一次真正要用的值，
-          // 键和 `transcribeLong()` 的入参都用它。
-          // 前缀 `asr2|` 让旧缓存（以及 transcript-cache 里的旧后端身份）自然作废，不需要用户手清。
-          const asrCfg = resolveAsrConfig();
-          const asrHotwords = hotwords !== undefined ? hotwords : asrCfg.hotwords;
-          const asrBackend = asrBackendId({
-            baseUrl: asrCfg.baseUrl, model: asrCfg.model, language: asrCfg.language,
-            maxChunk: asrMaxChunk, transcript, hotwords: asrHotwords,
-          });
-          const asrCacheKey = await cacheKey({
-            input, start: winStart, end: winStart + winDur, threshold: asrBackend,
-          });
-          // **先看按片缓存**：只要已有一段完整覆盖这个窗口，就直接切出来用。
-          // 这一层和上面的 cacheKey 不重复：那个键含窗口，zoom 到已转写段里的 20 秒会 miss；
-          // 这里存的是绝对时间，覆盖住就给，不再把同一段语音转第二遍。
-          const covered = cache
-            ? await cachedTranscript(input, { from: winStart, to: winStart + winDur, backend: asrBackend })
-              .catch(() => null)
-            : null;
-          // 本地 ASR 可能要临时拉起（用完就停）—— 只在 asr.json 配了 manage.start 时才托管。
-          // 命中按片缓存时**不拉起**：省一次模型加载，也不会白占几 GB。
-          if (!covered) {
-            // `spawnImpl` 不要在这里传：这个文件从来没导入过 spawn，
-            // 传 `spawnImpl: spawn` 等于每跑一次就 ReferenceError 一次，被下面的 catch 吞成
-            // "asr-failed · spawn is not defined" —— 转写于是永远是空的。默认值在 asr-lifecycle 里。
-            asrLife = await ensureAsr({ baseUrl: asrCfg.baseUrl, config: asrCfg })
-              .catch((e) => { if (process.env.DSH_ASR_DEBUG) console.error('[asr-lifecycle]', e.message); return null; });
-          }
-          // 记下 ASR 花了几秒：清单要报"这次转写花了 3 分 12 秒 / 命中缓存 0 秒"。
-          // 只报 CPU 秒数没有意义（用户原话：成本该报成"图数×token + ASR 秒数"）。
-          const asrStart = Date.now();
-          const asr = covered
-            ? { segments: covered.segments, empty: covered.segments.length === 0, cached: true }
-            : await withCache(asrCacheKey, () => transcribeLong({
-              input, ffmpegPath, start: winStart, end: winStart + winDur,
-              // apiKey 必须传：否则关掉 ASR 只能靠"没 key"，而本机服务不需要 key
-              silences, maxChunk: asrMaxChunk, apiKey: asrKey,
-              // 显式传解析后的值：不传的话 transcribe 会再解析一次，键和实参可能不是同一份
-              hotwords: asrHotwords, language: asrCfg.language,
-            }), { enabled: cache });
-          asrSeconds = covered ? 0 : +((Date.now() - asrStart) / 1000).toFixed(1);
-          asrCached = asr?.cached === true;
-          if (asr && !covered && cache && asr.segments?.length) {
-            // 落盘成"绝对时间的一段"，下次任何子窗口都能切出来（不用再跑 ASR）
-            await rememberTranscript(input, {
-              from: winStart, to: winStart + winDur, segments: asr.segments, backend: asrBackend,
-            }).catch(() => {});
-          }
-          if (asr) {
-            // 音乐段的幻觉句会命中多个格子、被复制好几遍，先过滤（结果里报出来，不静默丢）
-            const { kept, dropped } = filterSuspectSegments(asr.segments);
-            // 用户词典校正（确定性替换，替换次数会报出来）
-            const { segments: fixed, replaced } = applyTermMap(kept, resolveAsrConfig().terms);
-            transcriptInfo = {
-              ...(replaced > 0 ? { termsFixed: replaced } : {}),
-              ...asr,
-              // 空结果（整片纯音乐 / 服务在跑但没听到话）不该自称 asr —— 见 PR #3。
-              // "没配 key 所以没跑" 已经在上面被 willTranscribe() 分流成 no-key，走不到这里。
-              source: asr.empty || fixed.length === 0 ? 'asr-empty' : 'asr',
-              segments: fixed,
-              suspect: dropped.length,
-              suspectDetail: dropped.slice(0, 3).map((d) => ({
-                from: +d.from.toFixed(2), to: +d.to.toFixed(2),
-                charsPerSec: d.charsPerSec, reason: d.reason,
-              })),
-            };
-          }
-        } catch (error) {
-          transcriptInfo = {
-            segments: [],
-            source: 'asr-failed',
-            // 把真实原因带出来 —— 只写 "ASR call failed" 会让每次故障都得重新猜
-            error: `${explainFetchError(error).slice(0, 300)}  [${describeAsrTarget()}]`,
-          };
-        }
-      }
-    } else if (transcript !== 'off' && !info.hasAudio) {
-      transcriptInfo = { segments: [], source: 'no-audio' };
-    } else if (transcript === 'off') {
-      // **主动关掉**也要有自己的标签。旧版这里什么都不留，清单于是和"没字幕轨、ASR 没跑成"
-      // 长得一模一样，模型只能猜"这片子是不是没人说话"。
-      transcriptInfo = { segments: [], source: 'off' };
-    }
-    // 一致性检查：台词落在"被判静音"的区间里 = 两种可能，轻声被吞了，或者 ASR 编的。
-    const textInSilence = transcriptInfo?.source === 'asr'
-      ? countTextInSilence(transcriptInfo.segments, silences)
-      : 0;
-
-    return {
-      transcriptInfo: (transcriptInfo && subtitleNeedsLogin)
-        ? { ...transcriptInfo, subtitleNeedsLogin: true }
-        : transcriptInfo,
-      textInSilence,
-    };
-  })();
+  //
+  // 判据（四条优先级）已经搬进 transcript-pass.js —— 陪看的字幕轨要的是**同一套判定**，
+  // 只是不要图。这里只负责把这一趟的上下文递进去、把 asr 的账记下来。
+  const transcriptP = resolveTranscript({
+    input, info, sourceInfo, fetchOptions, transcript, transcriptFile,
+    winStart, winDur, silences, ffmpegPath, hotwords, asrKey, asrMaxChunk, cache,
+  }).then((r) => {
+    asrLife = r.asrLife;
+    asrSeconds = r.asrSeconds;
+    asrCached = r.asrCached;
+    return { transcriptInfo: r.transcriptInfo, textInSilence: r.textInSilence };
+  });
 
   // 扫描结果按 (文件, 窗口, 阈值策略) 缓存：storyboard 之后的 zoom 能直接复用
   // 键里要带 scanGap：判定用到了它（近邻合并），否则换参数会命中旧配置的切点

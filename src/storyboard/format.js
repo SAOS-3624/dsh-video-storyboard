@@ -405,6 +405,9 @@ export function formatForDetail(result, { detail = 'med', maxChars, cellRange = 
  */
 export function formatManifest(result, {
   maxCellChars = 120, maxChars = 24_000, cellRange = null,
+  // **不重复台词**：陪看把字和画面分成两次投喂，图这一次只给格子时间。
+  // 实测一段台词 ~400 token、画面 ~300；如果图这里再带一遍词，2 小时 24 段要多 9k token（+50%）。
+  omitTranscript = false,
 } = {}) {
   const { info, window: win, plan } = result;
   // 站点有字幕轨但要登录：明说，别让用户以为这视频没字幕（也解释了为什么在用 ASR）
@@ -470,6 +473,10 @@ export function formatManifest(result, {
   ];
   const planLine = formatPlanLine(result.plan);
   if (planLine) lines.push(planLine);
+  if (omitTranscript) {
+    lines.push('[transcript omitted here: the sentences for this window were sent separately — '
+      + 'match them to cells by their timestamps. Cell times below are the picture side.]');
+  }
   // 多张图时先把"每张各管一段"说清楚：图上的抬头就是证据，模型容易把几张串成一条时间轴。
   if (hasSheets && result.sheets.length > 1) {
     lines.push(`each image carries a header such as "0:00-5:00 1/3" — that is this sheet's own time ` +
@@ -503,10 +510,13 @@ export function formatManifest(result, {
         `~${perImage * result.sheets.length} vision tokens (DSH grid)`);
     }
     const tr = result.transcript;
+    // `omitTranscript` 时台词已经在另一条消息里发过了，但 ASR 的账**是真花掉的**，
+    // 删了会显得"这段没转写"（模型会去重转一次）。所以留账，只在后面点一句"词在别处"。
+    const tail = omitTranscript ? ' (words sent separately)' : '';
     if (tr?.asrSeconds !== undefined) {
-      cost.push(tr.asrCached ? 'transcript reused from cache (0 s)' : `ASR ${tr.asrSeconds} s`);
+      cost.push((tr.asrCached ? 'transcript reused from cache (0 s)' : `ASR ${tr.asrSeconds} s`) + tail);
     } else if (tr?.source === 'subtitle') {
-      cost.push('transcript from the subtitle track (0 s)');
+      cost.push('transcript from the subtitle track (0 s)' + tail);
     } else if (tr?.source === 'off') {
       cost.push('transcript skipped by request');
     }
@@ -658,7 +668,7 @@ export function formatManifest(result, {
       ? ` (r${Math.floor(pos / c.cols) + 1}c${(pos % c.cols) + 1}` +
         `${result.sheets.length > 1 ? `, image ${c.sheet}` : ''})`
       : '';
-    const text = truncateAtSentence(c.text, maxCellChars);
+    const text = omitTranscript ? '' : truncateAtSentence(c.text, maxCellChars);
     // sharp 只留在 JSON 清单里：给模型一个 "479.7" 它无法判断好坏，纯占字符
     // frame@ 只在 pick='sharp' 时给：mid 的取帧时刻就是格中点，模型自己能算，
     // 而 sharp 是"3 个候选里选最锐的那个"，**推不出来** —— 少了它就等于暗示"画面在格首"。
@@ -684,7 +694,7 @@ export function formatManifest(result, {
     lines.push(`[text stopped at cell ${stoppedAt} of ${hi} — ` +
       `call again with cellRange: [${stoppedAt + 1}, ${hi}] and textOnly: true to read the rest]`);
   }
-  if (result.transcript?.source === 'asr') {
+  if (result.transcript?.source === 'asr' && !omitTranscript) {
     // OCR 真修过东西时这条泛泛的警告就多余了：具体修了哪句已经单独写了
     if (!(result.ocr?.status === 'applied' && result.ocr.fixed > 0)) {
       lines.push('transcript is ASR output (not a subtitle track): technical terms and names may be ' +

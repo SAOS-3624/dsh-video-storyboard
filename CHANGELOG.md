@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.5.10] - 2026-11-01
+
+### Transcript as a separate pass (`./transcript-pass`)
+
+The four-level transcript decision (`transcriptFile` → site CC → embedded track → local ASR) used to
+be inlined in `pipeline.js`, so anything that wanted *only* the text had to run the whole scan.
+It is now its own module and the pipeline calls into it — same judgement, one implementation.
+
+- **`resolveTranscript()`** — the inlined block, extracted verbatim. `pipeline.js` lost ~130 lines and
+  keeps only its accounting (`asrLife` / `asrSeconds` / `asrCached`).
+- **`prefetchTranscript({ input, from, to })`** — the text for an arbitrary window, no pictures.
+  Resolves the input to local media (sharing the download cache with the picture pass), probes audio,
+  then: site CC → per-film cache → ASR. A window that is already covered by the cache returns in
+  milliseconds and never wakes the ASR backend.
+- **`formatManifest(..., { omitTranscript: true })`** — cells keep their times but drop their
+  sentences, and a single line says where the text went. For callers that already sent the words
+  separately; repeating them costs ~50% more tokens (17k vs 26k over 2 hours).
+- **Per-film transcript cache keeps the widest coverage** (`MAX_RANGES` 24 → 48). Segment-wise
+  prefetch on a 3-hour film would otherwise evict the opening from the front.
+
 ## [0.5.9] - 2026-11-01
 
 修一个**能让宿主卡死**的接线问题（用户反馈"装插件 / 装服务时 DSH 卡住"）。

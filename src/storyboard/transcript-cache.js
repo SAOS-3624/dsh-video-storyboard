@@ -17,8 +17,14 @@ import { join } from 'node:path';
 
 import { cacheDir } from './cache.js';
 
-/** 每个文件最多留几段转写；SEQUENCE 24 段也够回看，再多就是磁盘垃圾。 */
-const MAX_RANGES = 24;
+/**
+ * 每个文件最多留几段转写。
+ *
+ * 24 是照 SEQUENCE（24 段）定的，但陪看会**按段预取**：2 小时片子 24 段正好卡线，
+ * 3 小时就会把片头的段挤掉 —— 用户倒回去问一句，缓存 miss、重跑一遍 ASR。
+ * 48 段（约 4 小时的 5 分钟段）够用，单个文件也就几百 KB。
+ */
+const MAX_RANGES = 48;
 /** 覆盖判定的容差（秒）：窗口边界常被吸附到剪辑点，差几十毫秒不该判 miss。 */
 const COVER_SLACK = 0.25;
 
@@ -79,8 +85,12 @@ export async function rememberTranscript(input, { from, to, segments, backend })
   const ranges = (data?.backend === backend && Array.isArray(data.ranges) ? data.ranges : [])
     .filter((r) => !(r.from >= from - COVER_SLACK && r.to <= to + COVER_SLACK));
   ranges.push({ from, to, segments });
-  // 新的在前，超出上限就丢最旧的
-  const trimmed = ranges.slice(-MAX_RANGES);
+  // 超上限时**保留覆盖最广的**，而不是丢最旧的：陪看是"一段段往前预取"，
+  // 按插入顺序丢会把整片切碎（每条只剩 5 分钟），而宽的那条能顶好几条窄的。
+  // 顺序因此按跨度降序 —— 命中判定是 `find`，宽段先被找到也更合理。
+  const trimmed = ranges.length > MAX_RANGES
+    ? [...ranges].sort((a, b) => (b.to - b.from) - (a.to - a.from)).slice(0, MAX_RANGES)
+    : ranges;
   try {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, `${key}.json`),
