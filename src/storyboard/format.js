@@ -713,6 +713,11 @@ export function formatManifest(result, {
         const basis = result.ocr.basedOn === 'low-res-copy' ? ` [from the ${result.ocr.copyHeight}p scan copy]` : '';
         lines.push(`on-screen subs: spot-checked ${result.ocr.checked} lines, corrected ${result.ocr.fixed}` +
           `${basis}: ${result.ocr.changes.map((c) => `${c.from.toFixed(1)}s "${c.was}"→"${c.now}"`).join(' · ')}`);
+      } else {
+        // fixed=0 不能静默：否则“OCR 跑过但一条没改”和“根本没开 OCR”在清单里一模一样。
+        // 一行足够，且必须明确“没有一条达到替换门槛”，不能让人读成“已核对”。
+        lines.push(`on-screen subs: spot-checked ${result.ocr.checked} lines, ` +
+          'none met the replace threshold (ASR text left unchanged)');
       }
     } else {
       const reason = String(result.ocr.reason ?? result.ocr.status);

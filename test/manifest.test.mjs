@@ -364,11 +364,13 @@ test('清单：URL 模式要写明校正基于低清副本', () => {
   assert.match(text, /from the 360p scan copy/);
 });
 
-test('清单：没修任何东西时不写 OCR 行（省 token）', () => {
+test('清单：fixed=0 也要说明抽检过但没替换，不能静默（#46）', () => {
   const r = makeResult();
   r.ocr = { status: 'applied', fixed: 0, checked: 16, band: { y0: 0.4, y1: 0.6 }, basedOn: 'source', changes: [] };
   const text = formatManifest(r, { maxChars: 200_000 });
-  assert.doesNotMatch(text, /on-screen subs/);
+  assert.match(text, /on-screen subs: spot-checked 16 lines/);
+  assert.match(text, /none met the replace threshold/);
+  assert.doesNotMatch(text, /corrected/);
 });
 
 test('清单：minGap 压掉格数时首行写"实际/请求"，不写成请求值', () => {
