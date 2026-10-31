@@ -20,6 +20,7 @@ import {
   DETAIL_CHARS, formatManifest, formatTimeline, runStoryboard, saveStoryboards,
 } from '../src/storyboard/pipeline.js';
 import { QUALITY_HEIGHTS, SIZE_BUDGETS, boardGeometry } from '../src/storyboard/board.js';
+import { cliOcr, manifestFromCli, runOptionsFromCli } from '../src/storyboard/cli-options.js';
 
 const opt = parse(process.argv.slice(2), {
   cells: 0, sheets: 0, from: 0, to: 0, threshold: 'auto', 'min-gap': 1.2,
@@ -107,6 +108,7 @@ if (batchStep > 0) {
       input: localPath, from: w.from, to: w.to, cells: 0, sheets: 0,
       threshold: opt.threshold === 'auto' ? 'auto' : Number(opt.threshold),
       pick: String(opt.pick), burn: String(opt.burn), transcript: String(opt.transcript),
+      ocr: cliOcr(opt),
       precomputed,
     });
     const image = `${base}-w${String(w.index).padStart(2, '0')}.png`;
@@ -140,37 +142,15 @@ const t0 = Date.now();
 // CLI 的键是 kebab（--max-per-sheet），boardGeometry 读的是 camelCase（maxPerSheet）。
 // 只翻译这一个：budget / need / size 都是单词，kebab 与 camel 同名，不需要转。
 const geom = boardGeometry({ ...opt, maxPerSheet: opt['max-per-sheet'] ?? opt.maxPerSheet });
-const r = await runStoryboard({
+const r = await runStoryboard(runOptionsFromCli({
+  opt,
+  geom,
   input,
   fetchOptions,
-  transcriptFile: opt['transcript-file'] ?? undefined,
-  sourceHash: opt['source-hash'] === true,
-  from: Number(opt.from) || 0,
-  to: Number(opt.to) || 0,
-  cells: Number(opt.cells) || 0,
-  sheets: Number(opt.sheets) || 0,
-  threshold: opt.threshold === 'auto' ? 'auto' : Number(opt.threshold),
-  minGap: Number(opt['min-gap']) || 0,
-  // `--size` 现在只是 --budget 的别名；格数上限由 need + 预算推，也可 --max-per-sheet 覆盖。
-  // **必须传给 runStoryboard 本身**，放进 fetchOptions（下载参数）会被忽略。
-  //
-  // `boardGeometry()` 吃的是 camelCase（`maxPerSheet`），而 CLI 解析出来的是 kebab
-  // （`opt['max-per-sheet']`）。直接 `boardGeometry(opt)` 会让 `--max-per-sheet` **静默失效**：
-  // 参数看着传了、输出一模一样（实测 cap 16 与 cap 9 出图逐字节相同）。这里翻译一次。
-  budget: geom.budget,
-  maxPerSheet: geom.maxPerSheet,
-  need: geom.need,
-  segment: Number(opt.segment) || 0,
-  pick: String(opt.pick),
-  burn: String(opt.burn),
-  // `--badge 0` 必须真的等于 0：`Number(0) || 0.15` 会把它变成 0.15，
-  // 于是"关掉烧字"变成了"用默认大小烧"。
-  badgeRatio: opt.badge === undefined ? 0.15 : Number(opt.badge),
-  transcript: String(opt.transcript),
   adaptive,
-  tileFirst: process.argv.includes('--tile-first'),
   textOnly,
-});
+  tileFirst: process.argv.includes('--tile-first'),
+}));
 
 console.log(`[probe] ${info.width}x${info.height} ${info.fps.toFixed(2)}fps ${info.duration.toFixed(2)}s` +
   `${info.hasAudio ? ' audio' : ''}${info.hasSubtitle ? ' subtitle' : ''}` +
@@ -196,17 +176,7 @@ for (const [i, sheet] of r.sheets.entries()) {
 console.log(`[done] ${Date.now() - t0}ms`);
 
 if (opt.manifest) {
-  const payload = {
-    input, window: r.window, threshold: r.threshold, summary: r.summary,
-    provenance: r.provenance,
-    audio: r.audio ? { mean: r.audio.mean, peak: r.audio.peak, silences: r.audio.silences } : null,
-    transcript: r.transcript,
-    plan: r.plan,
-    sheets: r.sheets.map((s) => ({
-      sheet: s.sheet, cols: s.cols, rows: s.rows, width: s.width, height: s.height,
-      stripH: s.stripH ?? null, cells: s.cells,
-    })),
-  };
+  const payload = manifestFromCli({ input, r });
   await writeFile(opt.manifest, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
   console.log(`[manifest] ${opt.manifest}`);
 }
