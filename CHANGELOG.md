@@ -4,6 +4,27 @@
 
 ### Fixed
 
+- **`bin/asr-check.mjs` 不认「本机地址免 key」，也不拉起 `manage.start` 的托管服务**（#41）。
+  它自己拿 `ASR_DEFAULTS.fileKey || process.env[keyEnv]` 判"能不能转写"，而工具走的是
+  `canTranscribe()` —— 同一个环境，脚本说"没配 key"、`video_storyboard` 却能跑；
+  再加上脚本从不 import `asr-lifecycle`，配了 `manage.start` 也不会拉起服务，
+  于是按 `doctor.mjs` 第 5 步排障的人会连着撞两次（"没有 key"和 `ECONNREFUSED`）。
+  修：判据换成 `canTranscribe()`（本机不需要 key 时照常发请求、不发 Authorization），
+  转写前 `ensureAsr()` 按需拉起（拉起的按 `idleMs` 退出），连接失败给人话而不是抛栈。
+
+- **音轨"丢了"和"本来没有"分不开**（#43）。判据原来只看 `-J` 的 `formats` 里有没有 `acodec`，
+  而且**缓存命中直接信 `meta.json`** —— 老版本写的 meta 没有 `audioMissing` 这一项，
+  于是"yt-dlp 没合流"被报成 `no audio track: grid is visual only`；坏缓存又因为
+  `staleMerge` 只在 ffmpeg 解析到绝对路径时才失效，可以一直命中有声无影的那份。
+  修：改由**磁盘证据**判定（旁边还留着 `video.<id>.m4a` 就是合流没跑，与 formats 无关），
+  缓存命中也重判一次；拿不到绝对路径时用 `resolveMediaBinary()` 再解析一次 ffmpeg，
+  而不是一直用模块加载那一刻的快照。
+
+- **`docs/CONFIG.zh.md` 把 `server-sherpa.py` 当成读者已有的文件**（#42）。仓库里没有这份实现，
+  也没给出处，照着配的人会卡在"文件不存在"上；顺带补了两个坑：sherpa-onnx **2.x** 把
+  `add_punct()` 改名为 `add_punctuation()`，以及"标点失败要退回无标点文本并照常 200"
+  （否则一个装饰性环节能把整条台词链带崩）。§1 现在明说**本插件不带服务端**，新增 §7.1 三选一。
+
 - **硬字幕校正（`detail: high`）从发布起就没有真正跑起来过**（#39）。
   `src/storyboard/ocr.js` 把桥接脚本拼成 `src/storyboard/ocr_bridge.py`，而它在 `src/ocr_bridge.py` ——
   全仓唯一的引用点，于是每次调用都是 `ENOENT`。更糟的是 `runBridge` 把 **ENOENT、超时、Python 崩溃**
