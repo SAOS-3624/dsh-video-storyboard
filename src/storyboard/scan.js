@@ -512,7 +512,7 @@ export function decideCuts(stats, {
       if (s2.score >= bar) loud += 1;
     }
     if (total === 0) return true;
-    return loud / total < 0.75;
+    return loud / total < 0.6;
   };
   const events = cutsFromEvents(picked, step, { minGap, adaptive: adaptiveGap });
   // 密到"每 2 帧一剪"时邻域里根本没有安静的时候，这条护栏无从判断 —— 跳过它。
