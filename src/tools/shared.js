@@ -11,9 +11,16 @@ import { formatForDetail } from '../storyboard/format.js';
 
 /** 把每张分镜图提交成附件。两个入口各写过一遍这段循环，收成一处 —— mediaType / 命名改一次就够。 */
 export async function attachSheetImages(ctx, result) {
+  // **运行期探测，不是 inject 声明**（原因见 src/index.js 的 inject 注释）：
+  // 宿主没注册 attachments 时，插件必须照样能加载、工具照样能跑，只是拿不到图片。
+  const saveImage = ctx?.attachments?.saveImage;
+  if (typeof saveImage !== 'function') {
+    throw new Error('this DSH build has no `attachments` service, so the storyboard image '
+      + 'cannot be shown. Upgrade DSH, or use `video_probe` / `video_locate` (text only).');
+  }
   const images = [];
   for (const sheet of result.sheets) {
-    images.push(await ctx.attachments.saveImage({
+    images.push(await saveImage({
       data: sheet.png,
       mediaType: 'image/png',
       name: `storyboard-${sheet.sheet}.png`,

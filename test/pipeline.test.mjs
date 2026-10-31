@@ -169,7 +169,9 @@ test('插件接线: apply() 注册一个叫 video_storyboard 的工具', async (
   if (!process.env.DSH_TOOLS_PATH) process.env.DSH_TOOLS_PATH = host;
   const { apply, name: pluginName, inject } = await import('../src/index.js');
   assert.equal(pluginName, 'dsh-video-storyboard');
-  assert.deepEqual(inject, ['tools', 'attachments']);
+  // **不能声明 attachments**：cordis 的 inject 是硬依赖，服务缺失时 apply 永不被调用，
+  // 插件就永远停在"加载中"（用户侧表现：装完插件 DSH 卡死）。见 src/index.js。
+  assert.deepEqual(inject, ['tools']);
 
   const registered = [];
   let disposed = 0;
@@ -639,4 +641,22 @@ test('refineCutsByWindow: 逐帧动画（一拍二）的周期性帧差不算剪
     stats: real, fps: fps25, coarseCuts: [{ t: 1, score: 46 }], winStart: 0, winDur: 8, winSec: 8,
   });
   assert.ok(r2.cuts.length >= 20, `4 帧一剪应该数出来，实得 ${r2.cuts.length}`);
+});
+
+test('插件接线: 宿主没有 attachments 服务时，apply 仍然成功、工具照样注册', async (t) => {
+  const host = join(homedir(), '.dsh/profiles/node_modules/@deepseek-ai/dsh-tools/lib/index.js');
+  if (!existsSync(host)) return t.skip('no local DSH install (@deepseek-ai/dsh-tools)');
+  if (!process.env.DSH_TOOLS_PATH) process.env.DSH_TOOLS_PATH = host;
+  const { apply } = await import('../src/index.js');
+
+  const registered = [];
+  // 故意不给 attachments —— 这是"宿主版本偏旧 / 该 bundle 没启用"时的真实形状。
+  // 以前这里会永远卡在 cordis 的依赖等待里，现在必须照常注册、只是图片走降级。
+  const ctx = {
+    tools: { register: (tool) => { registered.push(tool); return () => {}; } },
+  };
+  const dispose = await apply(ctx);
+  assert.equal(typeof dispose, 'function');
+  assert.ok(registered.length >= 5, `应该注册 5 个工具，实得 ${registered.length}`);
+  assert.ok(registered.some((t) => t.name === 'video_storyboard'));
 });

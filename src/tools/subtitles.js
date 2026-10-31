@@ -42,7 +42,13 @@ export async function execute(ctx, args) {
     });
 
     const jpg = await readFile(out);
-    const image = await ctx.attachments.saveImage({
+    // 同 shared.js：宿主没有 attachments 服务时给出可读的错误，而不是 TypeError
+    const saveImage = ctx?.attachments?.saveImage;
+    if (typeof saveImage !== 'function') {
+      throw new Error('this DSH build has no `attachments` service; the subtitle image cannot be '
+        + 'shown. The text locations above are still valid.');
+    }
+    const image = await saveImage({
       data: jpg, mediaType: 'image/jpeg', name: 'subtitle-strip.jpg',
     });
 

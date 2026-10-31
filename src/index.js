@@ -27,7 +27,19 @@
 import { storyboardTools } from './storyboard/register.js';
 
 export const name = 'dsh-video-storyboard';
-export const inject = ['tools', 'attachments'];
+/**
+ * **只声明 `tools`，不声明 `attachments`** —— 这一条是从"用户装插件时 DSH 卡死"来的教训。
+ *
+ * cordis 的 `inject` 是**硬前缀**：服务没就绪，apply 根本不会被调用，插件就永远停在"加载中"。
+ * `attachments` 只在两个地方用（提交分镜图、字幕长图），而且都能**降级**成纯文本结果；
+ * 可一旦某台机器上这个服务没注册（宿主版本偏旧、或该 bundle 没启用），整个插件就会挂在那里 ——
+ * 表现就是启动/安装时卡住，而且日志里什么都没有。
+ *
+ * 所以：图片能力改成运行期探测（见 `src/tools/shared.js` 的 `attachSheetImages`），
+ * 宿主没有 attachments 时工具照常注册，只是返回"这张图没法展示"的文本。
+ * test/pipeline.test.mjs 里有断言守着这两件事：inject 只有 tools、apply 不抛。
+ */
+export const inject = ['tools'];
 
 /**
  * 解析宿主的 dsh-tools。正常安装时裸包名就能解析；本地开发/测试时
@@ -49,9 +61,17 @@ async function loadDefineTool() {
   throw new Error('cannot resolve @deepseek-ai/dsh-tools (set DSH_TOOLS_PATH for local dev)');
 }
 
+/**
+ * 注册的看门狗：宿主启动阶段会同步等待所有插件的 apply。
+ * 只要这里有一条 await 永不 resolve（比如 import 宿主包时撞上坏掉的解析路径），
+ * 整个 DSH 就卡在启动屏上 —— 用户看到的是"装这个插件把应用搞死"。
+ * 超过 `APPLY_TIMEOUT_MS` 就放弃注册并交回空 disposer：插件不能用，但应用活着。
+ */
+const APPLY_TIMEOUT_MS = 15_000;
+
 export async function apply(ctx) {
   try {
-    return await registerAll(ctx);
+    return await withTimeout(registerAll(ctx), APPLY_TIMEOUT_MS, 'registerAll');
   } catch (e) {
     // **最坏的情况是插件不能用，不是应用起不来**。
     // 真实事故：我在 apply 里加了一次 ctx 探测，`Object.keys(ctx)` 在 cordis 上下文上抛错，
@@ -79,4 +99,15 @@ async function registerAll(ctx) {
   return () => {
     for (const dispose of disposers.reverse()) dispose?.();
   };
+}
+
+/** Promise 超时包装：超时后抛错（调用方会吞掉并交回空 disposer）。 */
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    // 别让这个定时器拖住进程退出
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
