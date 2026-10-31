@@ -374,3 +374,50 @@ test('cutBudget: 目标数与间隔', () => {
   // 短片收紧粒度：5s 的片子不该只给 3 个名额
   assert.equal(cutBudget(scores, { duration: 5 }).gap, 0.5);
 });
+
+/* ---------------------------------------------------------------- 伪切点（spread / 持续运动） */
+
+const mkFrame = (w, h, fn) => {
+  const f = new Float32Array(w * h * 3);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 3;
+    const [hh, ss, vv] = fn(x, y);
+    f[i] = hh; f[i + 1] = ss; f[i + 2] = vv;
+  }
+  return f;
+};
+
+test('scorePairDetail: 整幅都换 → spread ≈ 1；只换中间一小块 → spread 很小', async () => {
+  const { scorePairDetail } = await import('../src/storyboard/scan.js');
+  const w = 64; const h = 36;
+  const a = mkFrame(w, h, () => [20, 200, 100]);
+  const all = mkFrame(w, h, () => [120, 200, 100]);          // 整幅换色（真剪辑）
+  const local = mkFrame(w, h, (x, y) => (
+    x > w / 3 && x < (2 * w) / 3 && y > h / 3 && y < (2 * h) / 3 ? [200, 200, 220] : [20, 200, 100]
+  ));                                                        // 只有中间 1/9 变了（局部换画）
+
+  const whole = scorePairDetail(a, all, { width: w, height: h });
+  const part = scorePairDetail(a, local, { width: w, height: h });
+  assert.ok(whole.spread > 0.95, `整幅变化应该摊满，实得 ${whole.spread}`);
+  assert.ok(part.spread < 0.3, `局部变化不该摊开，实得 ${part.spread}`);
+  // 分数本身分不开这两件事：局部那块改得更猛，分数反而更高
+  assert.ok(part.score > 0, '局部变化也有分数');
+});
+
+test('decideCuts: 持续在动（甩镜/匀速摇镜）不报刀 —— 前后邻域同样吵', () => {
+  // 30 帧里每帧都在 25–30 分：这不是剪辑，是镜头在甩
+  const stats = Array.from({ length: 40 }, (_, i) => ({
+    t: i / 25, score: i > 4 && i < 34 ? 26 + (i % 3) : 1,
+  }));
+  const r = decideCuts(stats, { threshold: 18, minGap: 0.35, duration: 1.6 });
+  assert.equal(r.cuts.length, 0, `持续运动不该报刀，实得 ${r.cuts.length}`);
+});
+
+test('decideCuts: 一抹安静里的孤立跳变照样报刀（护栏不能把真刀也挡了）', () => {
+  const stats = Array.from({ length: 60 }, (_, i) => ({
+    t: i / 25, score: i === 30 ? 70 : 2,
+  }));
+  const r = decideCuts(stats, { threshold: 18, minGap: 0.35, duration: 2.4 });
+  assert.equal(r.cuts.length, 1);
+  assert.equal(r.cuts[0].t, 30 / 25);
+});

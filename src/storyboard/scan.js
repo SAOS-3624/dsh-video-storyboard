@@ -36,6 +36,8 @@ export const REF_V = 160;
 export const GAIN_MAX = 3;
 /** 参考亮度的下限：V 均值低于它不再继续放大 */
 export const V_FLOOR = 40;
+/** 一刀的绝对下限：低于它的一切都当噪声（细扫的 auto-low 可能低到 4） */
+export const MIN_CUT_SCORE = 12;
 /** 黑边判定：整窗每行的 V 均值 < BAR_MEAN，且该行从没亮过（< BAR_MAX） */
 export const BAR_MEAN = 16;
 export const BAR_MAX = 24;
@@ -43,6 +45,13 @@ export const BAR_MAX = 24;
 export const BAR_CAP = 0.35;
 /** 长时差窗口（秒）。相邻帧差看不见渐变转场（叠化/淡入淡出），隔这么久看才看得见 */
 export const LONG_SEC = 0.4;
+/** 改动面积判据：把帧切成 16×9 块，块均差 ≥ 最强块 × SPREAD_BLOCK 就算"这块变了" */
+export const SPREAD_GW = 16;
+export const SPREAD_GH = 9;
+export const SPREAD_BLOCK = 0.45;
+// 注：`spread`（改动面积占比）目前**只做诊断**，不参与判定 —— 试过当硬门槛，
+// 暗场/遮幅的真剪辑会被一起挡掉（暗场整帧换场时块差分布也很集中），得不偿失。
+// 它留在 stats 里给 evidence 和后续的"空间证据"用。
 
 /** RGB(0-255) → HSV，各通道归一到 0-255（H 由角度缩放到 0-255） */
 export function rgbToHsv(r, g, b) {
@@ -115,6 +124,74 @@ export function scorePair(prev, cur) {
 }
 
 /**
+ * 一次算两件事：**整帧差**（和 `scorePair` 逐位相同）与**改动面积占比 `spread`**。
+ *
+ * 为什么需要 spread：相邻帧差这种标量**分不开**"整帧换场"和"画面局部重画" ——
+ * 动画一拍二（每 2 帧换一张画）在镜头不动的情况下，帧差会周期性地冒到 30–60 分，
+ * 和一次真剪辑一模一样。唯一稳定的是**改了多少面积**：真剪辑整幅都换，
+ * 局部重画只有人物/特效那几块动，背景块几乎不变（实测记管概念 PV 就是这么翻的车）。
+ *
+ * 做法：把帧切成 16×9 的块，各算块内平均差异；`spread` = 块均差 ≥ `blockFloor` 的块占比。
+ * 代价是每帧多一趟 144 格的累加（约 +3% 扫描时间）。
+ *
+ * @param {Float32Array} prev 上一帧的 HSV（frameToHsv 的产物）
+ * @param {Float32Array} cur  当前帧
+ * @param {{width?:number, height?:number, gw?:number, gh?:number, blockFloor?:number}} o
+ * @returns {{score:number, spread:number}}
+ */
+export function scorePairDetail(prev, cur, {
+  width = SCAN_W, height = SCAN_H, gw = SPREAD_GW, gh = SPREAD_GH, blockFloor = SPREAD_BLOCK,
+} = {}) {
+  if (prev.length !== cur.length) throw new RangeError('frames must have the same length');
+  const pixels = cur.length / 3;
+  const totalWeight = HUE_WEIGHT + SAT_WEIGHT + VAL_WEIGHT;
+  const nBlocks = gw * gh;
+  const blockSum = new Float64Array(nBlocks);
+  const blockCnt = new Uint16Array(nBlocks);
+  // 每个 x 落在哪一列块：只算一次，避免每像素一次除法
+  const bx = new Uint8Array(width);
+  for (let x = 0; x < width; x++) bx[x] = Math.min(gw - 1, Math.floor((x * gw) / width));
+  let sum = 0;
+  let p = 0;
+  for (let y = 0; y < height; y++) {
+    const by = Math.min(gh - 1, Math.floor((y * gh) / height)) * gw;
+    for (let x = 0; x < width; x++, p += 1) {
+      const i = p * 3;
+      const dh = Math.abs(cur[i] - prev[i]);
+      const hueDiff = Math.min(dh, 255 - dh);
+      const hueWeight = Math.min(cur[i + 1], prev[i + 1]) / 255;
+      const d = hueDiff * hueWeight * HUE_WEIGHT
+        + Math.abs(cur[i + 1] - prev[i + 1]) * SAT_WEIGHT
+        + Math.abs(cur[i + 2] - prev[i + 2]) * VAL_WEIGHT;
+      sum += d;
+      const bi = by + bx[x];
+      blockSum[bi] += d;
+      blockCnt[bi] += 1;
+    }
+  }
+  // 宽高不是网格整数倍时块大小会差 1 像素：按块内实际像素数取均值
+  let peak = 0;
+  for (let k = 0; k < nBlocks; k++) {
+    if (blockCnt[k] === 0) continue;
+    const v = blockSum[k] / blockCnt[k] / totalWeight;
+    if (v > peak) peak = v;
+  }
+  // **相对**判据：块差达到本帧最强块的 blockFloor 倍才算"这块变了"。
+  // 不能用绝对阈值 —— 暗场整帧换场时块差也很小（实测暗场真刀的块差 < 25），
+  // 绝对阈值会把它们全判成"没改面积"，而真剪辑的块差分布是**摊平**的（各块都差不多），
+  // 局部重画是**集中**的（只有几块高）。所以量的是"摊得多开"，不是"改得多猛"。
+  let changed = 0;
+  if (peak > 2) {
+    const floor = peak * blockFloor;
+    for (let k = 0; k < nBlocks; k++) {
+      if (blockCnt[k] === 0) continue;
+      if (blockSum[k] / blockCnt[k] / totalWeight >= floor) changed += 1;
+    }
+  }
+  return { score: sum / (pixels * totalWeight), spread: changed / nBlocks };
+}
+
+/**
  * 黑边占比：整窗里"一直是黑的"顶部/底部行占多少。
  *
  * 为什么需要：分数是在**整帧** 2304 个像素上取均值的，2.39:1 的片子上下各有 12% 的黑边，
@@ -166,7 +243,10 @@ export function normalizeScores(stats, means, {
     const v = hasMeans ? (means[i + offset] ?? means[i]) : NaN;
     const gain = Number.isFinite(v) ? Math.min(gainMax, Math.max(1, refV / Math.max(vFloor, v))) : 1;
     if (gain === 1 && content === 1) return s;
-    return { ...s, score: (s.score * gain) / content, gain: +gain.toFixed(2) };
+    // `raw` 留着：阈值必须在**原始刻度**上算。0.5.4 的 47 是原始分位数，
+    // 直接对放大后的分数再取分位数会抬高门槛 —— 亮场里的真刀（原始 48）就掉到门槛下面了
+    // （概念 PV 22.25s 那一刀就是这么丢的：两个版本在这一帧都是 48 分，门槛却从 47 涨到 79）。
+    return { ...s, raw: s.score, score: (s.score * gain) / content, gain: +gain.toFixed(2) };
   });
 }
 
@@ -396,7 +476,7 @@ export function decideCuts(stats, {
 } = {}) {
   const scores = stats.map((s) => s.score);
   const used = threshold === 'auto'
-    ? autoThreshold(scores, { duration })
+    ? autoThreshold(stats.map((s) => s.raw ?? s.score), { duration })
     : threshold === 'auto-low'
       // 保持 4 的低下限（0.5.4 的取法）。试过抬到"本窗 auto 阈值的 1/5"，
       // 结果与直觉相反：门槛一高，留下的刀均分也变高，反而让**更多**窗口过了
@@ -404,6 +484,9 @@ export function decideCuts(stats, {
       ? Math.max(4, quantile(scores, 0.10))
       : threshold;
   const eps = 1e-6;
+  // 分数够高还不够，**一次真剪辑得改掉半幅画面**：动画一拍二、局部爆炸/字幕、粒子这些
+  // 帧差能到 30–60，但只动了一小块（实测记管概念 PV 里硬币在手里转被数成 20 刀）。
+  // 老缓存没有 spread（undefined）时放行，靠 CACHE_VERSION 保证新条目一定带。
   const above = stats.filter((s) => s.score > used + eps);
   // 上限只对 auto 生效：显式阈值是调用方的明确意图。
   // 修过一次老 bug：这里以前读 `autoThreshold(...).target`，而它返回 number → 永远是 Infinity。
@@ -413,7 +496,38 @@ export function decideCuts(stats, {
     ? [...above].sort((a, b) => b.score - a.score).slice(0, cap).sort((a, b) => a.t - b.t)
     : above;
   const step = stats.length > 1 ? stats[1].t - stats[0].t : 0.04;
-  const cuts = cutsFromEvents(picked, step, { minGap, adaptive: adaptiveGap });
+  // **甩镜护栏**：一次剪辑是"安静 → 一下 → 安静"；甩镜/快速摇镜在切口前后同样吵。
+  // 所以候选的左右邻域（各占 0.08–0.22s）中位分都要明显低于阈值，才承认它是剪辑。
+  // 实测：6 秒的来回甩镜（每帧平移 300px 量级）在只判分数时会数出 11 刀。
+  // 判"持续在动"而不是"邻域里有峰值"，而且用**相对于这一刀自己的分数**来比：
+  // 甩镜的邻域分数和切口本身一样高（29 vs 29），快剪的邻域是平静的（3 vs 70）。
+  // 用阈值当基准不行 —— 细扫的 auto-low 可能只有 4，平静帧的 3 分也会被算成"吵"。
+  const neighborhoodQuiet = (t, from, to, self) => {
+    let loud = 0;
+    let total = 0;
+    const bar = Math.max(1.5, self * 0.5);
+    for (const s2 of stats) {
+      if (s2.t < from || s2.t > to) continue;
+      total += 1;
+      if (s2.score >= bar) loud += 1;
+    }
+    if (total === 0) return true;
+    return loud / total < 0.6;
+  };
+  const events = cutsFromEvents(picked, step, { minGap, adaptive: adaptiveGap });
+  // 密到"每 2 帧一剪"时邻域里根本没有安静的时候，这条护栏无从判断 —— 跳过它。
+  // （素材真能做到每秒 12 刀时，只能靠后面的细扫去取舍。）
+  const nearest = (i) => {
+    let d = Infinity;
+    for (let k = 0; k < events.length; k++) {
+      if (k !== i) d = Math.min(d, Math.abs(events[k].t - events[i].t));
+    }
+    return d;
+  };
+  const kept = events.filter((c, i) => nearest(i) < 0.15
+    || (neighborhoodQuiet(c.t, c.t - 0.18, c.t - 0.06, c.score)
+      && neighborhoodQuiet(c.t, c.t + 0.06, c.t + 0.18, c.score)));
+  const cuts = kept;
   const hotRatio = stats.length > 0 ? above.length / stats.length : 0;
   // 分数序列的变异系数：区分"每帧一剪"和"匀速运镜"
   const mean = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
@@ -543,7 +657,10 @@ export function scanShots(opts) {
         frameToHsv(slice, cur);
         const t = start + frame / fps;
         if (hasPrev) {
-          stats.push({ t, score: scorePair(prev, cur) });
+          // **一次算两件事**：整帧差（判"变没变"）+ 改动面积（判"改了多少画面"）。
+          // 后者是防伪切点的关键：一拍二/局部特效的帧差能到 30–60，但只改一小块。
+          const { score, spread } = scorePairDetail(prev, cur, { width, height });
+          stats.push({ t, score, spread: +spread.toFixed(3) });
         }
         // 长时差：ring[ringIdx] 里躺着 lag 帧之前那一帧
         if (ringWarm >= lag) {
@@ -657,6 +774,7 @@ const PER_FRAME_MEAN = 30;
  */
 export function refineCutsByWindow({
   stats, fps, coarseCuts, winStart = 0, winDur, winSec = 2, minScore = MIN_REFINE_SCORE,
+  coarseThreshold = 0,
 }) {
   // 间隔要按内容选：
   //   - 普通快闪：间隔略大于一帧（1.02/fps），避免同一个镜头的相邻帧被判成两刀；
@@ -678,14 +796,23 @@ export function refineCutsByWindow({
     const coarse = coarseCuts.filter((c) => c.t >= from && c.t < to);
     if (windowStats.length < 4) { out.push(...coarse); continue; }
 
-    const meanScoreAll = windowStats.reduce((a, s) => a + s.score, 0) / windowStats.length;
-    const perFrame = meanScoreAll >= PER_FRAME_MEAN;        // 整窗几乎每帧都在大改
+    // 这两道闸都用**原始分数**（与 0.5.4 同刻度）：亮度归一化只用来"让暗场更容易过线"，
+    // 不该顺带抬高"整窗是不是每帧都在大改"的判据 —— 那会让暗底片子被细扫过度采纳。
+    const rawOf = (x) => (x.raw ?? x.score);
+    const meanScoreAll = windowStats.reduce((a, s) => a + rawOf(s), 0) / windowStats.length;
+    const perFrame = meanScoreAll >= PER_FRAME_MEAN;            // 整窗几乎每帧都在大改
     const gap = perFrame
       ? Math.max(0.9 / Math.max(1, fps), 0.03)              // 一帧以下：每帧一剪也数得出
       : Math.max(1.02 / Math.max(1, fps), 0.04);            // 略大于一帧：不把同镜头的相邻帧算两刀
     if (perFrame) finalGap = Math.min(finalGap, gap);
-    const fine = decideCuts(windowStats, { threshold: 'auto-low', minGap: gap, duration: to - from });
-    const mean = fine.cuts.reduce((a, c) => a + (c.score ?? 0), 0) / Math.max(1, fine.cuts.length);
+    const fineRaw = decideCuts(windowStats, { threshold: 'auto-low', minGap: gap, duration: to - from });
+    // 细扫的阈值是"本窗低分位"，可能低到 4 —— 那会把 4 分的鬼影也当刀（实测概念 PV 里
+    // 57.3s/57.4s 这种 4 分的刀，画面根本没换）。刀本身必须过全局下限，否则不认。
+    // 细扫的刀还要**够得着粗阈值的 3/4**：纯按"本窗低分位"判，2–4 分的抖动也会被收进来，
+    // 实测概念 PV 里 23.9/24.0/35.9/55.0 四个"刀"画面几乎没变（同一镜头里换张画）。
+    const fineFloor = Math.max(MIN_CUT_SCORE, coarseThreshold * 0.75);
+    const fine = { ...fineRaw, cuts: fineRaw.cuts.filter((c) => (c.raw ?? c.score ?? 0) >= fineFloor) };
+    const mean = fine.cuts.reduce((a, c) => a + rawOf(c), 0) / Math.max(1, fine.cuts.length);
     // 采纳门槛**保持绝对阈值**（minScore=25），不改成"相对本窗基线"。
     // 试过相对判据（`max(6, 3×窗内中位分)`）：暗场/低对比快剪能多救回几刀，但代价是
     // **逐帧动画（一拍二/一拍三）的片子全线崩** —— 记管概念 PV 上细扫从 44 刀涨到 122 刀，
@@ -771,6 +898,12 @@ export function detectGradual(longStats, frameStats, {
     const i = Math.round((t - frameStats[0].t) / step);
     return i >= 0 && i < frameStats.length ? frameStats[i].score : null;
   };
+  /** 那一帧的改动面积（改动面积是 0.5.x 之后才有的字段，老传入缺它就返回 null = 不判） */
+  const spreadAt = (t) => {
+    const i = Math.round((t - frameStats[0].t) / step);
+    const v = i >= 0 && i < frameStats.length ? frameStats[i]?.spread : null;
+    return typeof v === 'number' ? v : null;
+  };
   const med = (from, to) => {
     const vals = [];
     for (let t = from; t <= to + 1e-9; t += step) {
@@ -786,7 +919,7 @@ export function detectGradual(longStats, frameStats, {
   let run = null;
   const flush = () => {
     if (!run) return;
-    const { from, to, peak } = run;
+    const { from, to, peak, peakT } = run;
     run = null;
     const width = to - from + step;
     // ① 至少两帧宽。单帧尖峰是"某一帧抖了一下"，不是过渡过程 ——
@@ -818,10 +951,10 @@ export function detectGradual(longStats, frameStats, {
     if (s.score >= longThr) {
       if (run && s.t - run.to <= step * 1.5) {
         run.to = s.t;
-        run.peak = Math.max(run.peak, s.score);
+        if (s.score > run.peak) { run.peak = s.score; run.peakT = s.t; }
       } else {
         flush();
-        run = { from: s.t, to: s.t, peak: s.score };
+        run = { from: s.t, to: s.t, peak: s.score, peakT: s.t };
       }
     } else if (run) {
       flush();

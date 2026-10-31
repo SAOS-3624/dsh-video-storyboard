@@ -466,7 +466,11 @@ export async function runStoryboard(opts) {
 
   let refinedBursts = [];
   if (refineBursts && !precomputed && !textOnly) {
-    const r = refineCutsByWindow({ stats: scan.stats, coarseCuts: cuts, fps: info.fps, winStart, winDur });
+    // 把粗扫的阈值也传下去：细扫的刀不能比它低太多（否则 2–4 分的抖动会混进来）
+    const r = refineCutsByWindow({
+      stats: scan.stats, coarseCuts: cuts, fps: info.fps, winStart, winDur,
+      coarseThreshold: scan.threshold ?? 0,
+    });
     cuts = r.cuts;
     refinedBursts = r.refined;
   }
