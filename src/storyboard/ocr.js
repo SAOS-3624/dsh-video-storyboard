@@ -222,29 +222,71 @@ export function shouldReplace({ asr, ocr, conf }) {
   // 再挑"和这句 ASR 最吻合的那一块"——拿整条去比长度，永远会被判成"长度差太多"。
   const pieces = String(ocr).split(/[，。、！？；,;!?\n]/).map((x) => clean(x)).filter((x) => x.length >= 2);
   const candidates = pieces.length > 0 ? pieces : [B];
-  let best = { cover: 0, piece: B, raw: String(ocr).trim() };
-  for (let i = 0; i < candidates.length; i += 1) {
-    const cover = lcsLength(A, candidates[i]) / A.length;
-    if (cover > best.cover) best = { cover, piece: candidates[i], raw: candidates[i] };
-  }
-  const cover = best.cover;
 
-  // 长度差（对"最吻合那块"而言）：差太多说明截到的是别的字幕
-  if (Math.abs(A.length - best.piece.length) / Math.max(A.length, best.piece.length) > 0.5) {
-    return { replace: false, reason: 'length-gap', cover: +cover.toFixed(2) };
+  // ASR 按停顿切段，常常包含好几个分句（60–100 字）；硬字幕一次只显示一句（10–20 字）。
+  // 拿整段 ASR 去和一行 OCR 比，cover 天生被 ASR 长度稀释，长度判据也会误伤。
+  // 所以在**分句级别**找最吻合的一对，再只替换命中的那一句。
+  const clauses = splitClauses(asr);
+  const units = clauses.length > 0
+    ? clauses
+    : [{ start: 0, end: String(asr ?? '').length, text: String(asr ?? '') }];
+  let best = null;
+  for (const clause of units) {
+    const clauseClean = clean(clause.text);
+    if (clauseClean.length === 0) continue;
+    for (const piece of candidates) {
+      const cover = lcsLength(clauseClean, piece) / clauseClean.length;
+      const gap = Math.abs(clauseClean.length - piece.length) / Math.max(clauseClean.length, piece.length);
+      if (!best || cover > best.cover + 1e-9
+        || (Math.abs(cover - best.cover) <= 1e-9 && gap < best.gap - 1e-9)) {
+        best = { cover, gap, clause, clauseClean, piece };
+      }
+    }
   }
-  // 判据是**覆盖度**：ASR 的典型错误是漏字/换字，OCR 常常是完整那句。
-  // 问"ASR 里有多少字按顺序出现在 OCR 里"，而不是两边各占多少。
-  if (cover < 0.6) return { replace: false, reason: 'unrelated', cover: +cover.toFixed(2) };
-  if (cover > 0.98) return { replace: false, reason: 'agree' };
-  // 多出来的字如果明显多于这句台词，说明带子把相邻那句也截进来了 —— 按匹配区间剪掉两头
-  const match = lcsMatch(A, best.piece);
+  if (!best) return { replace: false, reason: 'unrelated', cover: 0 };
+  const { cover } = best;
+
+  // 顺序很重要：先问“是不是同一句”，再问“长度像不像”。
+  // 否则 cover=0.08 的完全无关文本会先被报成 length-gap，把“帧没对上”误读成“只差长度”。
+  // ASR 是 OCR 的子序列且 OCR 不更长（通常只差标点）才是真一致；
+  // 如果 OCR 更长，可能是 ASR 漏了字（例如“错字”→“错别字”），不能直接判 agree。
+  if (cover > 0.98 && best.piece.length <= best.clauseClean.length) {
+    return { replace: false, reason: 'agree' };
+  }
+  // 多分句时只替换其中一句，命中门槛要比单句更保守，降低“抽错帧还改了一句”的风险。
+  const minCover = units.length > 1 ? 0.7 : 0.6;
+  if (cover < minCover) return { replace: false, reason: 'unrelated', cover: +cover.toFixed(2) };
+  if (best.gap > 0.5) return { replace: false, reason: 'length-gap', cover: +cover.toFixed(2) };
+
+  // 多出来的字如果明显多于这一分句，说明带子把相邻那句也截进来了 —— 按匹配区间剪掉两头
+  const match = lcsMatch(best.clauseClean, best.piece);
   // 剪到匹配区间，两侧各放宽 1 个字：ASR 常常漏掉句尾的语气词（吗/了/啊），
   // 但再宽就会把相邻那句的头一个字带进来。
-  const text = best.piece.length - A.length > 2
+  const replacement = best.piece.length - best.clauseClean.length > 2
     ? best.piece.slice(Math.max(0, match.lo - 1), Math.min(best.piece.length, match.hi + 2))
-    : best.raw;
+    : best.piece;
+
+  // 单句保持旧行为（text 只给 OCR 文本）；多句只替换命中的那一句，其余 ASR 原样保留。
+  if (units.length <= 1) {
+    return { replace: true, reason: 'ocr-covers-asr', cover: +cover.toFixed(2), text: replacement };
+  }
+  const original = String(asr ?? '');
+  const text = original.slice(0, best.clause.start) + replacement + original.slice(best.clause.end);
+  if (text === original) return { replace: false, reason: 'agree' };
   return { replace: true, reason: 'ocr-covers-asr', cover: +cover.toFixed(2), text };
+}
+
+/** 按标点切分 ASR 分句，保留它在原文里的位置（替换时不能动其他句子）。 */
+function splitClauses(text) {
+  const source = String(text ?? '');
+  const out = [];
+  const re = /[^，。、！？；：,;!?\n]+/g;
+  let m;
+  while ((m = re.exec(source)) !== null) {
+    const raw = m[0];
+    if (raw.trim()) out.push({ text: raw, start: m.index, end: m.index + raw.length });
+  }
+  return out;
 }
 
 /** 最长公共子序列长度（按字符） */
