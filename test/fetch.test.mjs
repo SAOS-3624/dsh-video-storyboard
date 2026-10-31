@@ -238,6 +238,11 @@ test('fetchMedia: 解析 → 下载 → 第二次命中缓存', async () => {
     });
     assert.equal(second.source.cached, true, '同一条链接第二次必须命中，否则下游缓存全部失效');
     assert.equal(second.path, first.path, '路径必须稳定');
+    // meta.json 是“这条链接能拿到什么”的唯一副本：命中时读不到它，
+    // maxAvailable/zoomTarget 会凭空消失，下游会把 1080p 源当成未知档。
+    assert.equal(second.source.maxAvailable, 1080, '缓存命中必须保留 meta 里的最高档');
+    assert.deepEqual(second.source.availableHeights, [360, 720, 1080], '缓存命中必须保留可选清晰度');
+    assert.equal(second.source.zoomTarget, 1080, '缓存命中必须保留 zoom 目标档');
   } finally {
     await h.cleanup();
   }
