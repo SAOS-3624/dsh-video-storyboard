@@ -183,15 +183,34 @@ D:/ocr-local/.venv/Scripts/python.exe -c "from rapidocr import RapidOCR; print('
 
 ## 4. 装插件
 
+两条路，**先看 A**。区别只有一个：A 装的是 npm 上的发行版，B 装的是你手上的源码（改代码用）。
+
+### A. 从 npm 装（推荐，仅 `web` 这类普通 profile）
+
+```bash
+dsh plugin --profile web add dsh-video-storyboard
+```
+
+**装完必须重启 DSH。**
+
+> **桌面版（Electron）的 `desktop` profile 不归这条命令管**，`dsh plugin` 会直接拒绝 ——
+> 桌面版走下面的 B。
+>
+> 卸载：`dsh plugin --profile web remove dsh-video-storyboard`
+>
+> `dsh plugin` 把参数原样转给 pnpm，所以 `add` / `remove` / `update` 都是 pnpm 的用法。
+
+### B. 从源码装（改代码 / 跑未发布版本）
+
 ```bash
 git clone https://github.com/SAOS-3624/dsh-video-storyboard.git
 cd dsh-video-storyboard
 node scripts/install-dev.mjs
 ```
 
-脚本会把插件装进 DSH 的插件目录并打好配置。**装完必须重启 DSH**。
+脚本会把插件装进 DSH 的插件目录并打好配置。同样**装完必须重启 DSH**。
 
-> 从 npm 装的话：`npm i -g dsh-video-storyboard` 然后同样跑一次安装脚本。
+> 注意：`install-dev.mjs` 是**把目录复制过去**，之后改源码要重跑一次才会生效。
 
 ---
 
@@ -199,10 +218,13 @@ node scripts/install-dev.mjs
 
 ```bash
 # 本地文件
-node bin/storyboard.mjs 你的视频.mp4 --cells 9 --out test.png
+node bin/storyboard.mjs 你的视频.mp4 --strategy auto --out test.png
 
 # 或者贴一个链接（需要第 2 步的 yt-dlp）
-node bin/storyboard.mjs "https://example.com/some-video" --cells 9 --out test.png
+node bin/storyboard.mjs "https://example.com/some-video" --strategy auto --out test.png
+
+# 只想知道会花多少钱（不出图、不转写）
+node bin/storyboard.mjs 你的视频.mp4 --dry-run
 ```
 
 成功的标志是最后几行长这样：
@@ -237,8 +259,8 @@ node bin/storyboard.mjs "https://example.com/some-video" --cells 9 --out test.pn
 ## 7. 一句话版本
 
 ```bash
-winget install Gyan.FFmpeg          # 必须
-pip install --user -U yt-dlp        # 贴链接才需要
-node scripts/install-dev.mjs        # 装插件
+winget install Gyan.FFmpeg                        # 必须
+pip install --user -U yt-dlp                      # 贴链接才需要
+dsh plugin --profile web add dsh-video-storyboard # 装插件（桌面版/改代码用 install-dev.mjs）
 # 重启 DSH
 ```

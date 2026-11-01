@@ -179,8 +179,9 @@ window that holds a single cell. Window boundaries are **snapped to real cuts** 
 git clone https://github.com/SAOS-3624/dsh-video-storyboard.git
 cd dsh-video-storyboard
 
-node --test                                          # 282 tests (needs ffmpeg)
-node bin/storyboard.mjs your-video.mp4 --cells 9 --text   # see exactly what the model would get
+node --test                                          # 494 tests (needs ffmpeg)
+node bin/storyboard.mjs your-video.mp4 --strategy auto --text   # see exactly what the model would get
+node bin/storyboard.mjs your-video.mp4 --dry-run          # cost preview: cuts + images per policy, no render
 node bin/storyboard.mjs film.mp4 --batch 300              # long film: one png per 5-min window + a timeline.md
 node scripts/install-dev.mjs                         # mount into DSH, then restart DSH
 ```
@@ -230,7 +231,7 @@ Worth stating plainly, because it is easy to misread:
 ```bash
 npm test                                                  # 282 passing (unit + ffmpeg e2e + host contract)
 node bin/scan-video.mjs video.mp4 9                       # 调阈值：切点 / 分数 / 段长 / top peaks
-node bin/storyboard.mjs video.mp4 --cells 9               # 端到端出一张图 + manifest
+node bin/storyboard.mjs video.mp4 --strategy auto               # 端到端出一张图 + manifest
 node bin/storyboard.mjs film.mp4 --from 600 --to 780      # 只看某一段（不扫全片）
 node bin/storyboard.mjs film.mp4 --plan 300               # 先出分段计划（不渲染）
 ```

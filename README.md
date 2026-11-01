@@ -150,10 +150,13 @@ video_storyboard({ input, strategy: 'compact' })   // 再真正出图
 三句话版本：
 
 ```bash
-winget install Gyan.FFmpeg          # 必须：ffmpeg + ffprobe
-pip install --user -U yt-dlp        # 只有贴 B 站/YouTube 链接才需要
-node scripts/install-dev.mjs        # 装插件，然后重启 DSH
+winget install Gyan.FFmpeg                    # 必须：ffmpeg + ffprobe
+pip install --user -U yt-dlp                  # 只有贴 B 站/YouTube 链接才需要
+dsh plugin --profile web add dsh-video-storyboard       # 装插件，然后重启 DSH
 ```
+
+`dsh plugin` 只管 `web` 这类普通 profile；**桌面版（Electron）的 `desktop` profile 会被拒绝**，
+用源码安装：`git clone` 后 `node scripts/install-dev.mjs`（复制目录，改完要重跑）。
 
 | 依赖 | 必须吗 | 不装会怎样 |
 |---|---|---|

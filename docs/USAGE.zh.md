@@ -66,7 +66,7 @@ dsh plugin --profile web add dsh-video-storyboard
 ### 2.3 只想在命令行用（不装插件）
 
 ```bash
-node bin/storyboard.mjs your-video.mp4 --cells 9 --text
+node bin/storyboard.mjs your-video.mp4 --strategy auto --text
 ```
 `bin/*.mjs` 全部独立可用，不需要 DSH。
 
@@ -79,10 +79,10 @@ node bin/storyboard.mjs your-video.mp4 --cells 9 --text
 node bin/storyboard.mjs your-video.mp4 --plan 30
 
 # ② 出一张图 + 清单
-node bin/storyboard.mjs your-video.mp4 --cells 9 --out sheet.png --text
+node bin/storyboard.mjs your-video.mp4 --strategy auto --out sheet.png --text
 
 # ③ 只看某一段（不扫全片）
-node bin/storyboard.mjs your-video.mp4 --from 120 --to 180 --cells 6 --text
+node bin/storyboard.mjs your-video.mp4 --from 120 --to 180 --strategy compact --text
 ```
 
 第 ② 步应该看到类似：

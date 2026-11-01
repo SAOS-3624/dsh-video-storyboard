@@ -68,7 +68,7 @@ dsh plugin --profile web add dsh-video-storyboard
 ### 2.3 CLI only (no DSH)
 
 ```bash
-node bin/storyboard.mjs your-video.mp4 --cells 9 --text
+node bin/storyboard.mjs your-video.mp4 --strategy auto --text
 ```
 Everything under `bin/` runs standalone.
 
@@ -81,10 +81,10 @@ Everything under `bin/` runs standalone.
 node bin/storyboard.mjs your-video.mp4 --plan 30
 
 # 2) one sheet + the text index
-node bin/storyboard.mjs your-video.mp4 --cells 9 --out sheet.png --text
+node bin/storyboard.mjs your-video.mp4 --strategy auto --out sheet.png --text
 
 # 3) one window only (does not scan the whole file)
-node bin/storyboard.mjs your-video.mp4 --from 120 --to 180 --cells 6 --text
+node bin/storyboard.mjs your-video.mp4 --from 120 --to 180 --strategy compact --text
 ```
 
 Step 2 prints something like:
