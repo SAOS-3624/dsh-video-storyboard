@@ -24,8 +24,10 @@
   paraformer / ct-transformer / silero VAD，只依赖标准库 + numpy）。补上 `docs/CONFIG.zh.md` §7.1
   「自己写」那条路缺的那份可对照代码：`--models` 目录内按已知文件名自动发现，也可逐个覆盖路径，
   `--check` 只验模型能否加载。两条降级边界按文档口径实现 —— 标点加载或调用失败照常 200 + 不带标点的
-  文本，VAD 缺失或运行期出错退回整段一次识别。`scripts/` 不在 `files` 里，所以不进 npm 包，
-  只是给人复制出去用的。
+  文本，VAD 缺失或运行期出错退回整段一次识别。**`scripts/` 在 `files` 白名单里**，所以这个脚本
+  会跟着 npm 包一起发出（21 kB，实测 `npm pack` 里有它）—— 装完直接
+  `python scripts/reference-server-sherpa.py --check` 就能自检。
+  （初稿这里写成"不进 npm 包"，是照着 PR 描述抄的，@aizhimoran 核对后指正。）
 
 ### Fixed
 
