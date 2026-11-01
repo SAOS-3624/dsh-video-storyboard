@@ -27,6 +27,7 @@ test('settings: ASR 写入、key 不回显、关闭后 canTranscribe 为 false',
   assert.equal(saved.enabled, false);
   assert.equal(saved.baseUrl, 'http://127.0.0.1:9999/v1');
   assert.equal(saved.hasKey, true);
+  assert.equal(readAsrSettings({ ...env, DSH_ASR_ENABLED: '0' }).enabled, false, '环境变量关闭也要反映到页面');
   assert.equal(Object.hasOwn(saved, 'key'), false, 'API 状态不能带 key');
   const raw = JSON.parse(readFileSync(join(dir, 'asr.json'), 'utf8'));
   assert.equal(raw.key, 'secret-key');

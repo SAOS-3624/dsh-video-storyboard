@@ -87,7 +87,7 @@ export function readAsrSettings(env = process.env) {
     path,
     exists: raw.exists,
     error: raw.error,
-    enabled: raw.data.enabled !== false,
+    enabled: effective.enabled !== false,
     baseUrl: typeof raw.data.baseUrl === 'string' ? raw.data.baseUrl : '',
     model: typeof raw.data.model === 'string' ? raw.data.model : '',
     language: typeof raw.data.language === 'string' ? raw.data.language : '',
