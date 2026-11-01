@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed — `Cannot read properties of undefined (reading 'compression')`
+
+0.5.11 修 `cannot get property "attachments" without inject` 时顺手把**方法调用**改成了
+**先取值再调用**：
+
+```js
+const saveImage = serviceOf(ctx, 'attachments')?.saveImage;   // 函数被摘下来了
+await saveImage({ data, mediaType, name });                    // this 已经不是服务实例
+```
+
+宿主的 `saveImage` 是 `@deepseek-ai/dsh-attachment-local` 的**类方法**，函数体第一行就是
+`this.compression.run(...)` —— `this` 一丢就抛
+`Cannot read properties of undefined (reading 'compression')`。这句话里既没有 `attachments`
+也没有 `saveImage`，用户只会报"分镜工具坏了"，从报错看不出根因。
+
+- `src/tools/shared.js`、`src/tools/subtitles.js` 两处改成保留服务对象、**按方法调用**
+  （`attachments.saveImage({...})`）；取不到服务时给的那句可读错误不变
+- `test/service-optional.test.mjs` 新增一条用「像宿主那样依赖 `this`」的假服务写的回归 ——
+  原来那条测试用的是普通对象 + 普通函数，不依赖 `this`，所以它挡不住这个回归
+  （撤掉修复后新测试报的就是同一个 TypeError）
+
 ## [0.5.11] - 2026-11-01
 
 > `0.5.10` 已废弃（deprecated）：它带着下面第一条那个崩溃，别装。内容全部并进本版。

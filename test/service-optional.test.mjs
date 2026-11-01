@@ -90,3 +90,36 @@ test('attachSheetImages：有 attachments 时正常提交每张图', async () =>
   assert.deepEqual(saved, ['storyboard-1.png', 'storyboard-2.png']);
   assert.equal(images.length, 2);
 });
+
+test('attachSheetImages：附件服务是**类方法**时也能提交（this 不能被弄丢）', async () => {
+  // 真实宿主（@deepseek-ai/dsh-attachment-local）的 saveImage 是类方法，
+  // 函数体第一行就是 `this.compression.run(...)`。把它从实例上摘下来再调用
+  // （`const saveImage = service?.saveImage; await saveImage(...)`）会丢掉 `this`，
+  // 抛 `Cannot read properties of undefined (reading 'compression')` —— 那句话里
+  // 既没有 attachments 也没有 saveImage，用户和作者都很难看出是这个原因。
+  //
+  // 上面那条测试用的是普通对象 + 普通函数，不依赖 `this`，所以它挡不住这个回归；
+  // 这条用一个「像宿主那样依赖 this」的假服务把边界钉住。
+  class FakeAttachmentStore {
+    constructor() {
+      this.compression = { run: (fn) => fn() };   // 与宿主同名同形，只为了让 this 缺失时炸在同一处
+      this.saved = [];
+    }
+
+    async saveImage(input) {
+      return this.compression.run(() => {
+        this.saved.push(input.name);
+        return { url: input.name };
+      });
+    }
+  }
+
+  const store = new FakeAttachmentStore();
+  const ctx = cordisCtx({ provided: { attachments: store } });
+  const images = await attachSheetImages(ctx, {
+    sheets: [{ png: Buffer.from('a'), sheet: 1 }],
+  });
+
+  assert.deepEqual(store.saved, ['storyboard-1.png'], '图片必须真的交给服务去存');
+  assert.equal(images.length, 1);
+});
