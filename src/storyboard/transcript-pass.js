@@ -47,11 +47,11 @@ export async function resolveTranscript({
   input, info, sourceInfo = null, fetchOptions = null,
   transcript = 'auto', transcriptFile = null,
   winStart = 0, winDur = 0, silences = [],
-  ffmpegPath, hotwords, asrKey, asrMaxChunk = 45, cache = true,
+  ffmpegPath, hotwords, asrKey, asrMaxChunk = 45, cache = true, hostAsr = null,
 }) {
-  // 这次调用到底会不会真的转写：云端没配 key 只是"跳过"的其中一种，本机服务不需要 key。
-  // 判据必须和 `transcribe()` 的门同源（见 asr.js 的 canTranscribe），否则清单会和实际行为相反。
-  const willTranscribe = () => canTranscribe(resolveAsrConfig(), asrKey);
+  // 这次调用到底会不会真的转写：宿主 speechToText / 本机 HTTP 服务 / 云端 key 都算。
+  // 判据必须和实际要走的门同源（见 asr.js 的 canTranscribe），否则清单会和实际行为相反。
+  const willTranscribe = () => Boolean(hostAsr) || canTranscribe(resolveAsrConfig(), asrKey);
   let transcriptInfo = null;
   // 站点有字幕轨但要登录 —— 清单要说明"现在用的是 ASR，不是这视频没字幕"
   let subtitleNeedsLogin = false;
@@ -119,10 +119,13 @@ export async function resolveTranscript({
         // 前缀 `asr2|` 让旧缓存（以及 transcript-cache 里的旧后端身份）自然作废，不需要用户手清。
         const asrCfg = resolveAsrConfig();
         const asrHotwords = hotwords !== undefined ? hotwords : asrCfg.hotwords;
-        const asrBackend = asrBackendId({
-          baseUrl: asrCfg.baseUrl, model: asrCfg.model, language: asrCfg.language,
-          maxChunk: asrMaxChunk, transcript, hotwords: asrHotwords,
-        });
+        // 宿主本地 provider 与云端 HTTP 必须使用不同缓存身份，否则会串用彼此的句子。
+        const asrBackend = hostAsr
+          ? `asr2|host:speechToText|${asrCfg.language}|${asrMaxChunk}`
+          : asrBackendId({
+            baseUrl: asrCfg.baseUrl, model: asrCfg.model, language: asrCfg.language,
+            maxChunk: asrMaxChunk, transcript, hotwords: asrHotwords,
+          });
         const asrCacheKey = await cacheKey({
           input, start: winStart, end: winStart + winDur, threshold: asrBackend,
         });
@@ -135,7 +138,7 @@ export async function resolveTranscript({
           : null;
         // 本地 ASR 可能要临时拉起（用完就停）—— 只在 asr.json 配了 manage.start 时才托管。
         // 命中按片缓存时**不拉起**：省一次模型加载，也不会白占几 GB。
-        if (!covered) {
+        if (!covered && !hostAsr) {
           // `spawnImpl` 不要在这里传：这个文件从来没导入过 spawn，
           // 传 `spawnImpl: spawn` 等于每跑一次就 ReferenceError 一次，被下面的 catch 吞成
           // "asr-failed · spawn is not defined" —— 转写于是永远是空的。默认值在 asr-lifecycle 里。
@@ -147,13 +150,18 @@ export async function resolveTranscript({
         const asrStart = Date.now();
         const asr = covered
           ? { segments: covered.segments, empty: covered.segments.length === 0, cached: true }
-          : await withCache(asrCacheKey, () => transcribeLong({
-            input, ffmpegPath, start: winStart, end: winStart + winDur,
-            // apiKey 必须传：否则关掉 ASR 只能靠"没 key"，而本机服务不需要 key
-            silences, maxChunk: asrMaxChunk, apiKey: asrKey,
-            // 显式传解析后的值：不传的话 transcribe 会再解析一次，键和实参可能不是同一份
-            hotwords: asrHotwords, language: asrCfg.language,
-          }), { enabled: cache });
+          : await withCache(asrCacheKey, () => (hostAsr
+            ? hostAsr({
+              input, ffmpegPath, start: winStart, end: winStart + winDur,
+              silences, maxChunk: asrMaxChunk, language: asrCfg.language,
+            })
+            : transcribeLong({
+              input, ffmpegPath, start: winStart, end: winStart + winDur,
+              // apiKey 必须传：否则关掉 ASR 只能靠"没 key"，而本机服务不需要 key
+              silences, maxChunk: asrMaxChunk, apiKey: asrKey,
+              // 显式传解析后的值：不传的话 transcribe 会再解析一次，键和实参可能不是同一份
+              hotwords: asrHotwords, language: asrCfg.language,
+            })), { enabled: cache });
         asrSeconds = covered ? 0 : +((Date.now() - asrStart) / 1000).toFixed(1);
         asrCached = asr?.cached === true;
         if (asr && !covered && cache && asr.segments?.length) {
@@ -186,7 +194,7 @@ export async function resolveTranscript({
           segments: [],
           source: 'asr-failed',
           // 把真实原因带出来 —— 只写 "ASR call failed" 会让每次故障都得重新猜
-          error: `${explainFetchError(error).slice(0, 300)}  [${describeAsrTarget()}]`,
+          error: `${explainFetchError(error).slice(0, 300)}  [${hostAsr ? 'host speechToText' : describeAsrTarget()}]`,
         };
       }
     }

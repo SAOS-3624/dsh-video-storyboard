@@ -103,6 +103,8 @@ export async function runStoryboard(opts) {
     // undefined = 按 env / $DSH_HOME/asr.json 解析；显式 null = 明确不用 env/file 里的 key
     // （云端因此变成 no-key；本机服务按设计不需要 key，仍会尝试。要彻底关掉转写用 transcript:'off'）
     asrKey,
+    // 工具层探测到宿主 speechToText 时传入的适配器；CLI / 无桌面宿主不传，行为不变。
+    hostAsr = null,
     // 内容分类阈值（musicLufs / musicSpeechRate / speechRateCut）可覆盖：
     // 不同母带响度能差 9 LU，写死的常数换一批片源就误判。实际生效的那组会写进清单。
     planThresholds = null,
@@ -207,7 +209,7 @@ export async function runStoryboard(opts) {
   // 只是不要图。这里只负责把这一趟的上下文递进去、把 asr 的账记下来。
   const transcriptP = resolveTranscript({
     input, info, sourceInfo, fetchOptions, transcript, transcriptFile,
-    winStart, winDur, silences, ffmpegPath, hotwords, asrKey, asrMaxChunk, cache,
+    winStart, winDur, silences, ffmpegPath, hotwords, asrKey, asrMaxChunk, cache, hostAsr,
   }).then((r) => {
     asrLife = r.asrLife;
     asrSeconds = r.asrSeconds;

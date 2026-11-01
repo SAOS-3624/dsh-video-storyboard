@@ -8,6 +8,7 @@
 
 import { runStoryboard } from '../storyboard/pipeline.js';
 import { formatForDetail } from '../storyboard/format.js';
+import { hostSpeechToText } from '../storyboard/host-asr.js';
 
 /**
  * 从 cordis 上下文里取一个**可选**服务（取不到返回 null，绝不抛）。
@@ -69,7 +70,9 @@ export async function attachSheetImages(ctx, result) {
  */
 export async function runAndAttach(ctx, options, problems, cellRange) {
   if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
-  const result = await runStoryboard(options);
+  // 宿主有本地 speechToText 时优先用它；没有则 options 原样不变，继续走 asr.json/HTTP。
+  const hostAsr = hostSpeechToText(ctx);
+  const result = await runStoryboard(hostAsr ? { ...options, hostAsr } : options);
   return {
     images: await attachSheetImages(ctx, result),
     text: formatForDetail(result, { detail: options.detail, cellRange }),
