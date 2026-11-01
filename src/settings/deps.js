@@ -52,6 +52,39 @@ function portOpen(port, timeoutMs = 450) {
   });
 }
 
+function downloadFor(id, platform = process.platform) {
+  const win = platform === 'win32';
+  switch (id) {
+    case 'ffmpeg':
+    case 'ffprobe':
+      return {
+        downloadUrl: win
+          ? 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+          : 'https://ffmpeg.org/download.html',
+        downloadLabel: win ? '下载 FFmpeg zip' : '下载 FFmpeg',
+      };
+    case 'ytdlp':
+      return {
+        downloadUrl: win
+          ? 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+          : 'https://github.com/yt-dlp/yt-dlp/releases/latest',
+        downloadLabel: win ? '下载 yt-dlp.exe' : '下载 yt-dlp',
+      };
+    case 'python':
+      return {
+        downloadUrl: win ? 'https://www.python.org/downloads/windows/' : 'https://www.python.org/downloads/',
+        downloadLabel: '下载 Python',
+      };
+    case 'speech':
+      return {
+        downloadUrl: 'https://huggingface.co/FunAudioLLM/SenseVoiceSmall',
+        downloadLabel: '模型页面',
+      };
+    default:
+      return {};
+  }
+}
+
 function hostSpeech(ctx, env) {
   const service = ctx?.get?.('speechToText');
   if (!service) return { ok: false, detail: '宿主未提供 speechToText（仍可走 HTTP ASR）' };
@@ -77,7 +110,7 @@ export async function checkEnvironment(ctx, env = process.env) {
   const video = readVideoSettings(env);
   const port = video.browserPort;
   const browser = port ? await portOpen(port) : { ok: false, detail: '未配置 browserPort' };
-  return [
+  const rows = [
     { id: 'ffmpeg', label: 'ffmpeg', ...ffmpeg },
     { id: 'ffprobe', label: 'ffprobe', ...ffprobe },
     { id: 'ytdlp', label: 'yt-dlp', ...ytdlp },
@@ -90,4 +123,5 @@ export async function checkEnvironment(ctx, env = process.env) {
       detail: browser.ok ? '可连接' : browser.detail,
     },
   ];
+  return rows.map((row) => ({ ...row, ...downloadFor(row.id) }));
 }

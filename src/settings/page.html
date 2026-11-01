@@ -21,7 +21,11 @@ button.primary{background:var(--accent);border-color:var(--accent);color:#fff}bu
 .paths{font-size:12px;color:var(--muted);margin-top:10px}.paths code{background:var(--code);padding:2px 5px;border-radius:4px;color:var(--text)}
 .dep{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}.dep:last-child{border-bottom:0}
 .dot{width:9px;height:9px;border-radius:50%;margin-top:6px;flex:none;background:var(--muted)}.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}
-.dep .name{font-weight:600}.dep .detail{font-size:12px;color:var(--muted)}.dep a{font-size:12px}
+.dep .name{font-weight:600}.dep .detail{font-size:12px;color:var(--muted)}
+.dep .links{display:flex;gap:8px;flex-wrap:wrap;margin-top:7px}
+.dep a.dl{display:inline-block;font-size:12px;font-weight:600;text-decoration:none;padding:5px 9px;border:1px solid var(--accent);border-radius:7px;color:var(--accent)}
+.dep a.dl:hover{background:var(--accent);color:#fff}
+.copy{font-size:12px;padding:2px 7px;margin-left:6px;border-radius:6px}
 .help h3{font-size:14px;margin:14px 0 4px}.help ul{margin:6px 0 0;padding-left:20px}.help li{margin:5px 0;color:var(--muted)}
 code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--code);padding:2px 5px;border-radius:4px;color:var(--text)}
 .banner{padding:10px 12px;border-radius:8px;background:var(--code);font-size:12px;color:var(--muted);margin:10px 0}
@@ -70,27 +74,33 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
 
 <div class="card">
   <h2>依赖与下载</h2>
-  <p>插件不静默安装系统软件；点“重新检查”看现状，命令可复制到终端执行。</p>
+  <p>缺少的依赖会出现官方下载按钮；插件只打开官方来源，不静默安装、不执行下载的文件。装好后回到本页点“重新检查”。</p>
   <div id="deps"></div>
   <div class="help">
     <h3>ffmpeg / ffprobe</h3>
     <ul>
-      <li>Windows：<code>winget install Gyan.FFmpeg</code>，或从 <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener">ffmpeg.org</a> 下载后把 bin 加进 PATH。</li>
-      <li>macOS：<code>brew install ffmpeg</code>；Linux：用发行版包管理器。</li>
+      <li>Windows：<a href="https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" target="_blank" rel="noopener noreferrer">下载官方 FFmpeg zip</a>，解压后把里面的 <code>bin</code> 目录加进 PATH；或用 <code>winget install Gyan.FFmpeg</code><button class="copy" data-copy="winget install Gyan.FFmpeg">复制</button>。</li>
+      <li>macOS：<code>brew install ffmpeg</code><button class="copy" data-copy="brew install ffmpeg">复制</button>；Linux：用发行版包管理器。</li>
+      <li>装完用 <code>ffmpeg -version</code> 和 <code>ffprobe -version</code> 确认；本页只检查，不替你执行安装包。</li>
     </ul>
     <h3>yt-dlp（B 站/YouTube 链接才需要）</h3>
     <ul>
-      <li><code>python -m pip install -U yt-dlp</code>；装完在终端运行 <code>yt-dlp --version</code> 确认。</li>
-      <li>也可以从 <a href="https://github.com/yt-dlp/yt-dlp/releases" target="_blank" rel="noopener">GitHub Releases</a> 下载独立 exe。</li>
+      <li>Windows 可直接<a href="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" target="_blank" rel="noopener noreferrer">下载 yt-dlp.exe</a>，放到 PATH 里的目录。</li>
+      <li>或用 <code>python -m pip install -U yt-dlp</code><button class="copy" data-copy="python -m pip install -U yt-dlp">复制</button>；装完运行 <code>yt-dlp --version</code> 确认。</li>
+    </ul>
+    <h3>Python（可选）</h3>
+    <ul>
+      <li>只有用 pip 安装 yt-dlp 或跑 Python 工具时才需要：<a href="https://www.python.org/downloads/windows/" target="_blank" rel="noopener noreferrer">下载 Python</a>，安装时勾选 “Add python.exe to PATH”。</li>
     </ul>
     <h3>本地 ASR / SenseVoice</h3>
     <ul>
-      <li>在 DSH 的语音设置里下载并选中本地语音提供方；本插件检测到宿主 speechToText 会优先用本地模型。</li>
+      <li>优先在 DSH 的语音设置里下载并选中本地语音提供方；本插件检测到宿主 speechToText 会优先用本地模型。<a href="https://huggingface.co/FunAudioLLM/SenseVoiceSmall" target="_blank" rel="noopener noreferrer">模型页面</a>。</li>
+      <li>直接下模型文件不会自动接上宿主，仍需在 DSH 语音设置里选提供方；本页只做检测。</li>
       <li>没有本地模型时，填一个 OpenAI 兼容端点 + key 即可；只转写台词，不下载整片。</li>
     </ul>
     <h3>API Key</h3>
     <ul>
-      <li>云端示例：<a href="https://cloud.siliconflow.cn/account/ak" target="_blank" rel="noopener">SiliconFlow API Key</a>。本机端点（127.0.0.1/localhost）按设计不需要 key。</li>
+      <li>云端示例：<a href="https://cloud.siliconflow.cn/account/ak" target="_blank" rel="noopener">获取 SiliconFlow API Key</a>。本机端点（127.0.0.1/localhost）按设计不需要 key。</li>
       <li>环境变量优先于本页；如果 DSH_ASR_KEY 已设置，本页的 key 不会覆盖它。</li>
     </ul>
   </div>
@@ -169,6 +179,18 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
       detail.className = 'detail';
       detail.textContent = c.detail || (c.ok ? '可用' : '不可用');
       body.append(name, detail);
+      if (!c.ok && /^https:\/\//.test(c.downloadUrl || '')) {
+        const links = document.createElement('div');
+        links.className = 'links';
+        const a = document.createElement('a');
+        a.className = 'dl';
+        a.href = c.downloadUrl;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = c.downloadLabel || '下载';
+        links.append(a);
+        body.append(links);
+      }
       row.append(dot, body);
       box.append(row);
     }
@@ -219,6 +241,14 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
 
   $('save').addEventListener('click', save);
   $('check').addEventListener('click', check);
+  document.addEventListener('click', async (event) => {
+    const btn = event.target.closest('button.copy');
+    if (!btn) return;
+    try {
+      await navigator.clipboard.writeText(btn.dataset.copy || '');
+      setStatus('命令已复制。', 'ok');
+    } catch (e) { setStatus('复制失败，请手动选择命令。', 'bad'); }
+  });
   load();
 })();
 </script>
