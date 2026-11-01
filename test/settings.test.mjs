@@ -128,6 +128,13 @@ test('settings server: 页面 token、API token、保存后不回显 key', async
   assert.equal(JSON.stringify(state).includes('secret'), false, '响应里不能出现 key 明文');
   assert.equal(readFileSync(join(dir, 'asr.json'), 'utf8').includes('secret'), true);
   assert.equal(existsSync(join(dir, 'video.json')), true);
+  const checked = await api('/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(checked.status, 200);
+  const checks = JSON.parse(checked.body).checks;
+  for (const id of ['ffmpeg', 'ytdlp', 'python']) {
+    const row = checks.find((c) => c.id === id);
+    assert.match(row.downloadUrl, /^https:\/\//, id + ' 需要官方下载地址');
+  }
   assert.equal(page.tool.name, 'video_storyboard_settings');
   const result = await page.tool.execute();
   assert.equal(result.available, true);
