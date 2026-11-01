@@ -10,7 +10,7 @@
  *   换成三个真正决定画面的旋钮：**帧多少（maxFrames）、多大（strategy）、画布多大（budget）**。
  */
 
-import { DEFAULT_STRATEGY, STRATEGIES } from './tiers.js';
+import { DEFAULT_STRATEGY, STRATEGIES, resolveStrategy } from './tiers.js';
 
 /** 三个入口。默认值不同，但都由这里决定。 */
 export const BOARD_KINDS = Object.freeze(['board', 'zoom', 'watch']);
@@ -91,12 +91,18 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
   if (!BOARD_KINDS.includes(kind)) throw new RangeError(`unknown board kind: ${kind}`);
   const detail = args.detail ?? 'med';
   const geom = boardGeometry(args);
-  const strategy = STRATEGIES[args.strategy] ? args.strategy : DEFAULT_STRATEGY;
+  // 旧名在这里就归一化（quality→full / frugal→compact…），下层的日志和清单只认新名
+  const wanted = resolveStrategy(args.strategy);
+  const strategy = STRATEGIES[wanted] ? wanted : DEFAULT_STRATEGY;
   const base = {
     input: args.input,
     from: args.from ?? 0,
     to: args.to ?? 0,
     pick: args.pick ?? 'mid',
+    // 三个调试旋钮原样透传（undefined 时 pipeline 用自己的默认值）
+    ...(args.scanGap !== undefined ? { scanGap: args.scanGap } : {}),
+    ...(args.integral !== undefined ? { integral: args.integral } : {}),
+    ...(args.integralSeconds !== undefined ? { integralSeconds: args.integralSeconds } : {}),
     burn: args.burn ?? 'index',
     transcript: args.transcript ?? 'auto',
     ...(args.transcriptFile !== undefined ? { transcriptFile: args.transcriptFile } : {}),
@@ -113,7 +119,7 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
     return {
       ...base,
       // zoom 就是"看细节"：帧少、每帧往大里给（quality = 每帧升一档，1 档不再升）
-      strategy: args.strategy ?? 'quality',
+      strategy: resolveStrategy(args.strategy) in STRATEGIES ? resolveStrategy(args.strategy) : 'full',
       maxFrames: clampFrames(args.maxFrames, 9),
       maxSheets: clampFrames(args.maxSheets, 1),   // zoom 默认一张图：几格大的
       // 一个 23 秒长镜头在窗口里可能一个切点都没有 —— 至少等分到 4 帧，否则"重看"只给一张
@@ -130,7 +136,7 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
     return {
       ...base,
       // 陪看一段 60–90 秒，5 帧够讲清"这一段发生了什么"
-      strategy: args.strategy ?? 'balanced',
+      strategy: resolveStrategy(args.strategy) in STRATEGIES ? resolveStrategy(args.strategy) : 'compact',
       maxFrames: clampFrames(args.maxFrames, 5),
       maxSheets: clampFrames(args.maxSheets, 1),   // 陪看一段只发一张图
       minFrames: 4,                                 // 陪看也别只给一帧

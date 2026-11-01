@@ -171,25 +171,43 @@ export function levelAt(curve, t) {
  *   frugal   乞丐  ：每帧降三档
  */
 export const STRATEGIES = Object.freeze({
-  quality: { bump: -1, label: '高性能', note: '每帧尺寸升一档，1 档不再升' },
-  balanced: { bump: 0, floor: 2, label: '均衡', note: '1 档压成 1/2 尺寸' },
-  saver: { bump: 1, label: '节省', note: '每帧尺寸降一档' },
-  // 乞丐档：连"积分假切点"一起关掉 —— 那些帧本来就是"这一段一直在变"补出来的，
-  // 都要省到这个份上了，只留真切点切出来的镜头边界。
-  frugal: { bump: 3, label: '乞丐', note: '每帧尺寸降三档，且不要积分假切点', noIntegral: true },
-  // 恭喜发财档：**全部 1/8 档 + 不要假切点 + 扫描期按最小间隔合并切点**。
+  full: { bump: -1, floor: 1, label: '全尺寸', note: '每帧尺寸升一档（1 档不再升）' },
+  standard: { bump: 0, floor: 2, label: '标准', note: '1 档压成 1/2 尺寸' },
+  compact: { bump: 1, label: '紧凑', note: '每帧尺寸降一档' },
+  // 速览：**全部 1/8 档 + 不要假切点 + 扫描期按最小间隔合并切点**。
   // 目标不是"看清"，是"用最少的 token 知道这 90 秒大概发生了什么"。
-  thrifty: {
-    fixed: 8, label: '恭喜发财', note: '全部 1/8 档、无假切点、切点按 0.35s 合并',
+  skim: {
+    fixed: 8, label: '速览', note: '全部 1/8 档、无假切点、切点按 0.35s 合并',
     noIntegral: true, defaultScanGap: 0.35,
   },
-  // 丐中丐：**自适应最小间隔，把整段压进一张图**。间隔一路加大到帧数 <= 一张 1/8 档图的容量
-  // （8×8=64，留余量取 56）。这是"用一张图知道这 5 分钟拍了什么"的极限档。
-  ultra: {
-    fixed: 8, label: '丐中丐', note: '全部 1/8 档、自适应加大切点间隔直到装进一张图',
+  // 一图：**自适应最小间隔，把整段压进一张图**。间隔一路加大到帧数 <= 一张 1/8 档图的容量
+  // （8×8=64，留余量取 56）。5 分钟视频也能一张 384 token 看完。
+  brief: {
+    fixed: 8, label: '一图', note: '全部 1/8 档、自适应加大切点间隔直到装进一张图',
     noIntegral: true, fitOneSheet: true,
   },
 });
+
+/**
+ * 旧名 → 新名。0.6.0 之前叫 quality / balanced / saver / frugal / thrifty / ultra，
+ * 那套名字一半是玩笑（"乞丐""恭喜发财""丐中丐"），跟"每帧多大"没有语义关系。
+ * 现在统一成五个按尺寸排的词：full / standard / compact / skim / brief。
+ * 旧名留一年，不报错，只是内部换成新名。
+ */
+export const STRATEGY_ALIASES = Object.freeze({
+  quality: 'full',
+  balanced: 'standard',
+  saver: 'compact',
+  frugal: 'compact',      // 降三档 → 并入紧凑（真要更省用 skim）
+  thrifty: 'skim',
+  ultra: 'brief',
+});
+
+/** 把可能过时的策略名解析成当前的名字；不认识的原样返回（交给上层报错）。 */
+export function resolveStrategy(name) {
+  const key = String(name ?? '').trim();
+  return STRATEGY_ALIASES[key] ?? key;
+}
 
 export const STRATEGY_NAMES = Object.freeze(Object.keys(STRATEGIES));
 
@@ -202,15 +220,17 @@ export const STRATEGY_NAMES = Object.freeze(Object.keys(STRATEGIES));
  *   - 2.5（frugal）：把"多一张"算得很贵，尽量一张装完，格子可以很小。
  */
 export const BIN_COST = Object.freeze({
-  quality: 0.55,
-  balanced: 1.02,
-  saver: 1.5,
-  frugal: 2.5,
+  full: 0.55,       // 宁可多开一张，也要保住格子尺寸
+  standard: 1.02,
+  compact: 1.5,
+  skim: 2.5,        // 把"多一张"算贵，尽量一张装完
+  brief: 2.5,
 });
-export const DEFAULT_STRATEGY = 'balanced';
+/** 默认从"标准"改成"紧凑"：实测同一段 5 分钟素材 19 张 → 10 张，画面还看得清。 */
+export const DEFAULT_STRATEGY = 'compact';
 
 export function applyStrategy(tiers, strategy = DEFAULT_STRATEGY) {
-  const s = STRATEGIES[strategy] ?? STRATEGIES[DEFAULT_STRATEGY];
+  const s = STRATEGIES[resolveStrategy(strategy)] ?? STRATEGIES[DEFAULT_STRATEGY];
   // 固定档：不管原来算出来是几档，全部压到同一档（恭喜发财档就是全 1/8）
   if (s.fixed) return tiers.map((t) => (Number(t) === 0 ? 0 : s.fixed));
   return tiers.map((t) => {

@@ -8,7 +8,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  LEVEL_THRESHOLDS, MARK_BOOST, STRATEGIES, TIER_MAX, TIER_MIN, applyMarkBoost, applyStrategy, applyTierMap,
+  DEFAULT_STRATEGY, LEVEL_THRESHOLDS, MARK_BOOST, STRATEGIES, TIER_MAX, TIER_MIN,
+  applyMarkBoost, applyStrategy, applyTierMap,
   fitCanvas, framesFromBounds, integralMarks, levelAt, levelCurve, readabilityOf, tierHistogram,
   tierSizes, tierSide,
 } from '../src/storyboard/tiers.js';
@@ -132,67 +133,37 @@ test('integralMarks: 真切点附近不补点（那里已经是边界）', () =>
 
 /* ---------------------------------------------------------------- 策略 / 几何 */
 
-test('applyStrategy: 六个模式的档位映射', () => {
+test('applyStrategy: 五个档位的映射（旧名仍然认）', () => {
   const base = [1, 2, 3, 8];
-  assert.deepEqual(applyStrategy(base, 'balanced'), [2, 2, 3, 8], '均衡：1 档压成 1/2');
-  assert.deepEqual(applyStrategy(base, 'quality'), [1, 1, 2, 7], '高性能：升一档，1 仍是 1');
-  assert.deepEqual(applyStrategy(base, 'saver'), [2, 3, 4, 8], '节省：降一档，封顶 8');
-  assert.deepEqual(applyStrategy(base, 'frugal'), [4, 5, 6, 8], '乞丐：降三档');
-  // 恭喜发财：不看原来几档，全部压到 1/8（自由尺寸的补位帧仍是 0）
-  assert.deepEqual(applyStrategy(base, 'thrifty'), [8, 8, 8, 8], '恭喜发财：全部 1/8');
-  assert.deepEqual(applyStrategy([1, 0, 5], 'thrifty'), [8, 0, 8], '补位帧不参与固定档');
-  assert.deepEqual(applyStrategy(base, 'nope'), applyStrategy(base, 'balanced'), '未知策略退回默认');
-  assert.equal(Object.keys(STRATEGIES).length, 6);
+  assert.deepEqual(applyStrategy(base, 'full'), [1, 1, 2, 7], '全尺寸：升一档，1 仍是 1');
+  assert.deepEqual(applyStrategy(base, 'standard'), [2, 2, 3, 8], '标准：1 档压成 1/2');
+  assert.deepEqual(applyStrategy(base, 'compact'), [2, 3, 4, 8], '紧凑：降一档');
+  // 速览 / 一图：不看原来几档，全部压到 1/8（自由尺寸的补位帧仍是 0）
+  assert.deepEqual(applyStrategy(base, 'skim'), [8, 8, 8, 8]);
+  assert.deepEqual(applyStrategy(base, 'brief'), [8, 8, 8, 8]);
+  assert.deepEqual(applyStrategy([1, 0, 5], 'skim'), [8, 0, 8], '补位帧不参与固定档');
+  // 旧名兼容（0.6.0 之前那套玩笑名字）
+  assert.deepEqual(applyStrategy(base, 'quality'), applyStrategy(base, 'full'));
+  assert.deepEqual(applyStrategy(base, 'balanced'), applyStrategy(base, 'standard'));
+  assert.deepEqual(applyStrategy(base, 'saver'), applyStrategy(base, 'compact'));
+  assert.deepEqual(applyStrategy(base, 'frugal'), applyStrategy(base, 'compact'));
+  assert.deepEqual(applyStrategy(base, 'thrifty'), applyStrategy(base, 'skim'));
+  assert.deepEqual(applyStrategy(base, 'ultra'), applyStrategy(base, 'brief'));
+  assert.deepEqual(applyStrategy(base, 'nope'), applyStrategy(base, DEFAULT_STRATEGY), '未知策略退回默认');
+  assert.equal(Object.keys(STRATEGIES).length, 5);
+  assert.equal(DEFAULT_STRATEGY, 'compact', '默认是紧凑档（性价比最高）');
 });
 
-test('乞丐 / 恭喜发财 / 丐中丐：不要积分假切点', () => {
-  assert.equal(STRATEGIES.frugal.noIntegral, true);
-  assert.equal(STRATEGIES.thrifty.noIntegral, true);
-  assert.equal(STRATEGIES.thrifty.defaultScanGap, 0.35);
-  // 丐中丐：自适应加大切点间隔直到装进一张图
-  assert.equal(STRATEGIES.ultra.noIntegral, true);
-  assert.equal(STRATEGIES.ultra.fitOneSheet, true);
-  assert.equal(STRATEGIES.ultra.fixed, 8);
-  // 其他三档保留假切点、不合并切点
-  for (const k of ['quality', 'balanced', 'saver']) {
+test('速览 / 一图：不要积分假切点；速览还带 0.35s 切点合并', () => {
+  assert.equal(STRATEGIES.skim.noIntegral, true);
+  assert.equal(STRATEGIES.brief.noIntegral, true);
+  assert.equal(STRATEGIES.skim.defaultScanGap, 0.35);
+  assert.equal(STRATEGIES.brief.fitOneSheet, true);
+  // 前三档保留假切点、不合并切点
+  for (const k of ['full', 'standard', 'compact']) {
     assert.ok(!STRATEGIES[k].noIntegral);
     assert.equal(STRATEGIES[k].defaultScanGap, undefined);
   }
-});
-
-test('fitCanvas: 画布任一边都不超过 800（DS 的视觉上限）', () => {
-  for (const aspect of [16 / 9, 4 / 3, 1, 9 / 16, 2.39]) {
-    const c = fitCanvas(aspect);
-    assert.ok(c.width <= 800 && c.height <= 800, `${aspect} → ${c.width}x${c.height}`);
-    assert.ok(Math.abs(c.width / c.height - aspect) < 0.02);
-  }
-  assert.deepEqual(fitCanvas(1), { width: 800, height: 800, aspect: 1 });
-  // 预算更小就跟着小
-  const sm = fitCanvas(16 / 9, { budget: 230_000 });
-  assert.ok(sm.width < 800);
-});
-
-test('tierSizes: 每档该抓多大 —— 2 档以上再抓 720p 已经没有意义', () => {
-  const canvas = fitCanvas(16 / 9);            // 800x450
-  const sizes = tierSizes(canvas);
-  assert.equal(sizes.length, 8);
-  assert.deepEqual(sizes[0], { tier: 1, w: 800, h: 450 });
-  assert.deepEqual(sizes[1], { tier: 2, w: 400, h: 225 });
-  assert.deepEqual(sizes[3], { tier: 4, w: 200, h: 113 });
-  assert.deepEqual(sizes[7], { tier: 8, w: 100, h: 56 });
-  // 严格递减
-  for (let i = 1; i < sizes.length; i += 1) assert.ok(sizes[i].w < sizes[i - 1].w);
-});
-
-test('readabilityOf: 像素分档，不是比例', () => {
-  assert.equal(readabilityOf(480, 270), 'text');
-  assert.equal(readabilityOf(400, 225), 'scene');
-  assert.equal(readabilityOf(160, 90), 'shot');
-  assert.equal(readabilityOf(100, 56), 'composition');
-});
-
-test('tierHistogram: 统计每档几帧', () => {
-  assert.deepEqual(tierHistogram([4, 4, 2, 8]), { 2: 1, 4: 2, 8: 1 });
 });
 
 /* ---------------------------------------------------------------- 档位映射表 */

@@ -80,12 +80,29 @@ export function storyboardToolSpec() {
         description: 'Window end in seconds. Omit it to let `segment` size the window: 300 s when from > 0, '
           + 'or the whole file when from = 0. Pass `to` only when you deliberately want a specific range.',
       },
+      scanGap: {
+        type: 'number',
+        description: 'Minimum seconds between two detected cuts, 0-30. Default 0 = merge nothing.'
+          + ' Raise it to collapse machine-gun edits into one boundary (`skim` sets 0.35, `brief` raises'
+          + ' it until the whole window fits one image).',
+      },
+      integral: {
+        type: 'boolean',
+        description: 'Sample extra frames inside long takes by integrating on-screen change (default'
+          + ' true). Turn it off to keep ONLY real cuts — `skim` / `brief` do that for you.',
+      },
+      integralSeconds: {
+        type: 'number',
+        description: 'How many seconds of accumulated change one sampled frame stands for, 1-30'
+          + ' (default 6). Smaller = more sampled frames inside long takes; bigger = fewer, and long'
+          + ' takes get one big cell each.',
+      },
       maxFrames: {
         type: 'integer',
-        description: 'How many moments you see at most, 1-256 (default 96). Every frame is one shot: the'
-          + ' cut points split the window into shots, and the integral sampler adds extra frames inside'
-          + ' long moving shots. Above this cap the shortest segments get merged into their neighbours —'
-          + ' you lose fast-cut coverage, never long takes. 12-24 for a close reading, 96 for a wide pass.',
+        description: 'Cap on how many frames you see, 1-10000. **Default 0 = no cap**: every cut becomes'
+          + ' a frame and every long moving shot gets extra frames from the integral sampler. Set a number'
+          + ' only to bound cost — above it the shortest segments get merged (you lose fast-cut coverage,'
+          + ' never long takes).',
       },
       tierMap: {
         type: 'object',
@@ -115,7 +132,7 @@ export function storyboardToolSpec() {
       },
       strategy: {
         type: 'string',
-        enum: ['quality', 'balanced', 'saver', 'frugal', 'thrifty', 'ultra'],
+        enum: ['full', 'standard', 'compact', 'skim', 'brief'],
         description: 'Size policy, applied to the tier every frame got from cut density. Each step costs'
           + ' or saves about one tier of cell size (a tier doubles or halves the pixel side):'
           + ' quality = one tier bigger (1/1 stays 1/1) for reading text and faces;'
@@ -278,11 +295,28 @@ export function zoomToolSpec() {
       },
       from: { type: 'number', description: 'Window start in seconds. Required unless cellId is given.' },
       to: { type: 'number', description: 'Window end in seconds. Required unless cellId is given.' },
+      scanGap: {
+        type: 'number',
+        description: 'Minimum seconds between two detected cuts, 0-30. Default 0 = merge nothing.'
+          + ' Raise it to collapse machine-gun edits into one boundary (`skim` sets 0.35, `brief` raises'
+          + ' it until the whole window fits one image).',
+      },
+      integral: {
+        type: 'boolean',
+        description: 'Sample extra frames inside long takes by integrating on-screen change (default'
+          + ' true). Turn it off to keep ONLY real cuts — `skim` / `brief` do that for you.',
+      },
+      integralSeconds: {
+        type: 'number',
+        description: 'How many seconds of accumulated change one sampled frame stands for, 1-30'
+          + ' (default 6). Smaller = more sampled frames inside long takes; bigger = fewer, and long'
+          + ' takes get one big cell each.',
+      },
       maxFrames: {
         type: 'integer',
-        description: 'How many frames for this window, 1-48 (default 6). Every frame is one shot and'
-          + ' gets a cell; fewer frames means each cell is bigger. Zoom forces strategy="quality", so'
-          + ' every frame moves one tier up — this is the "make it readable" tool.',
+        description: 'How many frames for this window, 1-48 (default 9). Frames get a UNIFORM tier'
+          + ' ceil(sqrt(n)) so n cells tile a sqrt(n)×sqrt(n) grid in ONE image — 9 frames = 3×3 full.'
+          + ' This is the "re-read a few seconds properly" tool.',
       },
       tierMap: {
         type: 'object',
@@ -311,7 +345,7 @@ export function zoomToolSpec() {
       },
       strategy: {
         type: 'string',
-        enum: ['quality', 'balanced', 'saver', 'frugal', 'thrifty', 'ultra'],
+        enum: ['full', 'standard', 'compact', 'skim', 'brief'],
         description: 'Size policy, default "quality" (one tier bigger everywhere). Only lower it if you'
           + ' are re-reading a very busy window and want more frames per image instead of detail.',
       },
@@ -561,8 +595,22 @@ export function validateToolArgs(args) {
     problems.push('maxFrames must be an integer 0..10000 (0 = no cap)');
   }
   if (args.strategy !== undefined
-    && !['quality', 'balanced', 'saver', 'frugal', 'thrifty', 'ultra'].includes(args.strategy)) {
-    problems.push("strategy must be 'quality', 'balanced', 'saver', 'frugal', 'thrifty' or 'ultra'");
+    && !['full', 'standard', 'compact', 'skim', 'brief',
+      'quality', 'balanced', 'saver', 'frugal', 'thrifty', 'ultra'].includes(args.strategy)) {
+    problems.push("strategy must be 'full' | 'standard' | 'compact' | 'skim' | 'brief'"
+      + ' (old names quality/balanced/saver/frugal/thrifty/ultra are still accepted)');
+  }
+  if (args.scanGap !== undefined
+    && (typeof args.scanGap !== 'number' || !(args.scanGap >= 0) || args.scanGap > 30)) {
+    problems.push('scanGap must be a number 0..30 seconds (0 = do not merge cuts)');
+  }
+  if (args.integral !== undefined && typeof args.integral !== 'boolean') {
+    problems.push('integral must be a boolean');
+  }
+  if (args.integralSeconds !== undefined
+    && (typeof args.integralSeconds !== 'number'
+      || !(args.integralSeconds >= 1) || args.integralSeconds > 30)) {
+    problems.push('integralSeconds must be a number 1..30');
   }
   if (args.budget !== undefined
     && (!Number.isInteger(args.budget) || args.budget < 64_000 || args.budget > 640_000)) {

@@ -65,7 +65,7 @@ test('e2e: runStoryboard 出一张图 + 完整清单', async (t) => {
     `一张图固定 384 token（${sheet.width}x${sheet.height}）`);
   assert.match(text, /ffmpeg="[^"]+"/);
   assert.match(text, /sha256="[0-9a-f]{64}"/);
-  assert.match(text, /plan: strategy=balanced/);
+  assert.match(text, /plan: strategy=compact/);
   assert.match(text, /tiers /, '档位分布要写进清单');
 });
 

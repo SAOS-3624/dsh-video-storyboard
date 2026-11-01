@@ -31,7 +31,8 @@ import { tagCuts } from './flash.js';
 import { rememberSegments } from './locate.js';
 import { isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import {
-  BIN_COST, DEFAULT_STRATEGY, MARK_BOOST, STRATEGIES, applyMarkBoost, applyStrategy, applyTierMap, fitCanvas,
+  BIN_COST, DEFAULT_STRATEGY, MARK_BOOST, STRATEGIES, applyMarkBoost, applyStrategy, applyTierMap,
+  fitCanvas, resolveStrategy,
   framesFromBounds, integralMarks, levelAt, levelCurve, readabilityOf, tierHistogram,
 } from './tiers.js';
 import { solve, toRects } from './pack.js';
@@ -82,7 +83,7 @@ export async function runStoryboard(opts) {
     // 4 路 9.65s / 8 路 6.58s / 12 路 5.68s / 16 路 5.56s / 24 路 6.44s（过了 16 就抢不到核）。
     // 取 0.75×核数：16 核 → 12，比 8 快 14%，又不像 24 那样把机械盘和内存带宽打满。
     frameConcurrency = Math.min(12, Math.max(2, Math.floor(cpus().length * 0.75))),
-    strategy = DEFAULT_STRATEGY,
+    strategy: strategyRaw = DEFAULT_STRATEGY,
     // **0 = 不封顶**。帧数由切点决定：一部长片几千刀就几千帧，用户自己承担解码时间。
     maxFrames = 0,
     // 张数上限：zoom / 陪看要**一张图**，概览默认也不封顶（帧多自然张多）。
@@ -126,7 +127,12 @@ export async function runStoryboard(opts) {
   if (!inputRaw) throw new Error('input is required');
   if (!PICK_MODES.includes(pick)) throw new RangeError(`pick must be one of ${PICK_MODES.join('/')}`);
   if (!BURN_MODES.includes(burn)) throw new RangeError(`burn must be one of ${BURN_MODES.join('/')}`);
-  if (!STRATEGIES[strategy]) throw new RangeError(`strategy must be one of ${Object.keys(STRATEGIES).join('/')}`);
+  // 旧名（quality / balanced / saver / frugal / thrifty / ultra）在这里换成新名，不报错
+  const strategy = resolveStrategy(strategyRaw);
+  if (!STRATEGIES[strategy]) {
+    throw new RangeError(`strategy must be one of ${Object.keys(STRATEGIES).join(' / ')}`
+      + ` (old names quality/balanced/saver/frugal/thrifty/ultra still accepted)`);
+  }
   // 扫描期最小间隔：调用方显式给了就用它，否则用策略自带的（只有"恭喜发财档"带 0.35）
   const capGap = Number(scanGap) > 0
     ? Number(scanGap)

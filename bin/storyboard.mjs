@@ -2,7 +2,7 @@
 /**
  * storyboard — CLI 薄壳，真正的逻辑全在 src/storyboard/pipeline.js（与 DSH 工具同一份实现）。
  *
- *   node bin/storyboard.mjs <video> [--frames N] [--max-sheets N] [--strategy balanced|quality|saver|frugal]
+ *   node bin/storyboard.mjs <video> [--frames N] [--max-sheets N] [--strategy full|standard|compact|skim|brief]
  *                                   [--from 0] [--to 300] [--segment 300] [--budget 640000]
  *                                   [--pick sharp|mid|thumb] [--burn index|none]
  *                                   [--threshold auto|15] [--scan-gap 0]
@@ -23,8 +23,9 @@ import { boardGeometry } from '../src/storyboard/board.js';
 import { cliOcr, manifestFromCli, runOptionsFromCli } from '../src/storyboard/cli-options.js';
 
 const opt = parse(process.argv.slice(2), {
-  frames: 0, 'max-frames': 0, 'max-sheets': 0, 'tier-map': null, from: 0, to: 0, threshold: 'auto', 'scan-gap': 0,
-  strategy: 'balanced', pick: 'mid', burn: 'index', transcript: 'auto',
+  frames: 0, 'max-frames': 0, 'max-sheets': 0, 'tier-map': null, from: 0, to: 0, threshold: 'auto',
+  'scan-gap': 0, integral: null, 'integral-seconds': 0,
+  strategy: null, pick: 'mid', burn: 'index', transcript: 'auto',
   out: 'storyboard.png', manifest: null, plan: 0, 'text-only': false, 'cell-range': null,
   batch: 0, detail: 'med',
   // scan-height 默认 0 = 按格子最大尺寸推（1 档整幅 800×450，720p 已是 2.5 倍超采样）
@@ -104,7 +105,7 @@ if (batchStep > 0) {
       input: localPath, from: w.from, to: w.to,
       threshold: opt.threshold === 'auto' ? 'auto' : Number(opt.threshold),
       maxFrames: Number(opt.frames) || 96,
-      strategy: String(opt.strategy),
+      strategy: opt.strategy ?? undefined,
       pick: String(opt.pick), burn: String(opt.burn), transcript: String(opt.transcript),
       ocr: cliOcr(opt),
       precomputed,

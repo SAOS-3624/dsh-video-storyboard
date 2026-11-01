@@ -20,7 +20,7 @@ import {
 test('board: 全片概览的默认值', () => {
   const o = boardOptions({ input: 'a.mp4' }, { kind: 'board' });
   assert.equal(o.maxFrames, 0, '0 = 不封顶：帧数由切点决定');
-  assert.equal(o.strategy, 'balanced', '默认均衡：只把 1 档压成 1/2');
+  assert.equal(o.strategy, 'compact', '默认紧凑（0.6.0 起，性价比最高）');
   assert.equal(o.detail, 'med');
   assert.equal(o.ocr, false);
   // 800×800 / 384 token 是 DS 的视觉上限，再大只会被缩回去
@@ -36,7 +36,7 @@ test('zoom: 少帧大图、quality 策略、带回高清清晰度', () => {
   assert.equal(o.from, 12);
   assert.equal(o.to, 15);
   assert.equal(o.maxFrames, 9, 'zoom 默认 9 帧 = 3×3 满格');
-  assert.equal(o.strategy, 'quality');
+  assert.equal(o.strategy, 'full');
   // 实际档位由 uniformTier:'auto' 覆盖成 ceil(sqrt(n))，保证一张图铺满 √n×√n
   assert.equal(o.uniformTier, 'auto');
   assert.equal(o.minFrames, 4, '长镜头窗口至少等分到 4 帧');
@@ -47,7 +47,7 @@ test('zoom: 少帧大图、quality 策略、带回高清清晰度', () => {
 test('watch: 5 帧、均衡策略', () => {
   const o = boardOptions({ input: 'a.mp4', from: 120, to: 240 }, { kind: 'watch' });
   assert.equal(o.maxFrames, 5);
-  assert.equal(o.strategy, 'balanced');
+  assert.equal(o.strategy, 'compact', '0.6.0 起默认是紧凑档');
 });
 
 test('detail 是同一个刻度：60 / 120 / 400，未知档位退回 med', () => {
@@ -96,6 +96,7 @@ test('budget 被夹在 64k..640k：超过 800x800 的请求不再是"更大更�
 });
 
 test('未知 strategy 退回默认，不抛（工具参数是模型填的，容错优先）', () => {
-  assert.equal(boardOptions({ input: 'a.mp4', strategy: 'turbo' }, { kind: 'board' }).strategy, 'balanced');
-  assert.equal(boardOptions({ input: 'a.mp4', strategy: 'frugal' }, { kind: 'board' }).strategy, 'frugal');
+  assert.equal(boardOptions({ input: 'a.mp4', strategy: 'turbo' }, { kind: 'board' }).strategy, 'compact');
+  // 旧名在 board 层就归一化（frugal → compact）
+  assert.equal(boardOptions({ input: 'a.mp4', strategy: 'frugal' }, { kind: 'board' }).strategy, 'compact');
 });

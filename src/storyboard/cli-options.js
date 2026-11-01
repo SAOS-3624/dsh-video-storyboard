@@ -38,7 +38,10 @@ export function runOptionsFromCli({
       if (typeof raw !== 'string' || !raw.trim()) return undefined;
       try { return JSON.parse(raw); } catch { return undefined; }
     })(),
-    strategy: opt.strategy === undefined ? undefined : String(opt.strategy),
+    // 不给就让 pipeline 用自己的默认（compact）；旧名由 resolveStrategy 归一化
+    strategy: opt.strategy || undefined,
+    integral: opt.integral === 'off' ? false : (opt.integral === 'on' ? true : undefined),
+    integralSeconds: Number(opt['integral-seconds']) || undefined,
     threshold: opt.threshold === 'auto' ? 'auto' : Number(opt.threshold),
     scanGap: opt['scan-gap'] === undefined ? undefined : Number(opt['scan-gap']),
     budget: geom.budget,

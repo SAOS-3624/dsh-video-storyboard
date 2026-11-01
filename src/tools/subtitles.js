@@ -46,12 +46,14 @@ export async function execute(ctx, args) {
     // 同 shared.js：宿主没有 attachments 服务时给出可读的错误，而不是 TypeError。
     // **必须走 `serviceOf`**：`ctx?.attachments` 在 cordis 的 Proxy 上会直接抛
     // "without inject"，`?.` 挡不住（见 shared.js 里那段说明）。
-    const saveImage = serviceOf(ctx, 'attachments')?.saveImage;
+    const attachments = serviceOf(ctx, 'attachments');
+    const saveImage = attachments?.saveImage;
     if (typeof saveImage !== 'function') {
       throw new Error('this DSH build has no `attachments` service; the subtitle image cannot be '
         + 'shown. The text locations above are still valid.');
     }
-    const image = await saveImage({
+    // 同 shared.js：`.call(attachments, ...)` 保住 this（新宿主内部读 `this.compression`）
+    const image = await saveImage.call(attachments, {
       data: jpg, mediaType: 'image/jpeg', name: 'subtitle-strip.jpg',
     });
 

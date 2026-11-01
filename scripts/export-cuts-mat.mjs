@@ -36,14 +36,14 @@ import {
 
 const USAGE = `usage: node scripts/export-cuts-mat.mjs <video|url> [--out dir] [--rate hz] [--from s] [--dur s]
                                             [--threshold auto|12] [--min-gap 0.35] [--height 720] [--name stem]
-                                            [--no-refine] [--no-spike] [--ffmpeg path]`;
+                                            [--no-refine] [--no-spike] [--no-gradual] [--ffmpeg path]`;
 
 function parseArgs(argv) {
   const input = argv[0];
   const opt = {
     out: 'cuts-out', rate: 0, from: 0, dur: 0,
     threshold: 'auto', minGap: 0.35, height: 0,
-    refine: true, spike: true, ffmpeg: undefined, name: '',
+    refine: true, spike: true, gradual: true, ffmpeg: undefined, name: '',
   };
   const num = (raw, name) => {
     const v = Number(raw);
@@ -78,6 +78,7 @@ function parseArgs(argv) {
       }
       case '--no-refine': opt.refine = false; break;
       case '--no-spike': opt.spike = false; break;
+      case '--no-gradual': opt.gradual = false; break;
       case '-h':
       case '--help':
         console.log(USAGE);
@@ -195,6 +196,13 @@ async function main() {
 
   // ---- 与 pipeline 同序：极静素材兜底 → 窗口细扫
   let cuts = scan.cuts;
+  // 长时差那一路（叠化/淡入淡出）在不剪辑的实拍素材上很容易误报（手持漂移 + 风吹树叶/云），
+  // 关掉它只留帧差硬切。
+  if (!opt.gradual) {
+    const before = cuts.length;
+    cuts = cuts.filter((c) => !c.kind);
+    console.log(`[gradual] 已关闭长时差检测：-${before - cuts.length} 刀`);
+  }
   if (opt.spike && scan.stats.length > 20) {
     const perSec = cuts.length / Math.max(1, winDur);
     if (perSec < 0.25) {

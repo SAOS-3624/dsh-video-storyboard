@@ -90,3 +90,48 @@ test('attachSheetImages：有 attachments 时正常提交每张图', async () =>
   assert.deepEqual(saved, ['storyboard-1.png', 'storyboard-2.png']);
   assert.equal(images.length, 2);
 });
+
+/* ------------------------------------------------------------------ this 绑定 */
+
+/**
+ * 新版宿主的 `attachments.saveImage` 内部读 `this.compression`（0.2.1-rc.5）。
+ * 把方法从服务上取下来裸调 → `this` 是 undefined →
+ * `Cannot read properties of undefined (reading 'compression')`。
+ *
+ * 用户实报（2026-11-01，B 站评论）：所有要出图的工具在"存成附件"最后一步报这个错。
+ * 所以调用点必须 `.call(attachments, ...)`，不能 `const f = svc.m; f(...)`。
+ */
+function ctxWithThisBoundService(extra = {}) {
+  const attachments = {
+    compression: 'zstd',
+    calls: [],
+    async saveImage({ data, mediaType, name }) {
+      // 这正是宿主内部会做的事：读实例上的配置
+      if (!this || typeof this.compression !== 'string') {
+        throw new TypeError("Cannot read properties of undefined (reading 'compression')");
+      }
+      this.calls.push({ bytes: data?.length ?? 0, mediaType, name });
+      return { attachmentId: `${name}#${this.compression}`, mediaType, bytes: data?.length ?? 0 };
+    },
+    ...extra,
+  };
+  return { get: (n) => (n === 'attachments' ? attachments : undefined), _svc: attachments };
+}
+
+test('attachSheetImages: saveImage 必须带着服务实例调用（新版宿主读 this.compression）', async () => {
+  const ctx = ctxWithThisBoundService();
+  const result = { sheets: [{ sheet: 1, png: Buffer.alloc(64) }, { sheet: 2, png: Buffer.alloc(32) }] };
+  const images = await attachSheetImages(ctx, result);
+  assert.equal(images.length, 2);
+  assert.equal(images[0].attachmentId, 'storyboard-1.png#zstd', 'this 丢了就会拼不出这个 id');
+  assert.deepEqual(ctx._svc.calls.map((c) => c.name), ['storyboard-1.png', 'storyboard-2.png']);
+  assert.equal(ctx._svc.calls[0].mediaType, 'image/png');
+});
+
+test('attachSheetImages: 服务不存在时给可读错误，不是 TypeError', async () => {
+  const ctx = { get: () => undefined };
+  await assert.rejects(
+    () => attachSheetImages(ctx, { sheets: [{ sheet: 1, png: Buffer.alloc(8) }] }),
+    /no `attachments` service/,
+  );
+});
