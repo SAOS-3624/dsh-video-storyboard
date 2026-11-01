@@ -106,6 +106,21 @@ test('bestPlan: 16 格会给"四张满格"，所以正常路径要用 solve(tier
   assert.equal(p.bins, 1, '同样 16 格、统一 1/4 档，一张就装下了');
 });
 
+test('rowOptions 缓存键必须区分 grow / stretch', () => {
+  // 先算 stretch=0.2 的 [3,3]，再算 0.3；后者应该出现 flat 行（行高 = 420/1.3 ≈ 323）。
+  const a = rowOptions([3, 3], [3, 4, 5, 6, 7, 8], 0.2, true);
+  const b = rowOptions([3, 3], [3, 4, 5, 6, 7, 8], 0.3, true);
+  assert.ok(a.some((o) => o.flat), '0.2 应该能拉平');
+  assert.ok(b.some((o) => o.flat && Math.abs(o.c - 420 / 1.3) < 1),
+    '0.3 的 flat 行高不能被 0.2 的缓存顶掉');
+
+  // grow 决定 3 档能不能升到 420；不能升的时候不该出现 420 这个候选。
+  const up = rowOptions([3], [3, 4, 5, 6, 7, 8], 0.2, true);
+  const noUp = rowOptions([3], [], 0.2, true);
+  assert.ok(up.some((o) => Math.abs(o.c - 420) < 1e-9), '允许升档时应有 420 行高');
+  assert.ok(!noUp.some((o) => Math.abs(o.c - 420) < 1e-9), '禁止升档时不能命中允许升档的缓存');
+});
+
 test('性能: 96 帧（长片概览规模）求解 < 50ms', () => {
   const tiers = Array.from({ length: 96 }, (_, i) => 2 + (i % 5));
   const t0 = performance.now();

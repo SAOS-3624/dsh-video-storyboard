@@ -47,11 +47,10 @@ const ROW_CACHE = new Map();
 const ROW_CACHE_MAX = 20000;
 
 export function rowOptions(tiers, grow = DEFAULT_GROW, stretch = 0.2, fillRows = true) {
-  // 数值键：档位 0..8 编成 9 进制（0 = 自由尺寸），再带上长度和参数，避免字符串拼接的开销
-  let key = tiers.length;
-  for (let i = 0; i < tiers.length; i += 1) key = key * 9 + tiers[i];
-  key = key * 3 + (stretch > 0.15 ? 1 : 0);
-  key = key * 2 + (fillRows ? 1 : 0);
+  // 键必须带上**所有**会改变结果的参数：grow 决定能否升档，stretch 决定 flat 行的
+  // 行高；以前只带 stretch 的"是否 >0.15"一档，先算 0.2 再算 0.3 会直接命中旧值。
+  // 用字符串键换正确性：这里每次调用最多 8 个数，缓存命中的字符串拼接成本远低于重算。
+  const key = `${tiers.join(',')}|${grow.join(',')}|${stretch}|${fillRows ? 1 : 0}`;
   const hit = ROW_CACHE.get(key);
   if (hit !== undefined) return hit;
   const val = rowOptionsRaw(tiers, grow, stretch, fillRows);

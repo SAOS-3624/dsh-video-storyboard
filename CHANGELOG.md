@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed — rowOptions 缓存键漏了 grow / 精确 stretch
+
+`pack.rowOptions()` 的缓存键只带了 `stretch > 0.15` 这一档和档位序列，
+没带 `grow` 与具体的 `stretch` 值。先算 `stretch=0.2` 再算 `0.3` 会直接命中旧行高，
+换了 `grow`（是否允许 3 档升到 1/2）也会拿到上一组的结果。现在键包含全部四个影响结果的参数，
+并加了回归测试。
+
 ## [0.6.0] - 2026-11-01
 
 > **破坏性重构**：`cells` / `sheets` / `need` / `maxPerSheet` / `adaptive` / `tileFirst` /
