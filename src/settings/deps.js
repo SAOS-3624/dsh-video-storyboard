@@ -11,6 +11,7 @@ import { connect } from 'node:net';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import { DEFAULT_FFMPEG, DEFAULT_FFPROBE } from '../storyboard/probe.js';
 import { dshHome, readVideoSettings } from './config.js';
 
 const run = promisify(execFile);
@@ -70,8 +71,8 @@ function hostSpeech(ctx, env) {
 export async function checkEnvironment(ctx, env = process.env) {
   const python = await firstOf([['python', ['--version']], ['py', ['--version']]]);
   const ytdlp = await firstOf([['yt-dlp', ['--version']], ['python', ['-m', 'yt_dlp', '--version']]]);
-  const ffmpeg = await version('ffmpeg', ['-version']);
-  const ffprobe = await version('ffprobe', ['-version']);
+  const ffmpeg = await version(DEFAULT_FFMPEG, ['-version']);
+  const ffprobe = await version(DEFAULT_FFPROBE, ['-version']);
   const speech = hostSpeech(ctx, env);
   const video = readVideoSettings(env);
   const port = video.browserPort;
