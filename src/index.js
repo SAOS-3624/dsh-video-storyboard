@@ -25,6 +25,7 @@
 
 // 四个视频识别工具各自的注册入口：契约、handler、注册都在 src/storyboard/ 里。
 import { storyboardTools } from './storyboard/register.js';
+import { createSettingsPage } from './settings/server.js';
 
 export const name = 'dsh-video-storyboard';
 /**
@@ -96,6 +97,18 @@ async function registerAll(ctx) {
   // 工具注册成功了，解绑函数却从来没登记过（插件卸载时不会解绑，而且没人知道出过错）。
   const disposers = [];
   disposers.push(...tools.map((tool) => ctx.tools.register(tool)));
+
+  // 设置页是可选能力：没有本机 webServer 的 CLI 宿主照常只注册五个工具。
+  try {
+    const settings = createSettingsPage({ ctx, env: process.env, log: (message) => ctx?.logger?.warn?.(message) });
+    if (settings) {
+      disposers.push(settings.dispose);
+      disposers.push(ctx.tools.register(defineTool(settings.tool)));
+    }
+  } catch (e) {
+    try { ctx?.logger?.warn?.('[dsh-video-storyboard] settings page failed: ' + String(e?.message ?? e)); } catch { /* ignore */ }
+  }
+
   return () => {
     for (const dispose of disposers.reverse()) dispose?.();
   };
