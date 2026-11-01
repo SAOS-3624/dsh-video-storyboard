@@ -134,7 +134,7 @@ export function createSettingsPage({ ctx, env = process.env, log = () => {} } = 
     description: [
       'Open the local video_storyboard settings page: ASR on/off, API key,',
       'OpenAI-compatible endpoint/model/language, browser debugging port, and',
-      'a read-only dependency check with download instructions.',
+      'a read-only dependency check with official download links and copyable commands.',
       'Returns a tokenized local URL; secrets are never returned.',
     ].join(' '),
     parameters: {},
