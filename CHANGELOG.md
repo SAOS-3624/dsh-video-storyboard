@@ -1,21 +1,49 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.2] - 2026-11-01
 
-### Fixed — 混合档位同一行的 1px 重叠
-
-`toRects()` 的水平取整修正按 `y + h` 给行分组。混合档位的一行里，0 档补位格和
-1 档格高度不同，会被分到两组，左右边缘差 1px 时修不掉。现在同一视觉行只按 `y` 分组，
-并加了 `[2,0,1,0,0,0]` 的回归测试。
+> 主题：**把社区提的 6 个 PR 收进来**（4 修 bug + 2 加功能），每个都先单独 rebase 到 0.6.1
+> 跑一遍、再合到一个集成分支上跑全量 494 条测试，最后才落到 main。
+> **基线一处没动**：`strategy:"auto"` 的默认代价、`pack.solve` 的排布口径、图片 token 换算
+> 都还是 0.6.1 的，接着提的 PR 可以照旧直接落。
 
 ### Added
 
-- **`scripts/reference-server-sherpa.py`** —— 本机 ASR 服务端的最小参考实现（sherpa-onnx 2.x +
+- **插件设置页**（#60 / closes #59）—— DSH 设置页里直接渲染 ASR（baseUrl / model / language /
+  key / 开关）、浏览器端口与启动开关、依赖自检；同一套 API 也支撑一份独立 HTML 页
+  （`src/settings/server.js` 注册在宿主 `webServer` 上，页面 URL 带 32 字节随机 token）。
+  **key 只写不读**：`GET /state` 只回 `hasKey`，写入时空串表示保持原值。没有 `webServer` 的
+  CLI 宿主 `createSettingsPage()` 返回 `null`，工具数仍是 5 个、行为不变。
+  顺带把 `DSH_ASR_ENABLED=0` / `asr.json {"enabled":false}` 接进 `canTranscribe()` —— 以前这个
+  开关只影响解析、不影响实际门，关掉 ASR 得靠"没配 key"。
+- **宿主 `speechToText` 优先**（#58 / closes #57）—— 桌面版自带 SenseVoice 时，按窗口切 16k
+  单声道 WAV 直接交给宿主，不再要求 `asr.json` / 云端 key。宿主 provider 没有词级时间戳，
+  所以一块音频一条台词（`from`/`to` = 窗口边界）。缓存身份写 `asr2|host:speechToText|…`，
+  和云端 HTTP 的不串用。CLI / 其他宿主没有这个服务时**原样走旧路径**。
+- **`scripts/reference-server-sherpa.py`**（#62）—— 本机 ASR 服务端的最小参考实现（sherpa-onnx 2.x +
   paraformer / ct-transformer / silero VAD，只依赖标准库 + numpy）。补上 `docs/CONFIG.zh.md` §7.1
   「自己写」那条路缺的那份可对照代码：`--models` 目录内按已知文件名自动发现，也可逐个覆盖路径，
   `--check` 只验模型能否加载。两条降级边界按文档口径实现 —— 标点加载或调用失败照常 200 + 不带标点的
   文本，VAD 缺失或运行期出错退回整段一次识别。`scripts/` 不在 `files` 里，所以不进 npm 包，
   只是给人复制出去用的。
+
+### Fixed
+
+- **混合档位同一行的 1px 重叠**（#67 / closes #66）—— `toRects()` 的水平取整修正按 `y + h`
+  给行分组，混合档位的一行里 0 档补位格和 1 档格高度不同会被拆成两组，左右边缘差 1px 就修不掉。
+  改成只按**取整后的上边缘**分组（和下面垂直那趟同一个口径），回归测试用 `[2,0,1,0,0,0]`。
+- **prefetch 不读内嵌字幕**（#56 / closes #55）—— `prefetchTranscript()` 在"没有站点 CC"之后
+  直接跳到 `canTranscribe()`，本地片明明带字幕轨、只要没配 ASR key 就报 `no-key`。
+  现在和 `resolveTranscript()` 同一级：站点 CC → **内嵌字幕** → 缓存 → ASR。
+  同时把 `cookies` 传给下载（以前只给站点 CC 用，登录片在 prefetch 里退成匿名请求）。
+
+### Closed without merge
+
+- **#54 / #63**（`saveImage` 丢 receiver）—— 0.6.0 已用 `saveImage.call(attachments, …)` 修好，
+  0.6.1 也在跑；两个 PR 的思路（`inject: { required, optional }`）等价，但会和 0.5.9 那次
+  "硬 inject 导致装插件卡死"的教训撞车，main 走的是 `ctx.get()` 探测 + `.call` 绑定。
+- **#65**（`rowOptions` 缓存键）—— 0.6.1 已经把键换成
+  `` `${tiers}|${grow}|${stretch}|${fillRows}` `` 字符串（#64），数值累乘会越界的问题一并解决。
 
 ## [0.6.1] - 2026-11-01
 

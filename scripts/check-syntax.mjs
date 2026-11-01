@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 
-const DIRS = ['src', 'bin', 'scripts', 'examples'];
+const DIRS = ['src', 'lib', 'bin', 'scripts', 'examples'];
 const EXT = /\.(mjs|js)$/;
 
 // **必须递归**：src/tools/ 这种子目录里的文件不扫，等于给自己留了个"语法错了但 check 通过"的洞。
