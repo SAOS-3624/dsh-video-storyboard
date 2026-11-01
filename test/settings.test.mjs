@@ -163,8 +163,10 @@ test('settings: DSH 设置 tab 的 client bundle 可注册', () => {
   assert.equal(pkg.dsh.client.platform, 'web');
   assert.equal(pkg.exports['./client'], './lib/client.js');
   let handoff = null;
+  const clientSource = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
+  assert.equal(clientSource.includes('iframe'), false, '设置页必须是原生表单，不能套 iframe');
   const sandbox = { window: { __ModuleLoader__: { load: (h) => { handoff = h; } } }, globalThis: {}, console };
-  runInNewContext(readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
+  runInNewContext(clientSource, sandbox);
   const mod = handoff.factory(() => ({ createElement: () => ({}) }));
   const registered = [];
   mod.apply({ slots: { inject(_name, callback) { callback(); }, register(options, component) { registered.push({ options, component }); } } });

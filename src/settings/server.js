@@ -1,9 +1,8 @@
 /**
  * settings/server.js — 插件自己的本机设置页与 API。
  *
- * 页面本体仍是独立 HTML（表单、自检、下载按钮都在这一份里）；为了让用户能在
- * DSH 设置里找到，另挂一个极小的 lazy-CJS 半侧：只把 tokenized URL 塞进 iframe，
- * 不重做表单。同一地址也仍由 video_storyboard_settings 工具返回。
+ * 页面本体仍是独立 HTML，供工具返回的 URL 直接打开；DSH 里的设置页由
+ * lib/client.js 用原生 React 表单渲染，直接调用同一套 API，不再套 iframe。
  *
  * 安全边界：
  *  - 只有本机 webServer 存在时才注册；
@@ -149,8 +148,8 @@ export function createSettingsPage({ ctx, env = process.env, log = () => {} } = 
     description: [
       'Open the local video_storyboard settings page: ASR on/off, API key,',
       'OpenAI-compatible endpoint/model/language, browser debugging port, and',
-      'a read-only dependency check with official download links and copyable commands.',
-      'Returns a tokenized local URL; the same page is a Settings > Built-in plugins tab in the Web GUI.',
+      'a read-only dependency check with official download buttons.',
+      'Returns a tokenized local URL; the Web GUI also renders the same settings natively in the bundle detail page and Settings > Built-in plugins.',
       'Secrets are never returned.',
     ].join(' '),
     parameters: {},
