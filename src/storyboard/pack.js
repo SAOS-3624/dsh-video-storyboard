@@ -47,11 +47,12 @@ const ROW_CACHE = new Map();
 const ROW_CACHE_MAX = 20000;
 
 export function rowOptions(tiers, grow = DEFAULT_GROW, stretch = 0.2, fillRows = true) {
-  // 数值键：档位 0..8 编成 9 进制（0 = 自由尺寸），再带上长度和参数，避免字符串拼接的开销
-  let key = tiers.length;
-  for (let i = 0; i < tiers.length; i += 1) key = key * 9 + tiers[i];
-  key = key * 3 + (stretch > 0.15 ? 1 : 0);
-  key = key * 2 + (fillRows ? 1 : 0);
+  // **键必须覆盖所有影响结果的参数**（#64）：以前只编码 "stretch > 0.15" 这个布尔，
+  // `grow` 完全没编 —— 于是「允许升档」和「不允许升档」两次调用会命中同一份候选，
+  // 拿到别的情况下算出来的行高（flat 行高直接依赖精确的 stretch 值）。
+  // 顺带：原来的数值键是 `key = key * 9 + tiers[i]` 累乘，60 档时早就越过
+  // Number 的安全整数范围了，碰撞是迟早的事。改成字符串键，正确性优先。
+  const key = `${tiers.join(',')}|${grow.join(',')}|${stretch}|${fillRows ? 1 : 0}`;
   const hit = ROW_CACHE.get(key);
   if (hit !== undefined) return hit;
   const val = rowOptionsRaw(tiers, grow, stretch, fillRows);
@@ -128,7 +129,8 @@ export function precompute(tiers, grow = DEFAULT_GROW, stretch = 0.2, fillRows =
  * 精确 DP：给定档位序列，求占用率最高的按行排布。
  *
  * 目标函数是 `Σ面积 − 箱数 × 每箱面积 × 1.02`。
- * 那个 1.02 是**箱子本身的代价**：多一张图就多一份 384 token 的图像开销，
+ * 那个 1.02 是**箱子本身的代价**：多一张图就多付一份图像的钱（按像素算，见 tiers.imageTokens）。
+ * 这个数仍是按旧口径（384/张）调出来的，按像素定价重估属于下一步（方案 P3），先别动。
  * 所以两套排布占用率相同时必须选箱数少的。没有它的时候
  * `[1,1]` 会被排成"两张各 100%"，而正确解是"一张里并排两个 1/2"。
  *

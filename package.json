@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-storyboard",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Turn a video into storyboard images you can cite: one frame per shot, cell size follows cut density (1/1 … 1/8), row-packed into as few images as possible, with a timestamped index the model can quote and a tier map it can override.",
   "keywords": [
     "dsh",
@@ -77,7 +77,8 @@
     "check": "node scripts/check-syntax.mjs",
     "doctor": "node bin/doctor.mjs",
     "asrcheck": "node bin/asr-check.mjs",
-    "guard": "node scripts/guard-publish.mjs"
+    "guard": "node scripts/guard-publish.mjs",
+    "verify-tokens": "node scripts/verify-image-tokens.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.7"

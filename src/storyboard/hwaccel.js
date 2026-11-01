@@ -75,8 +75,3 @@ export async function resolveHwaccel({ ffmpegPath, input, env = process.env, tim
   probeCache.set(key, null);
   return null;
 }
-
-/** 测试用：清掉进程内缓存 */
-export function _resetHwaccelCache() {
-  probeCache.clear();
-}

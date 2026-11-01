@@ -6,7 +6,7 @@
  * 「高细节必须开 OCR」「manifest 必须保留 OCR 结果」都能被测试盯住。
  */
 
-import { ocrFor } from './board.js';
+import { defaultBoardStrategy, ocrFor } from './board.js';
 
 /** CLI 的 --detail 是否该开 OCR（与工具路径共用 board.ocrFor 的唯一判据）。 */
 export function cliOcr(opt = {}) {
@@ -38,8 +38,8 @@ export function runOptionsFromCli({
       if (typeof raw !== 'string' || !raw.trim()) return undefined;
       try { return JSON.parse(raw); } catch { return undefined; }
     })(),
-    // 不给就让 pipeline 用自己的默认（compact）；旧名由 resolveStrategy 归一化
-    strategy: opt.strategy || undefined,
+    // 不给就用 board 的默认（auto，可被 DSH_STORYBOARD_AUTO 关掉）；旧名由 resolveStrategy 归一化
+    strategy: opt.strategy || defaultBoardStrategy(),
     integral: opt.integral === 'off' ? false : (opt.integral === 'on' ? true : undefined),
     integralSeconds: Number(opt['integral-seconds']) || undefined,
     threshold: opt.threshold === 'auto' ? 'auto' : Number(opt.threshold),
@@ -51,6 +51,8 @@ export function runOptionsFromCli({
     burn: String(opt.burn),
     transcript: String(opt.transcript),
     textOnly,
+    // --dry-run：只扫描+排布，回报切点数与每档张数，不出图（与工具的 dryRun 同一路径）
+    planOnly: opt['dry-run'] === true,
     // 这一段是 #44 的核心：detail=high 必须把 ocr=true 交给 pipeline，
     // 否则 CLI 只改了清单字数，硬字幕校正从入口起就没开。
     ocr: cliOcr(opt),

@@ -31,8 +31,9 @@ import { tagCuts } from './flash.js';
 import { rememberSegments } from './locate.js';
 import { isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import {
-  BIN_COST, DEFAULT_STRATEGY, MARK_BOOST, STRATEGIES, applyMarkBoost, applyStrategy, applyTierMap,
-  fitCanvas, resolveStrategy,
+  AUTO_CANDIDATES, AUTO_STRATEGY, BIN_COST, DEFAULT_STRATEGY, MARK_BOOST, READABILITY_ORDER, STRATEGIES,
+  applyMarkBoost, applyStrategy, applyTierMap, autoSheetCap,
+  fitCanvas, pickAutoStrategy, resolveStrategy,
   framesFromBounds, integralMarks, levelAt, levelCurve, readabilityOf, tierHistogram,
 } from './tiers.js';
 import { solve, toRects } from './pack.js';
@@ -84,6 +85,9 @@ export async function runStoryboard(opts) {
     // 取 0.75×核数：16 核 → 12，比 8 快 14%，又不像 24 那样把机械盘和内存带宽打满。
     frameConcurrency = Math.min(12, Math.max(2, Math.floor(cpus().length * 0.75))),
     strategy: strategyRaw = DEFAULT_STRATEGY,
+    // 只预演：扫描 + 排布，**不取帧、不出图、不转写**。用来在花第一张图之前
+    // 告诉调用方"这段有多少刀、每个档位要几张图"。同一次扫描有缓存，所以第二次调用很便宜。
+    planOnly = false,
     // **0 = 不封顶**。帧数由切点决定：一部长片几千刀就几千帧，用户自己承担解码时间。
     maxFrames = 0,
     // 张数上限：zoom / 陪看要**一张图**，概览默认也不封顶（帧多自然张多）。
@@ -115,7 +119,10 @@ export async function runStoryboard(opts) {
     textOnly = false,
     precomputed = null,
     // 出图几何：像素预算 / 画布边长上限。两个都由 board.js 收口后传进来。
+    // 这里的 640k 只服务"绕过 board 直接调 runStoryboard"的人；board / zoom / 陪看都会显式传。
     budget = 640_000,
+    // 预算被地板抬过时，调用方给的原值（只用来在清单里说明，不参与计算）
+    budgetFloorRaisedFrom = null,
     maxCanvasSide = 800,
     // 只传 from 时自动推下一段：segment 秒。0 = 看到片尾（短片默认）。
     segment = 0,
@@ -128,9 +135,13 @@ export async function runStoryboard(opts) {
   if (!PICK_MODES.includes(pick)) throw new RangeError(`pick must be one of ${PICK_MODES.join('/')}`);
   if (!BURN_MODES.includes(burn)) throw new RangeError(`burn must be one of ${BURN_MODES.join('/')}`);
   // 旧名（quality / balanced / saver / frugal / thrifty / ultra）在这里换成新名，不报错
-  const strategy = resolveStrategy(strategyRaw);
+  const resolvedStrategy = resolveStrategy(strategyRaw);
+  // `auto` 不是一种尺寸策略，而是一个决策器：先按"紧凑"把帧和档位算出来，
+  // 再用 pickAutoStrategy 在 compact/standard/full 里挑一个（见下面的 auto 段）。
+  const autoStrategy = resolvedStrategy === AUTO_STRATEGY;
+  const strategy = autoStrategy ? DEFAULT_STRATEGY : resolvedStrategy;
   if (!STRATEGIES[strategy]) {
-    throw new RangeError(`strategy must be one of ${Object.keys(STRATEGIES).join(' / ')}`
+    throw new RangeError(`strategy must be one of ${[AUTO_STRATEGY, ...Object.keys(STRATEGIES)].join(' / ')}`
       + ` (old names quality/balanced/saver/frugal/thrifty/ultra still accepted)`);
   }
   // 扫描期最小间隔：调用方显式给了就用它，否则用策略自带的（只有"恭喜发财档"带 0.35）
@@ -184,7 +195,7 @@ export async function runStoryboard(opts) {
   // **串行放在扫描前面**（试过并行，更慢）：两条 ffmpeg 一起跑时会和扫描的 cuda 解码
   // 抢 IO 和 CPU —— 实测并行让 scan 从 2.2s 涨到 3.7s，而 audio 自己只有 0.9s，
   // 净亏 0.6s。0.9s 已经压到地板（两条 ffmpeg 的启动各 240ms），没必要再动。
-  const needAudio = info.hasAudio && !textOnly && audioStrip !== false;
+  const needAudio = info.hasAudio && !textOnly && !planOnly && audioStrip !== false;
   const audio = needAudio
     ? await analyzeAudio({ input, ffmpegPath, start: winStart, end: winStart + winDur })
     : null;
@@ -193,8 +204,9 @@ export async function runStoryboard(opts) {
   mark('audio');
 
   // 转写在**扫描的同时**跑：它只依赖音频静音位置，不依赖切点。
+  // planOnly 是"先告诉我多少刀"的预演：它连台词都不需要，转写直接关掉（否则要等一整轮 ASR）。
   const transcriptP = resolveTranscript({
-    input, info, sourceInfo, fetchOptions, transcript, transcriptFile,
+    input, info, sourceInfo, fetchOptions, transcript: planOnly ? 'off' : transcript, transcriptFile,
     winStart, winDur, silences, ffmpegPath, hotwords, asrKey, asrMaxChunk, cache,
   }).then((r) => {
     asrLife = r.asrLife;
@@ -348,6 +360,7 @@ export async function runStoryboard(opts) {
       cuts: absCuts,
       start: winStart,
       equivSeconds: integralSeconds,
+      fps: info.fps,          // 阈值是绝对值，必须知道"一帧是多长"（见 integralMarks）
     })
     : [];
 
@@ -359,8 +372,15 @@ export async function runStoryboard(opts) {
   const curve = levelCurve({ duration: winDur, fps: info.fps, cuts: absCuts });
   const canvas = fitCanvas(info.aspect, { maxSide: maxCanvasSide, budget });
   // 排布沿用"按行凑满"（fillRows: true）：放开它虽然填充率更高，但**张数会涨**（5 → 7），
-  // 那是舍本逐末 —— 一张图固定 384 token，张数才是成本。`fillRows:false` 保留给调用方自己选。
-  const PACK = { stretch: 0.2, binCost: BIN_COST[strategy] ?? 1.02, fillRows: true };
+  // 那是舍本逐末 —— 一张图的钱按它自己的像素算（tiers.imageTokens）：多一张就多一份像素地板
+  // 加上填充损失，所以"少开一张"仍然划算，但别再把它当成常数。`fillRows:false` 留给调用方自己选。
+  //
+  // PACK / activeStrategy 是**可变的**：auto 要拿同一批帧把三个候选各排一次再挑，
+  // 所以 build() 读的是当前生效的那一对，而不是闭包里钉死的一个。改完这里必须把
+  // activeStrategy/PACK 还原成最终选中的那个，后面 trimTail / fillGaps 还在用。
+  const packFor = (name) => ({ stretch: 0.2, binCost: BIN_COST[name] ?? 1.02, fillRows: true });
+  let activeStrategy = strategy;
+  let PACK = packFor(activeStrategy);
   // 低于 minFrames 就把最长的段反复二等分（zoom / 陪看用）
   const ensureMinFrames = (segsIn, min) => {
     let out = segsIn;
@@ -392,7 +412,7 @@ export async function runStoryboard(opts) {
     // 档位 = 切点密度；假切点段额外 +2 档（那里画面在连续变化，一帧代表不了多久）
     const base = sg.map((s) => levelAt(curve, s.t - winStart));
     const raw = applyMarkBoost(base, sg);
-    let tr = applyStrategy(raw, strategy);
+    let tr = applyStrategy(raw, activeStrategy);
     tr = applyTierMap(tr, tierMap);
     if (uniformTier === 'auto') {
       // zoom 的语义是"一张图里 n 个格子看清楚"，不是"按内容密度分配大小"：
@@ -402,27 +422,102 @@ export async function runStoryboard(opts) {
     }
     return { segs: sg, raw, tiers: tr, plan: solve(tr, { stretch: 0.2, ...PACK }) };
   };
-  let built = build(capFrames);
-  if (Number.isFinite(capSheets) && built.plan.bins > capSheets) {
-    // 张数对帧数**近似单调**（帧少 → 张少），所以二分找"能装进 maxSheets 的最多帧数"。
-    // 别按比例一步砍：73 帧 5 张要 4 张，一步砍到 34 帧 3 张 —— 白白丢掉一半帧。
+  const minCellOf = (b) => {
+    const minW = Math.min(...b.plan.cells.map((c) => Math.round(c.w * canvas.width)));
+    const minH = Math.min(...b.plan.cells.map((c) => Math.round(c.h * canvas.height)));
+    return { minW, minH, readability: readabilityOf(minW, minH) };
+  };
+  /** 这一版的格子还认不认得出"是同一个镜头"（auto 的可读性底线）。 */
+  const readableOf = (b) => {
+    const m = minCellOf(b);
+    return READABILITY_ORDER.indexOf(m.readability) >= READABILITY_ORDER.indexOf('shot');
+  };
+  // 张数对帧数**近似单调**（帧少 → 张少），所以二分找"能装进 cap 的最多帧数"。
+  // 别按比例一步砍：73 帧 5 张要 4 张，一步砍到 34 帧 3 张 —— 白白丢掉一半帧。
+  //
+  // **先压档位，再减帧**：一张图装不下，多数时候不是"帧太多"而是"格子太大"——
+  // 1 档的帧占满整张画布，一张图就只能放它一个。实测一条 191 刀的 5 分钟素材，
+  // 161 帧里有 26 帧是 1 档，不封顶要 59 张；只减帧不减档，压到 1 张时就只剩 **1 帧**，
+  // 等于什么都没看。所以先把全部帧逐档加粗（保留时间覆盖），实在压不进去才动帧数。
+  const squeezeTiers = (b, cap) => {
+    if (!(Number.isFinite(cap) && cap > 0)) return b;
+    if (b.plan.bins <= cap) return b;
+    for (let bump = 1; bump <= 7; bump += 1) {
+      const tr = b.tiers.map((t) => (Number(t) === 0 ? 0 : Math.min(8, Number(t) + bump)));
+      const p = solve(tr, { stretch: 0.2, ...PACK });
+      if (p.bins <= cap) return { ...b, tiers: tr, plan: p };
+    }
+    return null;                                  // 全压到 1/8 还装不下 → 交给减帧
+  };
+  const buildWithin = (strat, cap) => {
+    activeStrategy = strat;
+    PACK = packFor(strat);
+    const b0 = build(capFrames);
+    // 不封顶 / 本来就装得下：原样返回（这条路径必须逐像素与 0.6.0 相同）
+    if (!(Number.isFinite(cap) && cap > 0 && b0.plan.bins > cap)) return b0;
+    const squeezed = squeezeTiers(b0, cap);
+    if (squeezed) return squeezed;
     let lo = 1;
-    let hi = built.segs.length;
+    let hi = b0.segs.length;
     let best = null;
     while (lo <= hi) {
       const mid = Math.floor((lo + hi) / 2);
-      const b = build(mid);
-      if (b.plan.bins <= capSheets) {
-        if (!best || b.segs.length > best.segs.length) best = b;
+      const c = build(mid);
+      const f = squeezeTiers(c, cap);             // 减完还要再压一遍档位
+      if (f) {
+        if (!best || f.segs.length > best.segs.length) best = f;
         lo = mid + 1;
       } else {
         hi = mid - 1;
       }
     }
-    if (best) built = best;
+    return best ?? b0;
+  };
+
+  // ---- 自动选档（strategy:'auto'）
+  //
+  // 两条规则叠在一起，对应两件不同的事：
+  //   1. **在预算内挑最省的那档**：同一笔钱里 compact 装得下更多帧，读到的信息最多；
+  //      只有当它的最小格已经认不出东西（< shot）时，才往 standard / full 退（格子变大、帧变少）。
+  //   2. **张数按时长定**（autoSheetCap）：一段 5 分钟的视频就是 1~2 张图，不管是 3 刀还是
+  //      300 刀 —— 这是用户要的"同一时长花同样的钱"。
+  //
+  // 2 是**目标，不是铁律**：真压缩到最小格成了色块，就一次翻倍再试（最多三轮），
+  // 宁可多花一张图也不能交出一张"什么都看不出来"的图。
+  let autoPlan = null;
+  // 压张数这件事统一放在 fillGaps **之后**（那时才看得到真实的格子尺寸），
+  // 这里先记住选中的档位和"不封顶会是几张"。
+  let autoName = null;
+  let autoTargetCap = 0;
+  let built;
+  if (autoStrategy) {
+    const perImage = Number(process.env.DSH_STORYBOARD_SECONDS_PER_IMAGE);
+    autoTargetCap = autoSheetCap(winDur, {
+      ...(Number.isFinite(perImage) && perImage > 0 ? { secondsPerImage: perImage } : {}),
+    });
+    // 先在"不封顶"下比一次：这是钱不是问题时该给的画面，也是能退回去的那一版
+    const natural = AUTO_CANDIDATES.map((name) => {
+      const b = buildWithin(name, Infinity);
+      return { name, bins: b.plan.bins, frames: b.segs.length, ...minCellOf(b), built: b };
+    });
+    const nat = natural.find((v) => v.name === (pickAutoStrategy(natural) ?? strategy)) ?? natural[0];
+    autoName = nat.name;
+    activeStrategy = autoName;
+    PACK = packFor(activeStrategy);
+    built = nat.built;
+    autoPlan = {
+      chosen: autoName,
+      targetCap: autoTargetCap,
+      capSheets: 0,
+      secondsPerImage: nat.bins > 0 ? +(winDur / nat.bins).toFixed(0) : null,
+      options: natural.map(({ built: _b, ...rest }) => rest),
+    };
+  } else {
+    built = buildWithin(activeStrategy, capSheets);
   }
+
   // 尾部瘦身：最后一张只装 1~4 帧、填充率又低于 65% 时，把那几帧的档位加一档重排。
-  // 一张图 = 384 token，换最后几帧小一档是划算的（片尾标题 + 演职员表各占半张图，实测很常见）。
+  // 一张图 ≈233 token（800×450），换最后几帧小一档是划算的（片尾标题 + 演职员表各占半张图，实测很常见）。
   // 只加档、不减帧：时间覆盖和"不封顶"都不受影响。
   const trimTail = (b) => {
     const lastBin = b.plan.cells.filter((c) => c.bin === b.plan.bins - 1);
@@ -469,7 +564,7 @@ export async function runStoryboard(opts) {
   const fillGaps = (b) => {
     let cur = b;
     const startFrames = b.segs.length;
-    // **不许因为补位多开图**：一张图 384 token，补位只该在现有张数里找缝，不能拿张数换填充率。
+    // **不许因为补位多开图**：多一张就多付一张的钱（≈233 @800×450），补位只该在现有张数里找缝。
     const binCap = b.plan.bins;
     for (let round = 0; round < 10; round += 1) {
       const fills = binFills(cur.plan);
@@ -628,6 +723,69 @@ export async function runStoryboard(opts) {
   // **显式限帧就不补**：调用方说"最多 4 帧"就是 4 帧，补到 5 帧是违约。
   if (!Number.isFinite(capFrames)) built = fillGaps(built);
 
+  // ---- auto 的张数预算：按时长压，但**不许把画面压成色块**
+  //
+  // 顺序很重要：这一段必须排在 fillGaps 之后 —— 补位会重组格子（减帧、统一尺寸、自由尺寸填缝），
+  // 对着补位之前的布局判断"能不能看清"是自欺。所以：
+  //   1. 先看"不封顶"要几张（0.6.0 的行为）；没超预算就到此为止；
+  //   2. 超了就按 autoSheetCap 算出的张数压，压到最小格还认得出（>= shot）就停；
+  //   3. 一路压到 4 倍预算都认不出（这段切得太快，物理上塞不进），**退回不封顶那一版**，
+  //      并在清单里说明"预算为了可读性让步了" —— 交一张什么都看不出来的图比多花一张更糟。
+  if (autoPlan) {
+    // activeStrategy / PACK 由 buildWithin 自己设（它第一步就设），这里不重复设。
+    const tidy = (cap) => {
+      let b = buildWithin(autoName, cap);
+      b = trimTail(b);
+      if (!Number.isFinite(capFrames)) b = fillGaps(b);
+      return b;
+    };
+    // 预算：调用方显式给的 maxSheets 优先，否则就是 autoSheetCap 那个数。
+    // **不设最低 2 张**：25 秒的片子按 240s/张 就是 1 张，硬抬成 2 张会让
+    // "短视频比 5 分钟片还贵"（56 刀的 many.mp4 曾因此出 4 张）。
+    // 显式 maxSheets 时只试这一个值，不放宽 —— 那是调用方的明确意图。
+    // capSheets 是 Infinity 表示"调用方没给"（不是 0 —— 0 也走这条兜底）。
+    // 别写成 `capSheets > 0`：Infinity > 0 是 true，于是 limit=Infinity、压张数整段被跳过。
+    const explicitCap = Number.isFinite(capSheets);
+    const limit = explicitCap ? capSheets : autoTargetCap;
+    if (built.plan.bins > limit) {
+      const naturalBins = built.plan.bins;
+      let capped = null;
+      let capUsed = 0;
+      const tries = explicitCap ? [limit] : [limit, limit * 2, limit * 4];
+      for (const cap of tries) {
+        if (cap >= naturalBins) break;              // 再放宽就等于不压，没必要
+        const b = tidy(cap);
+        capped = b;
+        capUsed = cap;
+        if (readableOf(b)) break;                   // 压到这个张数还认得出 → 够了
+      }
+      // 显式要求也必须兑现：认不出也压，但清单里说明"这是你要的张数，格子已经很小"
+      if (explicitCap && capped) {
+        built = capped;
+        autoPlan = { ...autoPlan, capSheets: capUsed, forced: true };
+      } else if (capped && readableOf(capped)) {
+        built = capped;
+        autoPlan = { ...autoPlan, capSheets: capUsed };
+      } else if (capped && capped.plan.bins < built.plan.bins) {
+        // 压不出可读的最小格 → 退回不封顶（钱让位给可读性），但要留下原因。
+        // 同时算一下 skim 的张数：那是另一条路（全 1/8、不要假切点、切点按 0.35s 合并），
+        // 张数最少但最糊。不替调用方做决定，只把价码摆出来让它自己选。
+        const skimTiers = applyStrategy(built.raw, 'skim');
+        autoPlan = {
+          ...autoPlan,
+          relaxed: {
+            targetCap: autoTargetCap,
+            triedBins: capped.plan.bins,
+            keptBins: built.plan.bins,
+            cuts: absCuts.length,
+            // 上限：skim 还会丢积分帧 + 合并切点，真实张数只会更少
+            skimBins: solve(skimTiers, packFor('skim')).bins,
+          },
+        };
+      }
+    }
+  }
+
   const { segs, raw: rawTiers, tiers, plan: packed } = built;
 
   // 每格对到帧：seq 就是帧下标（排布不改顺序）
@@ -642,10 +800,23 @@ export async function runStoryboard(opts) {
   }
 
   if (segs.length < absCuts.length + 1) trace.push(`frames-merged:${absCuts.length + 1 + sampleMarks.length}->${segs.length}`);
-  if (strategy !== DEFAULT_STRATEGY) trace.push(`strategy:${DEFAULT_STRATEGY}->${strategy}`);
+  if (autoStrategy) trace.push(`auto:${activeStrategy}`);
+  else if (activeStrategy !== DEFAULT_STRATEGY) trace.push(`strategy:${DEFAULT_STRATEGY}->${activeStrategy}`);
 
   const minCellW = Math.min(...packed.cells.map((c) => Math.round(c.w * canvas.width)));
   const minCellH = Math.min(...packed.cells.map((c) => Math.round(c.h * canvas.height)));
+
+  // fillGaps / trimTail 之后张数与最小格可能变了：把选中的那一档刷新成**实际交付**的数字，
+  // 否则清单里 "auto chose compact — smallest cell 400x250" 会和下一行的 `cell>=…` 对不上。
+  if (autoPlan) {
+    const m = minCellOf(built);
+    autoPlan = {
+      ...autoPlan,
+      secondsPerImage: packed.bins > 0 ? +(winDur / packed.bins).toFixed(0) : null,
+      options: autoPlan.options.map((o) => (o.name === autoPlan.chosen
+        ? { ...o, bins: packed.bins, frames: segs.length, ...m } : o)),
+    };
+  }
 
   const planInfo = {
     // 兼容字段：`cells` 现在是"单张最多几格"（实测值），`sheets` 是张数
@@ -653,14 +824,20 @@ export async function runStoryboard(opts) {
     sheets: packed.bins,
     frames: segs.length,
     produced: segs.length,
-    strategy,
-    strategyNote: STRATEGIES[strategy].note,
+    strategy: activeStrategy,
+    strategyNote: STRATEGIES[activeStrategy].note,
+    // auto 的候选与胜出者：清单要把"换成别的档会贵/便宜多少"说出来，
+    // 否则模型下次还是只能凭感觉选（full 就是这么被选中的）
+    ...(autoPlan ? { auto: autoPlan } : {}),
     // 映射表写进清单：模型自己设的覆盖，复核时要能一眼看到
     ...(tierMap && Object.keys(tierMap).length ? { tierMap } : {}),
     // 清单里要把"不限"说出来：写个 0 会让模型以为只能取 0 帧
     maxFrames: Number.isFinite(capFrames) ? capFrames : 0,
     markBoost: MARK_BOOST,
     budget,
+    // 地板抬升：{ requested: 230000, used: 295936 } —— 清单要说明"比它更小不省钱"
+    ...(budgetFloorRaisedFrom && budgetFloorRaisedFrom !== budget
+      ? { budgetRaisedFrom: budgetFloorRaisedFrom } : {}),
     canvas: { width: canvas.width, height: canvas.height },
     // **最小格**是清单该报的那个数：模型看到的就是最小那格的可读性
     cell: {
@@ -690,6 +867,53 @@ export async function runStoryboard(opts) {
     },
     fps: info.fps,
   };
+
+  // planOnly：只回报"这段有多少刀、每个档位要几张图"，**不出图、不取帧、不转写**。
+  //
+  // 这是"先告诉模型切点数量，再让它选档位"的那一半：一次纯文本调用（扫描有缓存，第二次几乎免费），
+  // 换来的是模型不必靠猜——它手里的 full / standard / compact 三行张数就是真实代价。
+  // 顺带把 skim 也列出来（近似值：它还会丢积分帧、合并切点，所以真实张数只会更少）。
+  if (planOnly) {
+    // **代价必须是"不封顶"的**：模型拿这三行选档，所以它得回答"如果按这档跑，要几张"。
+    // 用过 `rawTiers`（那是 built 的档位，已经按张数预算压过）会让三档报同一个数 ——
+    // 实测一条 191 刀的素材，真实是 full 59 张 / standard 10 张 / compact 9 张，
+    // 却全被报成 "1 image"，模型据此选档等于闭眼开车。
+    const freeSegs = framesFromBounds({
+      duration: winDur, start: winStart, cuts: absCuts, marks: sampleMarks,
+    });
+    const freeRaw = applyMarkBoost(freeSegs.map((s) => levelAt(curve, s.t - winStart)), freeSegs);
+    const variants = [...AUTO_CANDIDATES, 'skim'].map((name) => {
+      const tr = name === 'skim'
+        ? freeRaw.map((t) => (Number(t) === 0 ? 0 : 8))
+        : applyStrategy(freeRaw, name);
+      const p = solve(tr, packFor(name));
+      const w = Math.min(...p.cells.map((c) => Math.round(c.w * canvas.width)));
+      const h = Math.min(...p.cells.map((c) => Math.round(c.h * canvas.height)));
+      return {
+        name, bins: p.bins, frames: tr.length,
+        minW: w, minH: h, readability: readabilityOf(w, h),
+        // skim 的帧集合本来更少（无积分帧 + 切点按 0.35s 合并）：张数是上限，不是等号
+        ...(name === 'skim' ? { approx: true } : {}),
+      };
+    });
+    return {
+      info,
+      window: { from: winStart, to: winStart + winDur, duration: winDur },
+      cuts,
+      summary: scan.summary,
+      threshold: scan.threshold,
+      cached: Boolean(scan.cached),
+      plan: planInfo,
+      variants,
+      planOnly: true,
+      // 与 textOnly 同形：调用方拿到的永远有 sheets/cells，不用先判有没有这个键
+      sheets: [],
+      cells: [],
+      ...(scan.degraded ? { degraded: scan.degraded } : {}),
+      ...(refinedBursts.length ? { refinedBursts } : {}),
+      ...(sourceInfo ? { source: sourceInfo } : {}),
+    };
+  }
 
   // textOnly：只算"帧 → 台词"，一帧都不解、一张图都不拼。
   if (textOnly) {
@@ -978,8 +1202,8 @@ export async function runStoryboard(opts) {
  * `import { formatManifest } from 'dsh-video-storyboard/pipeline'` 的调用方断掉。
  */
 export {
-  DETAIL_CHARS, buildEvidence, countTextInSilence, formatForDetail, formatManifest,
-  formatProbe, formatRemoteProbe, formatTimeline, saveStoryboards, truncateAtSentence,
+  DETAIL_CHARS, buildEvidence, compressRanges, countTextInSilence, formatForDetail, formatManifest,
+  formatPlanPreview, formatProbe, formatRemoteProbe, formatTimeline, saveStoryboards, truncateAtSentence,
   withSheetSuffix,
 } from './format.js';
 export { refineCutsByWindow } from './scan.js';

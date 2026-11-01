@@ -14,21 +14,52 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  MAX_BUDGET, boardGeometry, boardOptions, charsForDetail, DETAIL_CHARS, ocrFor,
+  DEFAULT_BUDGET, MAX_BUDGET, boardGeometry, boardOptions, charsForDetail, DETAIL_CHARS, ocrFor,
 } from '../src/storyboard/board.js';
+import { IMAGE_UPSCALE_AREA } from '../src/storyboard/tiers.js';
 
 test('board: 全片概览的默认值', () => {
   const o = boardOptions({ input: 'a.mp4' }, { kind: 'board' });
   assert.equal(o.maxFrames, 0, '0 = 不封顶：帧数由切点决定');
-  assert.equal(o.strategy, 'compact', '默认紧凑（0.6.0 起，性价比最高）');
+  // 2026-11-01 起默认 **auto**：把选档收回工具，不让模型照着枚举里第一个名字猜（full 就是这么被选的）
+  assert.equal(o.strategy, 'auto', '默认自动选档（可关，见下一条）');
   assert.equal(o.detail, 'med');
   assert.equal(o.ocr, false);
-  // 800×800 / 384 token 是 DS 的视觉上限，再大只会被缩回去
-  assert.equal(o.budget, MAX_BUDGET);
-  assert.equal(o.maxCanvasSide, 800);
+  // 默认预算 360k = 16:9 的 800×450（≈218 token）。
+  // **默认输出与 0.6.1 之前逐像素相同** —— 以前写 640k 但被单边 800 卡成 360k，现在直接说实话。
+  assert.equal(o.budget, DEFAULT_BUDGET);
+  assert.equal(DEFAULT_BUDGET, 360_000);
+  assert.equal(MAX_BUDGET, 1300 * 1300, '上限跟官方的缩放目标对齐（1300×1300）');
+  assert.equal(o.maxCanvasSide, 1300, '单边上限跟官方缩放目标一致；默认画布仍是 800×450');
   assert.equal(o.fetchOptions.scanHeight, 720, '最大格子 800×450，720p 已是 2.5 倍超采样');
   assert.equal(o.fetchOptions.zoomHeight, undefined, 'board 不需要高清直链');
   assert.equal(o.cells, undefined, 'cells 这个旋钮已经不存在了');
+});
+
+test('auto 可以关掉：DSH_STORYBOARD_AUTO=0 时退回 compact（行为可复现）', () => {
+  const prev = process.env.DSH_STORYBOARD_AUTO;
+  try {
+    process.env.DSH_STORYBOARD_AUTO = '0';
+    assert.equal(boardOptions({ input: 'a.mp4' }, { kind: 'board' }).strategy, 'compact');
+    // 点名 auto 时仍然生效 —— 关掉的是"默认值"，不是这个选项
+    assert.equal(boardOptions({ input: 'a.mp4', strategy: 'auto' }, { kind: 'board' }).strategy, 'auto');
+    process.env.DSH_STORYBOARD_AUTO = '1';
+    assert.equal(boardOptions({ input: 'a.mp4' }, { kind: 'board' }).strategy, 'auto');
+  } finally {
+    if (prev === undefined) delete process.env.DSH_STORYBOARD_AUTO;
+    else process.env.DSH_STORYBOARD_AUTO = prev;
+  }
+});
+
+test('auto 关掉后，未知 strategy 仍然退回 compact', () => {
+  const prev = process.env.DSH_STORYBOARD_AUTO;
+  try {
+    process.env.DSH_STORYBOARD_AUTO = '0';
+    assert.equal(boardOptions({ input: 'a.mp4', strategy: 'turbo' }, { kind: 'board' }).strategy, 'compact');
+  } finally {
+    if (prev === undefined) delete process.env.DSH_STORYBOARD_AUTO;
+    else process.env.DSH_STORYBOARD_AUTO = prev;
+  }
 });
 
 test('zoom: 少帧大图、quality 策略、带回高清清晰度', () => {
@@ -89,14 +120,27 @@ test('board: 陪看那一档的默认值（dsh-watch-together 依赖它）', () 
   assert.equal(boardOptions({ maxFrames: 0 }, { kind: 'watch' }).maxFrames, 5, '0 等于没给');
 });
 
-test('budget 被夹在 64k..640k：超过 800x800 的请求不再是"更大更清楚"', () => {
+test('budget 被夹在 64k..1.69M：超过 1300x1300 的请求不再是"更大更清楚"', () => {
   assert.equal(boardOptions({ input: 'a.mp4', budget: 9_999_999 }, { kind: 'board' }).budget, MAX_BUDGET);
-  assert.equal(boardOptions({ input: 'a.mp4', budget: 1000 }, { kind: 'board' }).budget, 64_000);
-  assert.equal(boardGeometry({}).budget, 640_000);
+  // 下界抬到"地板"：小于 544² 计费时按 544² 收，画小一分钱不省，只会更糊
+  assert.equal(boardOptions({ input: 'a.mp4', budget: 1000 }, { kind: 'board' }).budget, IMAGE_UPSCALE_AREA);
+  assert.equal(boardGeometry({}).budget, 360_000, '默认 360k（≈233 token，与旧输出逐像素相同）');
+});
+
+test('budget 落进地板档：抬到 544² 并把"原来的值"记下来（清单要说明，不能偷偷改）', () => {
+  const under = boardOptions({ input: 'a.mp4', budget: 120_000 }, { kind: 'board' });
+  assert.equal(under.budget, IMAGE_UPSCALE_AREA, '低于地板 → 抬到地板');
+  assert.equal(under.budgetFloorRaisedFrom, 120_000, '原值要留着，清单要写出来');
+  // 默认预算在地板之上，不该被标成"抬过"
+  assert.equal(boardOptions({ input: 'a.mp4' }, { kind: 'board' }).budgetFloorRaisedFrom, undefined);
+  // 地板档也要给 720p 抓帧（否则抬了画布却拿 480p，等于白抬）
+  assert.equal(under.fetchOptions.scanHeight, 720);
 });
 
 test('未知 strategy 退回默认，不抛（工具参数是模型填的，容错优先）', () => {
-  assert.equal(boardOptions({ input: 'a.mp4', strategy: 'turbo' }, { kind: 'board' }).strategy, 'compact');
+  // 默认值现在是 auto（可被 DSH_STORYBOARD_AUTO 关掉），所以这里只断言"不抛且是合法值"
+  const o = boardOptions({ input: 'a.mp4', strategy: 'turbo' }, { kind: 'board' });
+  assert.ok(['auto', 'compact'].includes(o.strategy), `未知值应退回默认，实得 ${o.strategy}`);
   // 旧名在 board 层就归一化（frugal → compact）
   assert.equal(boardOptions({ input: 'a.mp4', strategy: 'frugal' }, { kind: 'board' }).strategy, 'compact');
 });

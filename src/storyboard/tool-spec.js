@@ -33,85 +33,75 @@ export const ZOOM_TOOL_NAME = 'video_zoom';
 export const PROBE_TOOL_NAME = 'video_probe';
 export const LOCATE_TOOL_NAME = 'video_locate';
 
+/* ---- 多个工具共用的参数文案 ----------------------------------------------
+ *
+ * `video_storyboard` 与 `video_zoom` 接受的是同一批内容参数（scanGap / integral /
+ * integralSeconds / tierMap），以前每处各抄一遍。文案抄两遍的下场已经踩过：
+ * 改了一处忘了另一处，schema 与实现说的不是一回事（0.6.1 修的就是这个）。
+ * 语义确实相同的东西，文案就只该有一份。
+ */
+const DESC_SCAN_GAP = 'Min seconds between cuts (0 = merge none).';
+const DESC_INTEGRAL = 'Add frames inside long takes (default true).';
+const DESC_INTEGRAL_SECONDS = 'Change per sampled frame, 1-30 (default 6); NOT "N s per frame".';
+const DESC_TIER_MAP = 'Override tiers: {"1":3,"5":4} → tier 1..8.';
+// probe / locate / 段图那三个工具都只做"读"，cookies 只用来取流，一句话就够。
+const DESC_COOKIES_SHORT = 'cookies.txt for links (or DSH_VIDEO_COOKIES).';
+
 export function storyboardToolSpec() {
   return {
     name: TOOL_NAME,
     description: [
-      'Turn a video into storyboard images you can actually cite, instead of guessing what is in it.',
+      'Turn a video into storyboard images you can cite (cell 7 = 00:12.76-00:31.40), instead of',
+      'guessing what is in it.',
       '',
-      'Every frame is ONE SHOT. Its cell is sized by how fast that stretch cuts: a 20-second take',
-      'gets a full-width cell, a machine-gun montage gets 1/8-side cells. Cuts are detected first,',
-      'an integral sampler adds frames inside long moving shots, then a row-packing solver fills each',
-      'image (optimum for the given size sequence) and opens the next one when it is full.',
+      'COST — read before passing any size option. Images bill by PIXELS on a 42px grid: anything',
+      'under 544×544 is charged as 544×544 (~192 tokens), one image tops out ~994. Default 800x450',
+      '= ~233 tokens, and the frame count does not change that. The text index is billed on top and',
+      'is often the bigger bill.',
+      '- **Do not pass `strategy`** unless the user asked for a specific look: "auto" already picks',
+      '  the cheapest readable policy and prints what the others would have cost. "full" means',
+      '  BIGGER cells = MORE images, never a safe default.',
+      '- Unknown cost? `dryRun: true` returns the cut count plus each policy\'s image count for zero',
+      '  image tokens — then call again with your choice.',
+      '- Long film / episode: read it in windows (`from` + `segment`), not in one overview.',
       '',
-      'Each cell is numbered, the numbering continues across images, each image carries a header with',
-      'its own time range and index, and the text index lists "cell 7 (image 2) = 00:12.76-00:31.40 k=3"',
-      'so you can cite a moment or ask for a close-up with video_zoom({ cellId: 7 }).',
-      '',
-      'Use it like this:',
-      '- Whole short clip: video_storyboard({ input })',
-      '- Long film, read in order (SEQUENCE): video_storyboard({ input, from: 0, segment: 300 }) —',
-      '  every result prints "segment 5/22 · 22% watched · 82 min left · next: from=..."',
-      '- One wide look at a long film (STRUCTURE, spoilers): video_storyboard({ input, maxFrames: 96 })',
-      '',
-      'KNOBS THAT MATTER (there are only three):',
-      '- maxFrames: how many moments you see at most (default 96).',
-      '- strategy: quality | balanced (default) | saver | frugal — each step down shrinks every cell',
-      '  by one tier, fitting more frames per image (fewer tokens, blurrier cells).',
-      '- budget: pixels per image, capped at 640000 (800x800 / 384 vision tokens).',
-      '',
-      'The manifest prints the smallest cell and its readability, the tier histogram, the fill ratio',
-      'and the token cost, and it warns you when the smallest cells are below readable size.',
+      'WHAT YOU GET: one frame per shot — a 20 s take gets a full-width cell, a machine-gun montage',
+      'gets 1/8 cells. Cells are numbered across images, so you can cite a moment or ask for a',
+      'close-up with video_zoom({ cellId: 7 }). The index never repeats the same sentence twice.',
     ].join('\n'),
     parameters: {
       input: {
         type: 'string',
         required: true,
-        description: 'Local absolute path (mp4/mov/mkv/webm...), or any http(s) link that yt-dlp can ' +
-          'resolve — you are responsible for having the right to download it. Links are fetched once ' +
-          'at low resolution for scanning; video_zoom re-reads the original stream at high resolution.',
+        description: 'Path or http(s) link. Required.',
       },
       from: {
         type: 'number',
-        description: 'Window start in seconds (default 0). Only this window is scanned and sampled.',
+        description: 'Start seconds (default 0).',
       },
       to: {
         type: 'number',
-        description: 'Window end in seconds. Omit it to let `segment` size the window: 300 s when from > 0, '
-          + 'or the whole file when from = 0. Pass `to` only when you deliberately want a specific range.',
+        description: 'End seconds — or give `segment` with `from`.',
       },
       scanGap: {
         type: 'number',
-        description: 'Minimum seconds between two detected cuts, 0-30. Default 0 = merge nothing.'
-          + ' Raise it to collapse machine-gun edits into one boundary (`skim` sets 0.35, `brief` raises'
-          + ' it until the whole window fits one image).',
+        description: 'Min seconds between cuts (0 = merge none).',
       },
       integral: {
         type: 'boolean',
-        description: 'Sample extra frames inside long takes by integrating on-screen change (default'
-          + ' true). Turn it off to keep ONLY real cuts — `skim` / `brief` do that for you.',
+        description: 'Add frames inside long takes (default true).',
       },
       integralSeconds: {
         type: 'number',
-        description: 'How many seconds of accumulated change one sampled frame stands for, 1-30'
-          + ' (default 6). Smaller = more sampled frames inside long takes; bigger = fewer, and long'
-          + ' takes get one big cell each.',
+        description: 'Change per sampled frame, 1-30 (default 6); NOT "N s per frame".',
       },
       maxFrames: {
         type: 'integer',
-        description: 'Cap on how many frames you see, 1-10000. **Default 0 = no cap**: every cut becomes'
-          + ' a frame and every long moving shot gets extra frames from the integral sampler. Set a number'
-          + ' only to bound cost — above it the shortest segments get merged (you lose fast-cut coverage,'
-          + ' never long takes).',
+        description: 'Cap on frames (0 = no cap).',
       },
       tierMap: {
         type: 'object',
-        description: 'Override the computed tiers, one entry per source tier: {"1":3,"5":4}.'
-          + ' Keys and values are tiers 1-8 (1 = full width, 8 = 1/8 side). This runs AFTER'
-          + ' `strategy`, and **tiers you do not list keep their computed value**. Mapping several'
-          + ' tiers to the same value merges their visual size (e.g. {"5":4,"6":4,"7":4,"8":4} turns'
-          + ' every fast-cut cell into a 1/4 cell). Mapping everything to 1 makes every frame'
-          + ' full-width, which multiplies the image count — the manifest always prints the result.',
+        description: 'Override tiers: {"1":3,"5":4} → tier 1..8.',
         properties: {
           '1': { type: 'integer' },
           '2': { type: 'integer' },
@@ -126,118 +116,86 @@ export function storyboardToolSpec() {
       },
       maxSheets: {
         type: 'integer',
-        description: 'Cap on how many images this call may return, 1-16 (default 8). It is a budget cap,'
-          + ' not a layout request: when the packer would exceed it, the shortest segments get merged and'
-          + ' the layout is re-solved, so you still get full time coverage — just fewer, longer frames.',
+        description: 'Cap on images (0 = no cap).',
       },
       strategy: {
         type: 'string',
-        enum: ['full', 'standard', 'compact', 'skim', 'brief'],
-        description: 'Size policy, applied to the tier every frame got from cut density. Each step costs'
-          + ' or saves about one tier of cell size (a tier doubles or halves the pixel side):'
-          + ' quality = one tier bigger (1/1 stays 1/1) for reading text and faces;'
-          + ' balanced = default, and it only shrinks the 1/1 tier to 1/2 so a single frame never eats a'
-          + ' whole image; saver = one tier smaller everywhere; frugal = three tiers smaller (cheapest,'
-          + ' cell sides down to ~100 px — you will recognise shots, not content).',
+        enum: ['auto', 'compact', 'standard', 'skim', 'full', 'brief'],
+        description: 'Size policy. Omit → auto picks the cheapest readable one.',
       },
       budget: {
         type: 'integer',
-        description: 'Pixels per image, default 640000 = 800x800. **640000 is the ceiling**: the vision'
-          + ' API caps a picture at 800x800 (384 tokens), so anything above that is silently downscaled'
-          + ' and the cell sizes printed in the manifest stop being true. Lower it (e.g. 230000) only when'
-          + ' you are deliberately trading legibility for bytes.',
+        description: 'Pixels per image (default 360000 = 800x450 ≈233 tokens).',
+      },
+      dryRun: {
+        type: 'boolean',
+        description: 'Plan only: cut count + per-policy image counts, no image. Also returns the manual.',
       },
       segment: {
         type: 'integer',
-        description: 'Window length in seconds when you pass `from` without `to` (default 300 when from > 0; '
-          + 'with from=0 and no segment you get the whole file). This is the SEQUENCE reader: call once with '
-          + 'from:0, segment:300, then pass back the `next: from=...` printed at the end of every result — '
-          + 'it also prints "segment 5/22 · 22% watched · 82 min left". Use 300 for films/episodes, '
-          + '120-180 for dense action.',
+        description: 'Window seconds when only `from` given (default 300).',
       },
       pick: {
         type: 'string',
         enum: ['sharp', 'mid', 'thumb'],
-        description: 'Frame selection inside a segment. Default "sharp" (Laplacian variance) avoids blurred transition frames.',
+        description: 'Frame choice: sharp (default) / mid / thumb.',
       },
       burn: {
         type: 'string',
         enum: ['index', 'none'],
-        description: 'What to burn into each cell. Default "index" (the cell number, so the model can cite ' +
-          '"cell 5"). Timecodes are never burned in - they live in the text at 0.01 s precision, and pixels ' +
-          'spent on a timecode are pixels lost from the frame.',
+        description: 'Burn cell numbers: index (default) / none.',
       },
       transcript: {
         type: 'string',
         enum: ['auto', 'off'],
-        description: 'Default "auto": use the embedded subtitle track if present, otherwise ASR when configured. "off" skips speech entirely.',
+        description: 'auto (default) or off.',
       },
       transcriptFile: {
         type: 'string',
-        description: 'Path to an existing transcript (SRT, or JSON with [{start,end,text}] / ' +
-          '[{from,to,text}] / C站 {body:[{from,to,content}]}). When given, the subtitle track ' +
-          'and ASR are both skipped — use this when the site already has captions.',
+        description: 'Existing SRT/JSON transcript → skips track and ASR.',
       },
       ocr: {
         type: 'boolean',
-        description: 'Correct ASR text against burned-in on-screen subtitles (local OCR, no extra tokens). ' +
-          'Defaults to true when detail=high. Only helps when the video actually has hard-coded subtitles; ' +
-          'silently skipped otherwise.',
+        description: 'Force hard-subtitle OCR on/off (default: only at detail=high).',
       },
       hotwords: {
         type: 'string',
-        description: 'Space-separated terms to bias this run\'s transcription (e.g. "位错 滑移 柏氏矢量"). ' +
-          'Overrides asr.json for this call only. Use it when the subject has its own vocabulary — a global ' +
-          'list from another subject is a negative bias, not a neutral default.',
+        description: 'Space-separated terms to bias transcription.',
       },
       quality: {
         type: 'string',
         enum: ['low', 'medium', 'high'],
-        description: 'Override the download resolution (http(s) links only; a local file is always read at ' +
-          'its own resolution). Normally leave it out: the scan tier is derived from the pixel budget ' +
-          '(640k -> 360p, 1.2M -> 720p, 1.65M -> 1080p). low = 360p, medium = 720p, high = 1080p. Turn it ' +
-          'up only when video_zoom needs a sharper fallback copy.',
+        description: 'Link download height: low/medium/high = 360/720/1080p.',
       },
       scanHeight: {
         type: 'integer',
-        description: 'Advanced override: exact download height for http(s) links (120-2160). Prefer ' +
-          '`quality` — this one exists for cases where you know the exact pixel budget you want. ' +
-          'Takes precedence over `quality` when both are given.',
+        description: 'Exact link download height (wins over quality).',
       },
       cookies: {
         type: 'string',
-        description: 'Path to a Netscape cookies.txt for http(s) links. Falls back to DSH_VIDEO_COOKIES. ' +
-          'Required by default: without a signed-in session the available resolution is unpredictable ' +
-          'and a 1080p tier can simply be absent from the format list.',
+        description: 'cookies.txt for links (or DSH_VIDEO_COOKIES).',
       },
       allowAnonymous: {
         type: 'boolean',
-        description: 'Anonymous fetching is always allowed. Set this to true to suppress the ' +
-          '"resolution not guaranteed" note when you already know this source is fine without cookies.',
+        description: 'Allow links without cookies (default false).',
       },
       detail: {
         type: 'string',
         enum: ['low', 'med', 'high'],
-        description: 'How many characters of transcript per cell: low=60 (is this stretch about X?), ' +
-          'med=120 (default), high=400 (quote-level). Truncation lands on a sentence boundary. ' +
-          'Use cellRange + textOnly to read one cell in full.',
+        description: 'Transcript chars per cell: low 60 / med 120 / high 400.',
       },
       cellRange: {
         type: 'array',
         items: { type: 'integer' },
-        description: 'Only render cells [first, last] (1-based, inclusive) in the text index. ' +
-          'For a 2-hour film the full 64-cell index is ~75 KB, which can exceed one tool result — ' +
-          'the index says where it stopped and which cellRange to ask for next.',
+        description: 'Render only cells [first,last] of the text index.',
       },
       textOnly: {
         type: 'boolean',
-        description: 'Return only the text index (respecting cellRange) — no image is produced and no ' +
-          'frame is decoded. Use it to page through a long film after the first visual pass; the scan is cached.',
+        description: 'Text index only — no image, no frame decode.',
       },
       sourceHash: {
         type: 'boolean',
-        description: 'Also compute the source file SHA-256 and put it in the manifest. Off by default: ' +
-          'it reads the whole file, so on a multi-GB video it adds real I/O.',
+        description: 'Internal: scan cache key.',
       },
     },
     output: {
@@ -276,56 +234,42 @@ export function zoomToolSpec() {
   return {
     name: ZOOM_TOOL_NAME,
     description: [
-      'Re-read a short window of a video at higher per-cell resolution.',
+      'Re-read a short window at higher per-cell resolution.',
       '',
-      'Use it after video_storyboard when one cell needs a closer look: "what exactly is on screen',
-      'at 01:12-01:20?" A zoom returns ONE image with few, large cells (default 6), so faces,',
-      'subtitles and on-screen text become legible — things a 16-cell overview cannot show.',
+      'Use it after video_storyboard when one cell needs a closer look ("what is on screen at',
+      '01:12-01:20?"). Returns ONE image with few large cells (default 6), so faces, subtitles and',
+      'on-screen text become legible where a 16-cell overview cannot.',
       '',
-      'Keep the window short (a few seconds to a minute). For another wide pass use video_storyboard.',
-      'Costs one image (~384 tokens in DSH, host-dependent), like any other tool result with one image.',
+      'Keep the window short. For another wide pass use video_storyboard. Costs one image (~233',
+      'tokens at the default canvas).',
     ].join('\n'),
     parameters: {
       input: {
         type: 'string',
         required: true,
-        description: 'Local absolute path, or the same http(s) link you passed to video_storyboard. ' +
-          'A link is re-read from the original stream at high resolution, so cells here can be ' +
-          'sharper than the storyboard even when the scan itself used a low tier.',
+        description: 'Path or http(s) link. Required.',
       },
       from: { type: 'number', description: 'Window start in seconds. Required unless cellId is given.' },
       to: { type: 'number', description: 'Window end in seconds. Required unless cellId is given.' },
       scanGap: {
         type: 'number',
-        description: 'Minimum seconds between two detected cuts, 0-30. Default 0 = merge nothing.'
-          + ' Raise it to collapse machine-gun edits into one boundary (`skim` sets 0.35, `brief` raises'
-          + ' it until the whole window fits one image).',
+        description: 'Min seconds between cuts (0 = merge none).',
       },
       integral: {
         type: 'boolean',
-        description: 'Sample extra frames inside long takes by integrating on-screen change (default'
-          + ' true). Turn it off to keep ONLY real cuts — `skim` / `brief` do that for you.',
+        description: 'Add frames inside long takes (default true).',
       },
       integralSeconds: {
         type: 'number',
-        description: 'How many seconds of accumulated change one sampled frame stands for, 1-30'
-          + ' (default 6). Smaller = more sampled frames inside long takes; bigger = fewer, and long'
-          + ' takes get one big cell each.',
+        description: 'Change per sampled frame, 1-30 (default 6); NOT "N s per frame".',
       },
       maxFrames: {
         type: 'integer',
-        description: 'How many frames for this window, 1-48 (default 9). Frames get a UNIFORM tier'
-          + ' ceil(sqrt(n)) so n cells tile a sqrt(n)×sqrt(n) grid in ONE image — 9 frames = 3×3 full.'
-          + ' This is the "re-read a few seconds properly" tool.',
+        description: 'Frames in this window (default 9, max 48).',
       },
       tierMap: {
         type: 'object',
-        description: 'Override the computed tiers, one entry per source tier: {"1":3,"5":4}.'
-          + ' Keys and values are tiers 1-8 (1 = full width, 8 = 1/8 side). This runs AFTER'
-          + ' `strategy`, and **tiers you do not list keep their computed value**. Mapping several'
-          + ' tiers to the same value merges their visual size (e.g. {"5":4,"6":4,"7":4,"8":4} turns'
-          + ' every fast-cut cell into a 1/4 cell). Mapping everything to 1 makes every frame'
-          + ' full-width, which multiplies the image count — the manifest always prints the result.',
+        description: 'Override tiers: {"1":3,"5":4} → tier 1..8.',
         properties: {
           '1': { type: 'integer' },
           '2': { type: 'integer' },
@@ -340,80 +284,69 @@ export function zoomToolSpec() {
       },
       maxSheets: {
         type: 'integer',
-        description: 'How many images at most, 1-4 (default 1). A zoom is meant to be one image with a'
-          + ' few large cells; raise it only when the window needs more cells than one image holds.',
+        description: 'Cap on images (default 1).',
       },
       strategy: {
         type: 'string',
         enum: ['full', 'standard', 'compact', 'skim', 'brief'],
-        description: 'Size policy, default "quality" (one tier bigger everywhere). Only lower it if you'
-          + ' are re-reading a very busy window and want more frames per image instead of detail.',
+        description: 'Size policy, default full.',
       },
       pick: {
         type: 'string',
         enum: ['sharp', 'mid', 'thumb'],
-        description: 'Frame selection inside each cell. Default "sharp".',
+        description: 'Frame choice: sharp (default) / mid / thumb.',
       },
       burn: {
         type: 'string',
         enum: ['index', 'none'],
-        description: 'What to burn into each cell. Default "index".',
+        description: 'Burn cell numbers: index (default) / none.',
       },
       transcript: {
         type: 'string',
         enum: ['auto', 'off'],
-        description: 'Include subtitle/ASR text for this window. Default "auto".',
+        description: 'auto (default) or off.',
       },
       transcriptFile: {
         type: 'string',
-        description: 'Path to an existing transcript (SRT, or JSON with [{start,end,text}] / '
-          + '[{from,to,text}] / C站 {body:[{from,to,content}]}). Skips the subtitle track and ASR.',
+        description: 'Existing SRT/JSON transcript → skips track and ASR.',
       },
       detail: {
         type: 'string',
         enum: ['low', 'med', 'high'],
-        description: 'Characters of transcript per cell: low=60, med=120 (default), high=400.',
+        description: 'Transcript chars per cell: low 60 / med 120 / high 400.',
       },
       cellId: {
         type: 'integer',
-        description: 'Zoom by cell number from the last storyboard of this same input (e.g. 3 = the cell ' +
-          'labelled 3 in the sheet). Resolves to that cell\'s absolute time range, so you never copy ' +
-          'timestamps by hand. Falls back to an error if no cell map is recorded — then pass from/to.',
+        description: 'Cell number from the last storyboard of this input.',
       },
       quality: {
         type: 'string',
         enum: ['low', 'medium', 'high'],
-        description: 'Sharpness of the close-up frames, for http(s) links. low = 480p, medium = 720p, ' +
-          'high = 1080p (default). Raise it when the fine detail is not readable; lower it when the ' +
-          'download is too slow. Ignored for local files, which are always read at native resolution.',
+        description: 'Close-up height: low/medium/high = 480/720/1080p.',
       },
       zoomHeight: {
         type: 'integer',
-        description: 'For http(s) links: which resolution to read the original stream at (default 1080). ' +
-          'One frame only — cheaper than downloading. Never exceeds what the source itself offers.',
+        description: 'Read the original stream at this height (default 1080).',
       },
       scanHeight: {
         type: 'integer',
-        description: 'For http(s) links: which resolution the downloaded scan copy uses (default 360). ' +
-          'Only matters when zoom has to fall back to the local copy because the direct URL expired — ' +
-          'raising it makes that fallback sharper at the cost of a bigger download.',
+        description: 'Fallback scan copy height (default 360).',
       },
       ocr: {
         type: 'boolean',
-        description: 'Force hard-subtitle OCR correction on/off. Default: on only when detail is "high" ' +
-          '(it costs ~3 s of local OCR). Set false to keep the raw ASR text even at high detail.',
+        description: 'Force hard-subtitle OCR on/off.',
       },
       cookies: {
         type: 'string',
-        description: 'Path to a Netscape cookies.txt. Falls back to DSH_VIDEO_COOKIES.',
+        description: 'cookies.txt for links (or DSH_VIDEO_COOKIES).',
       },
       allowAnonymous: {
         type: 'boolean',
-        description: 'Anonymous reading is always allowed. Set this to true to suppress the warning note.',
+        description: 'Allow links without cookies (default false).',
       },
       sourceHash: {
         type: 'boolean',
-        description: 'Also compute the source file SHA-256 and put it in the manifest. Off by default.',
+        description: 'Internal: scan cache key.',
       },
     },
     output: {
@@ -440,36 +373,34 @@ export function zoomToolSpec() {
 }
 
 /**
- * 第三个工具：只读容器头，几毫秒。让模型在花掉第一张图的 384 token 之前，
+ * 第三个工具：只读容器头，几毫秒。让模型在花掉第一张图（≈233 token）之前，
  * 先知道"多长、多大、有没有音轨/字幕、按什么粒度读"。
  */
 export function probeToolSpec() {
   return {
     name: PROBE_TOOL_NAME,
     description: [
-      'Read a video\'s container metadata without decoding a single frame: duration, resolution,',
-      'frame rate, rotation, audio track, subtitle tracks, and a suggested reading plan.',
+      'Read container metadata without decoding a frame: duration, resolution, frame rate, rotation,',
+      'audio and subtitle tracks. No image tokens.',
       '',
-      'Call this FIRST when you do not already know how long the file is. It costs no image tokens.',
-      'Then read it: for a film / episode / any story use SEQUENCE —',
+      'Call this FIRST when you do not know how long the file is. Then read it as a SEQUENCE:',
       'video_storyboard({ input, from: 0, segment: 300 }) and follow the "next: from=..." it prints.',
-      'A one-shot overview of the whole file is only for identifying what it is (it spoils the ending',
-      'and makes every cell smaller). video_zoom is for a close-up of one moment.',
+      'A one-shot overview of the whole file only identifies what it is — it spoils the ending and',
+      'shrinks every cell.',
     ].join('\n'),
     parameters: {
       input: {
         type: 'string',
         required: true,
-        description: 'Local absolute path, or an http(s) link. For a link this resolves metadata ' +
-          'only (no download): title, duration, and the resolutions the source actually offers.',
+        description: 'Path or http(s) link. Required.',
       },
       cookies: {
         type: 'string',
-        description: 'Path to a Netscape cookies.txt. Falls back to DSH_VIDEO_COOKIES.',
+        description: 'cookies.txt for links (or DSH_VIDEO_COOKIES).',
       },
       allowAnonymous: {
         type: 'boolean',
-        description: 'Anonymous probing is always allowed. Set this to true to suppress the warning note.',
+        description: 'Allow links without cookies (default false).',
       },
     },
     output: {
@@ -503,60 +434,52 @@ export function subtitlesToolSpec() {
   return {
     name: 'video_subtitles',
     description: [
-      'Clip the burned-in subtitle band out of a video and stack all the strips into ONE tall image,',
-      'in time order — so you can read every on-screen line without asking for a dozen zoom calls.',
+      'Clip the burned-in subtitle band out of a video and stack all strips into ONE tall image in',
+      'time order — read every on-screen line without a dozen zoom calls.',
       '',
-      'Use this when the video has **hard-coded** subtitles on screen but no subtitle track and no',
-      'usable transcript (PV / music videos / lyrics / bilingual art titles). If ASR works on the file,',
-      'video_locate is cheaper and gives text directly — try that first.',
+      'Use it when the video has **hard-coded** subtitles but no subtitle track and no usable',
+      'transcript (PV / lyrics / bilingual titles). If ASR works on the file, video_locate is',
+      'cheaper — try that first.',
       '',
-      'Each strip is one moment ~stepSec apart, top to bottom. Blank strips mean "no subtitle at that',
-      'moment", which is also information. The returned text lists the timestamp of every strip.',
-      '',
-      'Cost: one image. Strips are cut **sequentially** (one ffmpeg at a time) — deliberately, because',
-      'parallel cropping on a memory-tight machine dies with 0xC000012D.',
+      'Each strip is one moment ~stepSec apart, top to bottom; a blank strip means "no subtitle',
+      'here", which is also information. The returned text lists every strip\'s timestamp. Cost: one',
+      'image. Strips are cut **sequentially** — parallel cropping on a memory-tight machine dies with',
+      '0xC000012D.',
     ].join('\n'),
     parameters: {
       input: {
         type: 'string',
         required: true,
-        description: 'Local absolute path, or any http(s) link yt-dlp can resolve (you are responsible ' +
-          'for having the right to download it).',
+        description: 'Path or http(s) link. Required.',
       },
       from: {
         type: 'number',
-        description: 'Window start in seconds (default 0).',
+        description: 'Start seconds (default 0).',
       },
       to: {
         type: 'number',
-        description: 'Window end in seconds. Omit for the whole file.',
+        description: 'End seconds — or give `segment` with `from`.',
       },
       maxStrips: {
         type: 'integer',
-        description: 'Upper bound on strips, 1-40 (default 24). More strips = taller image = more ' +
-          'subtitles caught, but a long window gets coarser sampling.',
+        description: 'How many strips (default 12).',
       },
       stepSec: {
         type: 'number',
-        description: 'Target spacing in seconds (default 3). Actual spacing widens when the window is ' +
-          'long enough that `maxStrips` would be exceeded.',
+        description: 'Seconds between strips (default 3).',
       },
       band: {
         type: 'array',
         items: { type: 'number' },
-        description: 'Subtitle band as [y0, y1], fractions of frame height. Default 0.82-0.98 ' +
-          '(bottom 16%). **Tune it from what you actually SEE in the returned image**: if text is ' +
-          'clipped at the top of a strip, lower y0; if most of a strip is empty background, raise y0. ' +
-          'Reference values: single-line bottom 0.86-0.98, bilingual bottom 0.82-0.98, top caption bar ' +
-          '0.02-0.14, centered lyric 0.40-0.60.',
+        description: 'Subtitle band [y0,y1] as frame fractions (default 0.82-0.98).',
       },
       cookies: {
         type: 'string',
-        description: 'Path to a Netscape cookies.txt. Falls back to DSH_VIDEO_COOKIES.',
+        description: 'cookies.txt for links (or DSH_VIDEO_COOKIES).',
       },
       allowAnonymous: {
         type: 'boolean',
-        description: 'Anonymous access is always allowed; set true to suppress the warning note.',
+        description: 'Allow links without cookies (default false).',
       },
     },
     output: {
@@ -595,10 +518,13 @@ export function validateToolArgs(args) {
     problems.push('maxFrames must be an integer 0..10000 (0 = no cap)');
   }
   if (args.strategy !== undefined
-    && !['full', 'standard', 'compact', 'skim', 'brief',
+    && !['auto', 'full', 'standard', 'compact', 'skim', 'brief',
       'quality', 'balanced', 'saver', 'frugal', 'thrifty', 'ultra'].includes(args.strategy)) {
-    problems.push("strategy must be 'full' | 'standard' | 'compact' | 'skim' | 'brief'"
+    problems.push("strategy must be 'auto' | 'compact' | 'standard' | 'skim' | 'full' | 'brief'"
       + ' (old names quality/balanced/saver/frugal/thrifty/ultra are still accepted)');
+  }
+  if (args.dryRun !== undefined && typeof args.dryRun !== 'boolean') {
+    problems.push('dryRun must be a boolean');
   }
   if (args.scanGap !== undefined
     && (typeof args.scanGap !== 'number' || !(args.scanGap >= 0) || args.scanGap > 30)) {
@@ -613,8 +539,8 @@ export function validateToolArgs(args) {
     problems.push('integralSeconds must be a number 1..30');
   }
   if (args.budget !== undefined
-    && (!Number.isInteger(args.budget) || args.budget < 64_000 || args.budget > 640_000)) {
-    problems.push('budget must be an integer 64000..640000 (pixels per image; 640k = 800x800 cap)');
+    && (!Number.isInteger(args.budget) || args.budget < 64_000 || args.budget > 1_690_000)) {
+    problems.push('budget must be an integer 64000..1690000 (pixels per image; 1.69M = 1300x1300 cap)');
   }
   if (args.maxSheets !== undefined
     && (!Number.isInteger(args.maxSheets) || args.maxSheets < 0 || args.maxSheets > 64)) {
@@ -718,8 +644,9 @@ export function validateZoomArgs(args) {
     problems.push('maxFrames must be an integer 0..200 (0 = no cap)');
   }
   if (args.strategy !== undefined
-    && !['quality', 'balanced', 'saver', 'frugal', 'thrifty', 'ultra'].includes(args.strategy)) {
-    problems.push("strategy must be 'quality', 'balanced', 'saver', 'frugal', 'thrifty' or 'ultra'");
+    && !['full', 'standard', 'compact', 'skim', 'brief',
+      'quality', 'balanced', 'saver', 'frugal', 'thrifty', 'ultra'].includes(args.strategy)) {
+    problems.push("strategy must be 'full' | 'standard' | 'compact' | 'skim' | 'brief'");
   }
   if (args.zoomHeight !== undefined
     && (!Number.isInteger(args.zoomHeight) || args.zoomHeight < 120 || args.zoomHeight > 2160)) {
@@ -764,34 +691,32 @@ export function locateToolSpec() {
   return {
     name: LOCATE_TOOL_NAME,
     description: [
-      'Find where a phrase is spoken in a video: returns timestamped transcript lines that match,',
-      'best first. Text only - no frame decode, no image, no tokens spent on pixels.',
+      'Find where a phrase is spoken: timestamped transcript lines that match, best first. Text',
+      'only — no frame decode, no image tokens.',
       '',
-      'Use this when you know roughly what was said but not when ("where does it mention X").',
-      'Then pass the returned from/to window to video_zoom to see that moment.',
+      'Use it when you know roughly what was said but not when. Then pass the returned from/to to',
+      'video_zoom to see that moment.',
       '',
-      'Needs a transcript. If video_storyboard already ran on this file in this session, its',
-      'transcript is reused; otherwise ASR runs for the requested window (slow if the window is long).',
+      'Needs a transcript. If video_storyboard already ran on this file, its transcript is reused;',
+      'otherwise ASR runs for the window (slow if long).',
     ].join('\n'),
     parameters: {
       input: {
         type: 'string',
         required: true,
-        description: 'Local absolute path or http(s) link. Must be the same string used for ' +
-          'video_storyboard if you want its transcript reused.',
+        description: 'Path or http(s) link. Required.',
       },
       query: {
         type: 'string',
         required: true,
-        description: 'The phrase to look for. Chinese and English both work; punctuation and spacing ' +
-          'are ignored. Long quotes match better than single characters.',
+        description: 'Phrase to find (fuzzy).',
       },
       from: { type: 'number', description: 'Only search after this second. Default: start of file.' },
       to: { type: 'number', description: 'Only search before this second. Default: end of file.' },
       max: { type: 'number', description: 'How many matches to return, 1-20. Default 5.' },
       transcriptFile: {
         type: 'string',
-        description: 'Path to an existing SRT/JSON transcript. Skips ASR entirely.',
+        description: 'Existing SRT/JSON transcript → skips ASR.',
       },
       cookies: { type: 'string', description: 'cookies.txt path for login-gated sources.' },
       allowAnonymous: { type: 'boolean', description: 'Allow anonymous fetches for links.' },

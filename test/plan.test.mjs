@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { IMAGE_TOKEN_CAP, planWindows, snapCells } from '../src/storyboard/plan.js';
+import { PLAN_IMAGE_TOKENS, planWindows, snapCells } from '../src/storyboard/plan.js';
 
 test('planWindows: 按 step 切满全片，最后一个窗口吸收尾巴', () => {
   const p = planWindows(650, 300);
@@ -50,5 +50,6 @@ test('snapCells: 粗估档位只给预览用，输入乱也给一个整数', () 
   assert.equal(snapCells(0), 4);
   assert.equal(snapCells(8), 9);
   assert.ok(Number.isInteger(snapCells(13)));
-  assert.equal(IMAGE_TOKEN_CAP, 384);
+  // 默认画布 800×450 与宿主计费一致是 233（旧口径的 384 已过期）
+  assert.equal(PLAN_IMAGE_TOKENS, 233);
 });

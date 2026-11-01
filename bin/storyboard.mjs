@@ -17,7 +17,7 @@ import { planWindows } from '../src/storyboard/plan.js';
 import { isHttpUrl } from '../src/storyboard/url.js';
 import { resolveInput } from '../src/storyboard/fetch.js';
 import {
-  DETAIL_CHARS, formatManifest, formatTimeline, runStoryboard, saveStoryboards,
+  DETAIL_CHARS, formatManifest, formatPlanPreview, formatTimeline, runStoryboard, saveStoryboards,
 } from '../src/storyboard/pipeline.js';
 import { boardGeometry } from '../src/storyboard/board.js';
 import { cliOcr, manifestFromCli, runOptionsFromCli } from '../src/storyboard/cli-options.js';
@@ -27,6 +27,8 @@ const opt = parse(process.argv.slice(2), {
   'scan-gap': 0, integral: null, 'integral-seconds': 0,
   strategy: null, pick: 'mid', burn: 'index', transcript: 'auto',
   out: 'storyboard.png', manifest: null, plan: 0, 'text-only': false, 'cell-range': null,
+  // 只预演：回报切点数与每档要几张图，不出图（与工具的 dryRun 同一条路径）
+  'dry-run': false,
   batch: 0, detail: 'med',
   // scan-height 默认 0 = 按格子最大尺寸推（1 档整幅 800×450，720p 已是 2.5 倍超采样）
   cookies: null, 'allow-anonymous': false, 'scan-height': 0, 'zoom-height': 1080,
@@ -161,6 +163,12 @@ if (r.transcript) {
   console.log(`[transcript] ${r.transcript.source}${r.transcript.model ? ` (${r.transcript.model})` : ''}` +
     `${r.transcript.segments ? `，${r.transcript.segments} 段` : ''}` +
     `${r.transcript.error ? `  ⚠️ ${r.transcript.error}` : ''}`);
+}
+
+// 预演：一张图都没有，直接打文本走人（--out 不写文件，避免留下半个结果）
+if (r.planOnly) {
+  console.log(`\n${formatPlanPreview(r)}`);
+  process.exit(0);
 }
 
 const paths = await saveStoryboards(r, opt.out, { quality: 4 });

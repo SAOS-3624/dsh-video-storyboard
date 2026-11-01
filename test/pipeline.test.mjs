@@ -11,7 +11,10 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { runStoryboard, formatManifest, saveStoryboards } from '../src/storyboard/pipeline.js';
+import {
+  runStoryboard, formatManifest, formatPlanPreview, saveStoryboards,
+} from '../src/storyboard/pipeline.js';
+import { imageTokens } from '../src/storyboard/tiers.js';
 import { lookupCell } from '../src/storyboard/cells.js';
 import { DEFAULT_FFMPEG } from '../src/storyboard/probe.js';
 
@@ -58,11 +61,12 @@ test('e2e: runStoryboard 出一张图 + 完整清单', async (t) => {
   const text = formatManifest(r);
   // 清单报的是**最小格**（模型看到的最糊那张），不是平均值
   assert.match(text, new RegExp(`cell>=${sheet.cellW}x${sheet.cellH}`));
-  // token 必须按**实际像素**算，不是一个常数（384 只对 640k 的图成立）。
-  // 这里不写死具体数字：图高会随"顶部时间抬头"这类装饰带变化，写死了每次都得起改。
-  const expectTokens = 384; // DS 的视觉上限，一张图固定这么多
-  assert.match(text, new RegExp(`tokens="${expectTokens} \\(${expectTokens}/img`),
-    `一张图固定 384 token（${sheet.width}x${sheet.height}）`);
+  // token 必须按**实际像素**算（像素÷1650，地板 544²，封顶 1024），不是一个常数。
+  // 这里不写死数字：图高会随"顶部时间抬头"这类装饰带变化，写死了每次都得起改。
+  const expectTokens = imageTokens(sheet.width, sheet.height);
+  assert.ok(expectTokens > 0 && expectTokens <= 1024);
+  assert.match(text, new RegExp(`tokens="${expectTokens}"`),
+    `一张图要按 ${sheet.width}x${sheet.height} 的实际像素报，实得 ${expectTokens}`);
   assert.match(text, /ffmpeg="[^"]+"/);
   assert.match(text, /sha256="[0-9a-f]{64}"/);
   assert.match(text, /plan: strategy=compact/);
@@ -119,7 +123,7 @@ test('e2e: saveStoryboards 落盘（多张时带序号）', async (t) => {
   const file = await makeFixture(dir);
 
   // 张数不再由参数决定，是排布器算出来的；这里只验证"落盘数量 = 张数"
-  const r = await runStoryboard({ input: file, maxFrames: 30, strategy: 'quality' });
+  const r = await runStoryboard({ input: file, maxFrames: 30, strategy: 'full' });
   assert.ok(r.sheets.length >= 1);
   const paths = await saveStoryboards(r, join(dir, 'out.png'));
   assert.equal(paths.length, r.sheets.length);
@@ -628,4 +632,106 @@ test('插件接线: 宿主没有 attachments 服务时，apply 仍然成功、�
   assert.equal(typeof dispose, 'function');
   assert.ok(registered.length >= 5, `应该注册 5 个工具，实得 ${registered.length}`);
   assert.ok(registered.some((t) => t.name === 'video_storyboard'));
+});
+
+test('e2e: planOnly（dryRun）只扫描+排布，不出图、不转写，回报各档代价', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeFixture(dir);
+
+  const r = await runStoryboard({ input: file, planOnly: true });
+  assert.equal(r.planOnly, true);
+  assert.deepEqual(r.sheets, [], '预演一张图都不许出');
+  assert.equal(r.variants.length, 4, 'compact/standard/full + skim');
+  const names = r.variants.map((v) => v.name);
+  assert.deepEqual(names, ['compact', 'standard', 'full', 'skim']);
+  for (const v of r.variants) {
+    assert.ok(v.bins >= 1 && v.minW > 0 && v.minH > 0, `${v.name} 的代价没算出来`);
+    assert.ok(v.readability, `${v.name} 缺可读性`);
+  }
+  // 档位越大格子越大：full 的最小格不小于 compact 的
+  const full = r.variants.find((v) => v.name === 'full');
+  const compact = r.variants.find((v) => v.name === 'compact');
+  assert.ok(full.minW >= compact.minW);
+
+  const text = formatPlanPreview(r);
+  assert.match(text, /image="none \(dry run\)"/);
+  assert.match(text, /cuts="\d+ \(avg /, '要有切点数——这是模型选档的依据');
+  assert.match(text, /recommended: \*\*(compact|standard|full)\*\*/);
+  assert.match(text, /duration budget/, '张数预算要说明白');
+  assert.ok(!/tokens="\d+ \(\d+\/img/.test(text), '预演不该报会花掉的图 token');
+});
+
+test('e2e: strategy=auto 按时长压张数，并把三档代价写进清单', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeFixture(dir);
+
+  const r = await runStoryboard({ input: file, strategy: 'auto' });
+  assert.ok(r.plan.auto, 'auto 必须回报"选了什么、别的要几张"');
+  assert.ok(['compact', 'standard', 'full'].includes(r.plan.strategy), `选中的档位不合法：${r.plan.strategy}`);
+  assert.equal(r.plan.auto.options.length, 3);
+  assert.equal(r.plan.auto.chosen, r.plan.strategy);
+  // 6 秒的片段预算 = 1 张（autoSheetCap(6) = 1）
+  assert.equal(r.plan.auto.targetCap, 1);
+  assert.ok(r.sheets.length <= 1, `预算 1 张，实得 ${r.sheets.length} 张`);
+
+  const text = formatManifest(r);
+  assert.match(text, /size policy: auto chose/);
+  assert.match(text, /same window under the other policies/);
+  assert.match(text, /full=/, '三档代价都要列出来，否则模型下一轮还是只能猜');
+});
+
+test('auto: 不给 maxSheets 时压张数仍然执行（capSheets 兜底是 Infinity，别用 >0 判）', async (t) => {
+  // 踩过的坑：`capSheets` 在"调用方没给"时兜底 `Infinity`，判据却写成 `capSheets > 0` ——
+  // `Infinity > 0` 是 true，于是 limit=Infinity、整段压张数被跳过，"按时长定张数"从未生效。
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeFixture(dir);
+
+  const r = await runStoryboard({ input: file, strategy: 'auto' });
+  const a = r.plan.auto;
+  assert.ok(a, 'auto 必须回报计划');
+  // 只有"确实超了预算"时才有压的动作：要么压进去（capSheets>0），要么可读性让步（relaxed）
+  if (r.plan.sheets > a.targetCap) {
+    assert.ok(a.capSheets > 0 || a.relaxed,
+      `超了预算 ${a.targetCap} 张（实得 ${r.plan.sheets}）却没有压的痕迹：capSheets=${a.capSheets}`);
+  }
+  // relaxed 时必须给出 skim 的价码，否则"问一句看不看"就没问
+  if (a.relaxed) {
+    assert.ok(Number.isFinite(a.relaxed.skimBins) && a.relaxed.skimBins > 0,
+      'relaxed 时要报 skim 的张数');
+    assert.match(formatManifest(r), /strategy:"skim" is ≤\d+ image/);
+  }
+});
+
+test('formatPlanPreview: 预算被可读性顶回去时，不许再说"→ 1 image"', async () => {
+  // 短窗（<90s）的默认文案是"→ 1 image"；一旦 auto 因为格子太小退回多张，
+  // 那句话就成了假话（56 刀的 25 秒快剪曾报 1 张、实际出 4 张）。
+  const variants = [
+    { name: 'compact', bins: 1, minW: 100, minH: 54, readability: 'composition' },
+    { name: 'standard', bins: 3, minW: 114, minH: 54, readability: 'composition' },
+    { name: 'full', bins: 4, minW: 133, minH: 75, readability: 'composition' },
+  ];
+  const base = { info: { path: 'C:/x/short.mp4', duration: 25 }, window: { duration: 25, from: 0, to: 25 }, variants };
+  const relaxedPlan = {
+    sheets: 4, frames: 63, cells: 16, produced: 63, canvas: { width: 800, height: 450 },
+    auto: {
+      chosen: 'full', targetCap: 1, capSheets: 0, options: [],
+      relaxed: { targetCap: 1, triedBins: 2, keptBins: 4, cuts: 56 },
+    },
+  };
+  const text = formatPlanPreview({ ...base, plan: relaxedPlan });
+  assert.ok(!/→ \*\*1 image\*\*/.test(text), '退回多张时不能再写"1 image"');
+  assert.match(text, /kept \*\*4\*\*/, '要说明实际给了几张');
+
+  // 没有 relaxed 的短窗仍然说 1 张（这条文案本身是对的）
+  const okPlan = {
+    sheets: 1, frames: 9, cells: 9, produced: 9, canvas: { width: 800, height: 450 },
+    auto: { chosen: 'compact', targetCap: 1, capSheets: 0, options: [] },
+  };
+  assert.match(formatPlanPreview({ ...base, plan: okPlan }), /→ \*\*1 image\*\*/);
 });

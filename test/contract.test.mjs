@@ -153,7 +153,8 @@ test('本地兜底校验：越界参数被自己挡住（schema 子集不支持 
   assert.ok(validateToolArgs({ input: 'a', maxFrames: 20_000 }).length > 0);
   assert.ok(validateToolArgs({ input: 'a', from: 10, to: 5 }).length > 0);
   assert.ok(validateToolArgs({ input: 'a', strategy: 'turbo' }).length > 0);
-  assert.ok(validateToolArgs({ input: 'a', budget: 1_200_000 }).length > 0, '超过 800x800 的预算要挡住');
+  assert.ok(validateToolArgs({ input: 'a', budget: 1_700_000 }).length > 0, '超过 1300x1300 的预算要挡住');
+  assert.deepEqual(validateToolArgs({ input: 'a', budget: 1_200_000 }), [], '1.2M 现在是合法的（1300 边以内）');
 });
 
 test('本地兜底校验：帧数上限与档位策略都在允许集合里', () => {

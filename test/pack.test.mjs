@@ -9,7 +9,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { UNIT, bounds, bestPlan, rowOptions, solve, toRects } from '../src/storyboard/pack.js';
+import {
+  UNIT, bounds, bestPlan, DEFAULT_GROW, rowOptions, solve, toRects,
+} from '../src/storyboard/pack.js';
 
 const overlaps = (rects) => {
   let n = 0;
@@ -113,4 +115,21 @@ test('性能: 96 帧（长片概览规模）求解 < 50ms', () => {
   const ms = performance.now() - t0;
   assert.equal(p.cells.length, 96);
   assert.ok(ms < 50, `求解 ${ms.toFixed(1)}ms 太慢`);
+});
+
+/* ---------------------------------------------------------------- 缓存键（#64） */
+
+test('rowOptions: 不同 stretch 不能共用缓存（flat 行高直接依赖它）', () => {
+  const a = rowOptions([3, 3], DEFAULT_GROW, 0.2, true);
+  const b = rowOptions([3, 3], DEFAULT_GROW, 0.3, true);
+  assert.notDeepEqual(a, b, 'stretch 0.2 和 0.3 必须算出不同的行高');
+  // 再算一次 0.2，必须还是 0.2 的结果（不能被 0.3 覆盖）
+  const again = rowOptions([3, 3], DEFAULT_GROW, 0.2, true);
+  assert.deepEqual(again, a, '回头再算 0.2 仍要拿到 0.2 的结果');
+});
+
+test('rowOptions: grow 参与缓存键（决定能不能升档）', () => {
+  const allow = rowOptions([3, 3], DEFAULT_GROW, 0.2, true);
+  const deny = rowOptions([3, 3], DEFAULT_GROW.map(() => 0), 0.2, true);
+  assert.notDeepEqual(allow, deny, 'grow 不同必须算出不同的候选');
 });

@@ -9,9 +9,12 @@ import assert from 'node:assert/strict';
 
 import {
   DEFAULT_STRATEGY, LEVEL_THRESHOLDS, MARK_BOOST, STRATEGIES, TIER_MAX, TIER_MIN,
-  applyMarkBoost, applyStrategy, applyTierMap,
-  fitCanvas, framesFromBounds, integralMarks, levelAt, levelCurve, readabilityOf, tierHistogram,
-  tierSizes, tierSide,
+  applyMarkBoost, applyStrategy, applyTierMap, autoSheetCap,
+  IMAGE_UPSCALE_AREA, INTEGRAL_REF_SCORE, MAX_CANVAS_SIDE, fitCanvas, framesFromBounds, imageTokens, integralMarks, levelAt,
+  levelCurve,
+  pickAutoStrategy,
+  readabilityOf,
+  tierHistogram, tierSizes, tierSide,
 } from '../src/storyboard/tiers.js';
 
 /* ---------------------------------------------------------------- 密度 → 档位 */
@@ -100,10 +103,11 @@ test('framesFromBounds: via 标出这一段是"真切点后 / 假切点后 / 片
   assert.deepEqual(segs.map((x) => x.cut), [false, true, false, false]);
 });
 
-test('applyMarkBoost: 假切点的帧提两档，真切点不动，封顶 8', () => {
-  assert.equal(MARK_BOOST, 2);
+test('applyMarkBoost: 假切点的帧提三档，真切点不动，封顶 8', () => {
+  assert.equal(MARK_BOOST, 3);
   const segs = framesFromBounds({ duration: 10, cuts: [3], marks: [5, 7] });
-  assert.deepEqual(applyMarkBoost([1, 2, 3, 8], segs), [1, 2, 5, 8]);
+  // 段序：0-3(cut 起点 3) 3-5(cut) 5-7(mark) 7-10(mark) —— 只有起点是假切点的段加成
+  assert.deepEqual(applyMarkBoost([1, 2, 3, 8], segs), [1, 2, 6, 8]);
   // 已经在 8 档的不会再爆
   assert.deepEqual(applyMarkBoost([8, 8, 8, 8], segs), [8, 8, 8, 8]);
   // 缺 via 时原样返回（兼容手写的段）
@@ -117,12 +121,34 @@ test('integralMarks: 完全静止的片子一个点都不补', () => {
   assert.deepEqual(integralMarks({ duration: 10, series }), []);
 });
 
-test('integralMarks: 持续变化 + 触发即清零 → 大约每 equivSeconds 一个点', () => {
-  const series = Array.from({ length: 100 }, (_, i) => ({ t: i * 0.1, score: 10 }));
+test('integralMarks: 参考强度画面 → 大约每 equivSeconds 一个点', () => {
+  // score 取 INTEGRAL_REF_SCORE 才是"中等强度画面"，此时间隔才该等于 equivSeconds。
+  // 阈值 = REF × fps × equivSeconds，攒够要 REF×fps×eq / (REF×fps) = eq 秒。
+  const series = Array.from({ length: 100 }, (_, i) => ({ t: i * 0.1, score: INTEGRAL_REF_SCORE }));
   const marks = integralMarks({ duration: 10, series, equivSeconds: 5 });
-  // 总变化 100、T = (100/10)*5 = 50 → 触发两次（t≈5 和 t≈9.x）
   assert.ok(marks.length >= 1 && marks.length <= 3, `实得 ${marks.length}: ${marks}`);
   for (let i = 1; i < marks.length; i += 1) assert.ok(marks[i] > marks[i - 1]);
+  if (marks.length >= 2) {
+    const gap = (marks[marks.length - 1] - marks[0]) / (marks.length - 1);
+    assert.ok(Math.abs(gap - 5) < 1.2, `参考强度下间隔应≈5s，实得 ${gap.toFixed(2)}`);
+  }
+});
+
+test('integralMarks: 阈值是**绝对值** —— 画面整体越快，点越多', () => {
+  // 这是那条被修掉的病：以前阈值 = 全片平均变化量 × equivSeconds，阈值跟着画面一起涨，
+  // 两者抵消 → 不管多快都是 equivSeconds 秒一个点（实测 2/s 到 64/s 全是 19 个）。
+  const at = (score) => {
+    const series = Array.from({ length: 1200 }, (_, i) => ({ t: i / 12, score }));
+    return integralMarks({ duration: 100, series, equivSeconds: 6, fps: 12 }).length;
+  };
+  const slow = at(1);
+  const ref = at(INTEGRAL_REF_SCORE);
+  const fast = at(16);
+  assert.ok(slow < ref, `慢素材(${slow}) 必须少于参考强度(${ref})`);
+  assert.ok(ref < fast, `参考强度(${ref}) 必须少于快素材(${fast})`);
+  // 具体量级：慢素材攒得久（间隔 > equivSeconds），快素材攒得快（间隔 < equivSeconds）
+  assert.ok(slow <= 100 / 12, `1 分/秒的素材 100 秒内不该超过 ${Math.floor(100 / 12)} 个点，实得 ${slow}`);
+  assert.ok(fast >= 100 / 2, `16 分/秒的素材 100 秒内至少 ${50} 个点，实得 ${fast}`);
 });
 
 test('integralMarks: 真切点附近不补点（那里已经是边界）', () => {
@@ -185,4 +211,128 @@ test('applyTierMap: 自由尺寸帧（tier 0）不参与映射，越界的键值
   assert.deepEqual(applyTierMap([1, 2], { 9: 1 }), [1, 2], '键超出 1..8 丢掉');
   assert.deepEqual(applyTierMap([1, 2], { 1: 9 }), [1, 2], '值超出 1..8 丢掉');
   assert.deepEqual(applyTierMap([1, 2], 'nope'), [1, 2], '不是对象就原样返回');
+});
+
+/* ---------------------------------------------------------------- 自动选档 */
+
+test('autoSheetCap: 张数只按时长算，不跟切点密度走', () => {
+  // 用户口径（2026-11-01）：固定时长的一段视频应有尽量相同的张数，约 3~5 分钟一张图
+  assert.equal(autoSheetCap(90), 1, '1 分半 → 1 张');
+  assert.equal(autoSheetCap(300), 1, '5 分钟 → 1 张（240s/张 四舍五入）');
+  assert.equal(autoSheetCap(600), 3, '10 分钟 → 3 张');
+  assert.equal(autoSheetCap(1800), 8, '30 分钟 → 8 张');
+  assert.equal(autoSheetCap(9300), 39, '2 小时 35 分 → 39 张（不是几百张）');
+  // 单调：时长翻倍，张数也翻倍（这条性质就是"同样时长花同样的钱"）
+  for (const [a, b] of [[300, 600], [600, 1200], [1200, 2400]]) {
+    assert.ok(autoSheetCap(b) >= autoSheetCap(a) * 2 - 1, `${a}s→${b}s 不该少张`);
+  }
+  // 极端输入不崩
+  assert.equal(autoSheetCap(0), 1);
+  assert.equal(autoSheetCap(undefined), 1);
+  assert.equal(autoSheetCap(1e9), 64, '封顶 64 张');
+  // 可调：环境以外的调用方也能指定"每张几分钟"
+  assert.equal(autoSheetCap(600, { secondsPerImage: 120 }), 5);
+});
+
+test('pickAutoStrategy: 挑"最小格还认得出"里最省的那档', () => {
+  const variants = [
+    { name: 'compact', bins: 2, minW: 200, minH: 112 },   // shot
+    { name: 'standard', bins: 3, minW: 266, minH: 150 },  // shot
+    { name: 'full', bins: 5, minW: 400, minH: 225 },      // scene
+  ];
+  // 三档都够清楚 → 张数最少的（compact）
+  assert.equal(pickAutoStrategy(variants), 'compact');
+  // compact 掉到"色块"→ 退 standard
+  assert.equal(pickAutoStrategy([
+    { name: 'compact', bins: 1, minW: 100, minH: 56 },
+    { name: 'standard', bins: 2, minW: 160, minH: 90 },
+    { name: 'full', bins: 4, minW: 266, minH: 150 },
+  ]), 'standard');
+  // 全都认不出 → **按钱选，不按格子大小选**。
+  // 曾经的写法是"取最小格面积最大"，等于永远选 full —— full 保留 1 档帧（一帧独占整张），
+  // 格子在数字上最大，可一张图只装得下一帧。实测一条 191 刀的 5 分钟素材：
+  // full 59 张 / standard 10 张 / compact 9 张，差 6.5 倍钱。反正都要糊，那就少花钱。
+  assert.equal(pickAutoStrategy([
+    { name: 'compact', bins: 9, minW: 100, minH: 54 },
+    { name: 'standard', bins: 10, minW: 100, minH: 47 },
+    { name: 'full', bins: 59, minW: 133, minH: 75 },
+  ]), 'compact');
+  // 张数一样时才比格子
+  assert.equal(pickAutoStrategy([
+    { name: 'compact', bins: 4, minW: 80, minH: 45 },
+    { name: 'standard', bins: 4, minW: 90, minH: 50 },
+    { name: 'full', bins: 4, minW: 110, minH: 62 },
+  ]), 'full');
+  // 空/非法输入不抛
+  assert.equal(pickAutoStrategy([]), null);
+  assert.equal(pickAutoStrategy(undefined), null);
+  assert.equal(pickAutoStrategy([{ name: 'skim', bins: 0 }]), null, 'skim 不在候选里');
+});
+
+test('pickAutoStrategy: 张数相同时选帧多的（同样的钱多看几个瞬间）', () => {
+  // 一场 2 秒的片子：三档都只要 1 张，但 compact 能放 4 帧、full 只能放 1 帧
+  assert.equal(pickAutoStrategy([
+    { name: 'compact', bins: 1, frames: 4, minW: 400, minH: 250 },
+    { name: 'standard', bins: 1, frames: 4, minW: 400, minH: 250 },
+    { name: 'full', bins: 1, frames: 1, minW: 800, minH: 500 },
+  ]), 'compact');
+  // 连帧数也一样时按候选顺序（省的那档在前），保证可复现
+  const same = [
+    { name: 'full', bins: 1, frames: 2, minW: 800, minH: 500 },
+    { name: 'compact', bins: 1, frames: 2, minW: 400, minH: 250 },
+  ];
+  assert.equal(pickAutoStrategy(same), 'compact');
+});
+
+/* ---------------------------------------------------------------- 图片定价 */
+
+test('imageTokens: 与宿主 dsh-llm-deepseek 的计费逐值一致（patch 网格，不是"像素÷1650"）', () => {
+  // 真值来自宿主实现（14px patch 对齐 → 42px 一格 → rows×(cols+1)+2），已对拍 21 组尺寸。
+  // "像素÷1650"只是粗估：它会把 800×450 说成 218，实际是 233。
+  assert.equal(imageTokens(800, 450), 233, '默认画布');
+  assert.equal(imageTokens(1066, 600), 407, '640k');
+  assert.equal(imageTokens(1280, 720), 578);
+  assert.equal(imageTokens(1600, 900), 882);
+  // patch 对齐的台阶：1300×731 和 1280×720 一个价（都被对齐到同一张网格）
+  assert.equal(imageTokens(1300, 731), 578);
+  // 地板：小于 544² 的图计费时被放大到 544² 面积 → 一律 192
+  assert.equal(imageTokens(320, 180), 192);
+  assert.equal(imageTokens(480, 270), 192);
+  assert.equal(imageTokens(200, 113), 192);
+  assert.equal(imageTokens(640, 360), 192, '230k 也在地板区间内');
+  assert.equal(imageTokens(600, 338), 192);
+  assert.equal(imageTokens(544, 544), 184, '正好在地板边上（对齐后比 544 略大）');
+  // 封顶：官方说 1024，实际网格最大是 994（1300×1300 正好 994）
+  assert.equal(imageTokens(1300, 1300), 994);
+  assert.equal(imageTokens(2000, 2000), 994, '更大的图宿主自己会缩到 1302×1302');
+  assert.equal(imageTokens(5000, 5000), 994);
+  assert.equal(imageTokens(1920, 1080), 968);
+  // 边界：0/NaN 不炸
+  assert.equal(imageTokens(0, 0), 0);
+  assert.equal(imageTokens(undefined, 450), 0);
+});
+
+test('imageTokens: 地板区间内"把图画大"几乎不要钱（这是地板策略的依据）', () => {
+  // 400×225（90k）和 733×412（302k）同价：都在 192 这档
+  assert.equal(imageTokens(400, 225), imageTokens(733, 412));
+  // 出地板就按网格计价：360k 的 800×450 是 233（+21% 的钱，换 4 倍像素）
+  assert.equal(imageTokens(800, 450), 233);
+  // 两倍面积 ≈ 两倍钱
+  assert.equal(imageTokens(1132, 636), 450);
+});
+
+test('fitCanvas: 预算低于 544² 地板时抬到地板（画小不省钱，只会更糊）', () => {
+  const small = fitCanvas(16 / 9, { budget: 120_000 });
+  // 圆整会少几十像素（725×408 = 295,800，比 544² 差 0.05%），但计费落在同一档
+  assert.ok(small.width * small.height >= IMAGE_UPSCALE_AREA * 0.999, '不能明显小于地板面积');
+  assert.equal(imageTokens(small.width, small.height), 192, '实际按地板档收费');
+  assert.deepEqual([small.width, small.height], [725, 408], '16:9 的地板画布');
+  // 和"直接给地板"必须一模一样，否则说明两条路径算得不一样
+  assert.deepEqual(fitCanvas(16 / 9, { budget: IMAGE_UPSCALE_AREA }), small);
+  // 默认预算在地板之上，原样返回
+  const def = fitCanvas(16 / 9);
+  assert.deepEqual([def.width, def.height], [800, 450]);
+  // 上限仍然生效
+  const big = fitCanvas(16 / 9, { budget: 99_999_999 });
+  assert.ok(Math.max(big.width, big.height) <= MAX_CANVAS_SIDE);
 });

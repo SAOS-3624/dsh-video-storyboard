@@ -13,7 +13,7 @@
  */
 
 // ---- 主流程：跑一次分镜，拿到宫格图 + 清单
-export { runStoryboard, formatManifest } from './pipeline.js';
+export { runStoryboard, formatManifest, formatPlanPreview } from './pipeline.js';
 
 // ---- 扫描：逐帧分数、切点、以及逐帧的亮度均值与 16×9 指纹
 export { scanShots, decideCuts, scanSummary, refineCutsByWindow } from './scan.js';

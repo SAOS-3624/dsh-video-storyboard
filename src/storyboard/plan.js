@@ -6,8 +6,13 @@
  * 现在它只回答一个问题：整片按 `step` 秒切，会切出几个窗口、每个窗口多少帧。
  */
 
-/** 一张图约 384 vision token（DS 的 800×800 上限）。 */
-export const IMAGE_TOKEN_CAP = 384;
+import { fitCanvas, imageTokens } from './tiers.js';
+
+/**
+ * 默认画布（16:9 + 默认预算 = 800×450）上一张图的价格，只给 `--plan` 的粗估用。
+ * 真正出图时每张按自己的尺寸算（`imageTokens`），别把这个数当常量用。
+ */
+export const PLAN_IMAGE_TOKENS = imageTokens(fitCanvas(16 / 9).width, fitCanvas(16 / 9).height);
 
 /** 时长 → 常见格数（历史遗留的粗估，只给 `--plan` 预览用）。 */
 export function snapCells(n) {
@@ -32,7 +37,7 @@ export function planWindows(duration, step = 300, {
   }
   total = Math.max(1, total);
   // 尾巴短于 30 秒就并进前一个窗口：92s 按 30s 切会剩一个 2.18s 的窗口，只够 1 格，
-  // 白白多花 384 token 换一张几乎没信息的图。用绝对阈值（而不是按比例），
+  // 白白多花一张图的钱（≈233）换一张几乎没信息的图。用绝对阈值（而不是按比例），
   // 这样 650s/300s 那种 50s 的尾巴不会被无谓地并掉。
   if (total > 1) {
     const tail = duration - (total - 1) * span;
@@ -48,7 +53,7 @@ export function planWindows(duration, step = 300, {
     const images = 1;
     windows.push({
       index: i + 1, from, to, duration: +len.toFixed(2),
-      cells: n, images, approxTokens: images * IMAGE_TOKEN_CAP,
+      cells: n, images, approxTokens: images * PLAN_IMAGE_TOKENS,
     });
   }
   // 窗口边界吸附到最近的剪辑点：按钟表切会把一句话劈成两半，

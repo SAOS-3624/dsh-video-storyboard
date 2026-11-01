@@ -10,10 +10,48 @@
  *   换成三个真正决定画面的旋钮：**帧多少（maxFrames）、多大（strategy）、画布多大（budget）**。
  */
 
-import { DEFAULT_STRATEGY, STRATEGIES, resolveStrategy } from './tiers.js';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+import {
+  AUTO_STRATEGY, DEFAULT_STRATEGY, STRATEGIES, resolveStrategy,
+  DEFAULT_BUDGET as TIER_DEFAULT_BUDGET,
+  IMAGE_UPSCALE_AREA, MAX_CANVAS_SIDE as TIER_MAX_CANVAS_SIDE, MAX_IMAGE_AREA,
+} from './tiers.js';
 
 /** 三个入口。默认值不同，但都由这里决定。 */
 export const BOARD_KINDS = Object.freeze(['board', 'zoom', 'watch']);
+
+/**
+ * auto 选档能不能用。**默认开**，两个地方可以关掉：
+ *
+ *   - 环境变量 `DSH_STORYBOARD_AUTO=0`（false/off/no 也算）
+ *   - `~/.dsh/video.json` 里 `{"storyboard": {"auto": false}}`
+ *
+ * 关掉之后默认回到 `compact`，也就是 0.6.0 的默认值 —— 行为可复现，不会因为升级变了口味。
+ * 桌面版 DSH 读不到 setx 的环境变量，所以配置文件那条路是必须的。
+ */
+export function autoStrategyEnabled() {
+  const env = process.env.DSH_STORYBOARD_AUTO;
+  if (env !== undefined && env !== '') {
+    return !/^(0|false|off|no)$/i.test(String(env).trim());
+  }
+  try {
+    const home = process.env.DSH_HOME
+      || join(process.env.USERPROFILE || process.env.HOME || homedir(), '.dsh');
+    const cfg = JSON.parse(readFileSync(join(home, 'video.json'), 'utf8'));
+    const v = cfg?.storyboard?.auto;
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') return !/^(0|false|off|no)$/i.test(v.trim());
+  } catch { /* 没配置文件就是默认开 */ }
+  return true;
+}
+
+/** board 的默认策略。model 不点名时用它：auto（可关）> compact。 */
+export function defaultBoardStrategy() {
+  return autoStrategyEnabled() ? AUTO_STRATEGY : DEFAULT_STRATEGY;
+}
 
 /**
  * `<detail>` → 每格给多少字。**这里定义一次**，storyboard / zoom / watch 共用。
@@ -23,27 +61,37 @@ export const DETAIL_CHARS = Object.freeze({ low: 60, med: 120, high: 400 });
 export const charsForDetail = (detail) => DETAIL_CHARS[detail] ?? DETAIL_CHARS.med;
 
 /**
- * 画布硬上限：**800×800 / 384 token**。
+ * 画布的像素预算范围。**常量只有一份**（在 tiers.js），这里只做转出，避免两处各写一个 800。
  *
- * DS 的视觉输入封顶就在这里，超过会被缩回去 —— 那时清单里的 `cell=` 就是假数
- * （1.2M 预算报 456×254，实际模型拿到的是 400×225 那一档）。所以预算上限直接钉死 640k。
+ * 上限 = 1300×1300（官方现行的缩放目标，见 tiers.MAX_CANVAS_SIDE 的注释）；
+ * **默认 = 360k**，也就是 16:9 的 800×450 —— 与 0.6.1 之前的输出**逐像素相同**。
+ * 以前默认写 640k 却被单边 800 卡成 360k，等于"说要 640k、实际只给 360k"；
+ * 现在默认直接是 360k，参数和结果对得上，想要更大的画布自己给 budget。
  */
-export const MAX_CANVAS_SIDE = 800;
-export const MAX_BUDGET = MAX_CANVAS_SIDE * MAX_CANVAS_SIDE;
-export const DEFAULT_BUDGET = MAX_BUDGET;
+export const MAX_CANVAS_SIDE = TIER_MAX_CANVAS_SIDE;
+export const MAX_BUDGET = MAX_IMAGE_AREA;
+export const DEFAULT_BUDGET = TIER_DEFAULT_BUDGET;
 
 /**
- * 出图几何：像素预算（会被夹到 640k）。
+ * 出图几何：像素预算（会被夹到 [64k, 1300²]）。
  *
  * 旧版按 `size` 把像素预算 / 每张几格 / 下载清晰度绑在一起，结果是
  * small 允许 16 格、large 反而只允许 9 格 —— 方向和直觉是反的。现在只有一个数。
  */
 export function boardGeometry(args = {}) {
   const raw = Number(args.budget);
-  const budget = Number.isFinite(raw) && raw > 0
+  const requested = Number.isFinite(raw) && raw > 0
     ? Math.min(MAX_BUDGET, Math.max(64_000, Math.round(raw)))
     : DEFAULT_BUDGET;
-  return { budget, maxCanvasSide: MAX_CANVAS_SIDE };
+  // **地板**：小于 544² 的图计费时一律按 544² 收（`tiers.imageTokens`），
+  // 所以给一个更小的预算只会更糊、不会更便宜。这里抬到地板，并把"抬过"记下来，
+  // 清单会写明 —— 不能偷偷改用户给的数。
+  const budget = Math.max(IMAGE_UPSCALE_AREA, requested);
+  return {
+    budget,
+    maxCanvasSide: MAX_CANVAS_SIDE,
+    ...(budget !== requested ? { floorRaisedFrom: requested } : {}),
+  };
 }
 
 /**
@@ -57,10 +105,12 @@ export function ocrFor(args = {}, detail = args.detail ?? 'med') {
 }
 
 function fetchOptionsFor(args = {}, kind = 'board', geom = null) {
-  // 下载清晰度跟着**格子最大尺寸**走，不再跟着预算走：
-  // 最大格子是 1 档 = 整幅 800×450，720p 已经是 2.5 倍超采样，再高只是白下。
+  // 下载清晰度跟着**格子最大尺寸**走，不再跟着预算的"名义值"走：
+  // 默认画布 800×450 的 1 档格子就是整幅，720p（1280×720）已是 1.6 倍超采样，再高只是白下。
+  // 阈值 300k 是"画布能放下 800×450"的分界：过了它就该给 720p，所以**默认 360k 仍然是 720p**，
+  // 换画布口径不会偷偷把抓帧降到 480p（那样输出的像素就不是原来那张了）。
   const scanHeight = args.scanHeight
-    ?? (kind === 'board' ? ((geom ?? boardGeometry(args)).budget >= 400_000 ? 720 : 480) : 360);
+    ?? (kind === 'board' ? ((geom ?? boardGeometry(args)).budget >= IMAGE_UPSCALE_AREA ? 720 : 480) : 360);
   return {
     cookies: args.cookies,
     allowAnonymous: args.allowAnonymous === true,
@@ -93,7 +143,10 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
   const geom = boardGeometry(args);
   // 旧名在这里就归一化（quality→full / frugal→compact…），下层的日志和清单只认新名
   const wanted = resolveStrategy(args.strategy);
-  const strategy = STRATEGIES[wanted] ? wanted : DEFAULT_STRATEGY;
+  // 不点名 → auto（可被关掉，见 autoStrategyEnabled）；点名就照办，`auto` 也是合法值
+  const strategy = wanted === AUTO_STRATEGY
+    ? AUTO_STRATEGY
+    : (STRATEGIES[wanted] ? wanted : defaultBoardStrategy());
   const base = {
     input: args.input,
     from: args.from ?? 0,
@@ -153,8 +206,12 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
     maxFrames: clampFrames(args.maxFrames, 0),
     maxSheets: clampFrames(args.maxSheets, 0),
     budget: geom.budget,
+    // 预算被地板抬过（<544² 一分钱不省）时把原值带上，清单要写明白
+    ...(geom.floorRaisedFrom ? { budgetFloorRaisedFrom: geom.floorRaisedFrom } : {}),
     maxCanvasSide: geom.maxCanvasSide,
     textOnly: args.textOnly === true,
+    // 预演：只扫描 + 排布，回报切点数与各档代价，不出图（也是"先看刀数再选档"的入口）
+    planOnly: args.dryRun === true,
     // 自动分段：只传 from 时，窗口默认这么长（秒）；0 = 一直看到片尾
     ...(Number(args.segment) > 0 ? { segment: Math.round(Number(args.segment)) } : {}),
   };

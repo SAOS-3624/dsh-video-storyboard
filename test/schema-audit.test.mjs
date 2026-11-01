@@ -56,6 +56,9 @@ const SHARED_NOISE = {
   ],
   video_zoom: [
     'sheets', 'hotwords', 'textOnly', 'planThresholds', 'adaptive', // boardOptions 的 kind==='board' 分支
+    // dryRun 只接在 kind==='board' 分支上：zoom 本身就是"重看一小段"，先预演一遍
+    // 比直接出图的收益还小（它的窗口最多几十秒，一张图）
+    'dryRun',
     // boardGeometry() / segment 只在 kind==='board' 分支里读；zoom 的清晰度走 zoomHeight+quality
     'budget', 'maxPerSheet', 'need', 'segment',
   ],

@@ -41,8 +41,103 @@ export const tierSide = (tier) => {
   return 1 / Math.max(TIER_MIN, Math.min(TIER_MAX, t || 1));
 };
 
-/** 画布上限：DS 视觉只吃 800×800 / 384 token，超过就是白花字节。 */
-export const MAX_CANVAS_SIDE = 800;
+/**
+ * 画布上限：**单边 1300、面积 1300×1300**。
+ *
+ * 口径来自官方《图像理解 · Token 用量》（2026-11）：小于约 544×544 的图会被放大，
+ * 更大的图会被缩小到"总像素约相当于 1300×1300"，单张封顶 1024 token。
+ * 旧的 800×800 / 384 是上一版文档的值，已经过期 —— 但**默认画布仍是 800×450**（见 board.js），
+ * 这里的上限只是"允许你自己要更大的画布"，不代表默认变贵。
+ */
+export const MAX_CANVAS_SIDE = 1300;
+/** 一张图的像素上限（服务端不会再缩回去的范围）。 */
+export const MAX_IMAGE_AREA = MAX_CANVAS_SIDE * MAX_CANVAS_SIDE;
+
+/**
+ * 单张封顶（官方 1024；宿主按 patch 网格算，实际最大是 994）。
+ */
+const IMAGE_TOKEN_CAP = 1024;
+/** 地板：小于 544×544 的图**计费时**会被放大到这个面积（发送时并不放大）。 */
+export const IMAGE_UPSCALE_AREA = 544 * 544;
+
+/**
+ * 默认画布像素预算 = 360k（16:9 → 800×450 ≈ **233 token**）。
+ * **只在这里定义一次** —— board.js 只是把它转出。以前 tiers 的 fitCanvas 默认 640k、
+ * board 的 DEFAULT_BUDGET 也写 640k，结果超过 800 边长被裁成 360k，参数和行为对不上。
+ */
+export const DEFAULT_BUDGET = 360_000;
+
+/* ---- 像素 → token：照抄宿主的实现，不再用"像素÷1650"这种近似 -------------------
+ *
+ * 出处：`@deepseek-ai/dsh-llm-deepseek` 的 image-tokens 模块（服务端 v41 配置），
+ * 它按官方口径实现了完整算法，我们照抄是为了**报数 = 计费**：
+ *
+ *   - 图先按 14px 的 patch 对齐（**向上**取整到 14 的倍数）；
+ *   - 每轴再 3:1 降采样 → 一个 token 格 = 42×42 px；
+ *   - **每行多带 1 个分隔 token，整张再加 2 个框架 token**： tokens = rows × (cols + 1) + 2；
+ *   - 超过 1024 时按长宽比解出能塞进预算的最大网格（服务端会自己缩到那儿）。
+ *
+ * 所以"像素÷1650"只是粗估：800×450 真值是 **233**（不是 218，也不是旧的 384）；
+ * 地板是 **192**（不是 179）；封顶实际是 **994**（1300×1300 正好 994）。
+ * 改了这里必须跟宿主对拍（`scripts/verify-image-tokens.mjs`）。
+ */
+const IMAGE_PATCH = 14;
+const IMAGE_DOWNSAMPLE = 3;
+/** 一个 token 格覆盖的像素边长（14×3）。 */
+const IMAGE_CELL = IMAGE_PATCH * IMAGE_DOWNSAMPLE;
+const intDiv = (v, d) => Math.floor(v / d);
+const ceilDiv = (v, d) => Math.floor((v + d - 1) / d);
+/** patch 对齐（向上取整到 14 的倍数）后，这一轴有多少个 token 格。 */
+const gridCells = (padded) => ceilDiv(intDiv(padded, IMAGE_PATCH), IMAGE_DOWNSAMPLE);
+/** 网格 → token：每行带 1 个分隔符，另加 2 个框架 token。 */
+const gridTokens = (rows, cols) => rows * (cols + 1) + 2;
+const padToPatch = (px) => ceilDiv(px, IMAGE_PATCH) * IMAGE_PATCH;
+
+/** 一次"对齐 → 投影"：塞得下就原样，塞不下解出最大网格（宿主的闭式解）。 */
+function projectSize(W, H, cap) {
+  const tw = gridTokens(gridCells(padToPatch(H)), gridCells(padToPatch(W)));
+  if (tw <= cap) return { W, H, tokens: tw };
+  const aspect = H / W;
+  const idealW = Math.sqrt((cap - 2) / aspect + 0.25) - 0.5;
+  let solvedW = Math.trunc(idealW);
+  let solvedH = Math.trunc(idealW * aspect);
+  if (solvedW < 1) { solvedW = 1; solvedH = intDiv(cap - 2, 2); }
+  else if (solvedH < 1) { solvedH = 1; solvedW = intDiv(cap - 2, solvedH) - 1; }
+  const scale = Math.min((solvedW * IMAGE_CELL) / W, (solvedH * IMAGE_CELL) / H);
+  const bw = Math.trunc((W * scale) / IMAGE_PATCH) * IMAGE_PATCH;
+  const bh = Math.trunc((H * scale) / IMAGE_PATCH) * IMAGE_PATCH;
+  return { W: bw, H: bh, tokens: gridTokens(gridCells(bh), gridCells(bw)) };
+}
+
+/**
+ * **像素 → token**。全仓库只有这一处把尺寸换成钱，别在别处再写死一个数。
+ *
+ * @param {number} w 像素宽
+ * @param {number} h 像素高
+ * @returns {number} 估算 token（整数，≤ 1024）
+ */
+export function imageTokens(w, h) {
+  const cap = Number(process.env.DSH_IMAGE_TOKEN_CAP) > 0
+    ? Number(process.env.DSH_IMAGE_TOKEN_CAP) : IMAGE_TOKEN_CAP;
+  let W = Math.round(Number(w) || 0);
+  let H = Math.round(Number(h) || 0);
+  if (W <= 0 || H <= 0) return 0;
+  // 地板：计费时先按面积放大到 544×544（宿主发送时不会放大，只是这么收费）
+  const px = W * H;
+  if (px < IMAGE_UPSCALE_AREA) {
+    const scale = Math.sqrt(IMAGE_UPSCALE_AREA / px);
+    W = Math.max(1, Math.trunc(W * scale));
+    H = Math.max(1, Math.trunc(H * scale));
+  }
+  let cur = projectSize(W, H, cap);
+  // 宿主迭代到不动点（缩完再投影可能又变），这里同样最多跑 10 轮
+  for (let i = 0; i < 10; i += 1) {
+    const next = projectSize(cur.W, cur.H, cap);
+    if (next.tokens === cur.tokens && next.W === cur.W && next.H === cur.H) return next.tokens;
+    cur = next;
+  }
+  return cur.tokens;
+}
 
 /**
  * 画布尺寸：面积 <= budget，且**任一边不超过 800**（DS 的视觉上限）。
@@ -50,9 +145,11 @@ export const MAX_CANVAS_SIDE = 800;
  * 16:9 + 640k 算出来是 1066×600，会被 800 卡成 800×450 —— 这正是用户实测的
  * "再大就没意义"：超过 800 的部分宿主会缩回去，而清单里的格子尺寸就成了假数。
  */
-export function fitCanvas(aspect, { maxSide = MAX_CANVAS_SIDE, budget = 640_000 } = {}) {
+export function fitCanvas(aspect, { maxSide = MAX_CANVAS_SIDE, budget = DEFAULT_BUDGET } = {}) {
   const a = Math.max(0.2, Math.min(5, Number(aspect) || 16 / 9));
-  const area = Math.max(64_000, Number(budget) || 640_000);
+  // **地板**：计费时小于 544² 的图一律按 544² 收，所以画得比它小一分钱不省、只是更糊。
+  // 这里直接把面积抬到地板（清单会说明"已抬升"），别让调用方以为自己省了钱。
+  const area = Math.min(MAX_IMAGE_AREA, Math.max(IMAGE_UPSCALE_AREA, Number(budget) || DEFAULT_BUDGET));
   let w = Math.sqrt(area * a);
   let h = w / a;
   const shrink = Math.min(1, maxSide / w, maxSide / h);
@@ -229,6 +326,89 @@ export const BIN_COST = Object.freeze({
 /** 默认从"标准"改成"紧凑"：实测同一段 5 分钟素材 19 张 → 10 张，画面还看得清。 */
 export const DEFAULT_STRATEGY = 'compact';
 
+/* ------------------------------------------------------------------ 自动选档 */
+
+/**
+ * `auto` **不是一种尺寸策略**，而是一个决策器：它拿同一批帧把三个候选各排一次，
+ * 挑"最小格还认得出、张数又最少"的那个。
+ *
+ * 为什么要它：schema 里把 `full` 写在第一个，模型就真的选了 `full`（2026-11-01 实报，
+ * 一次 90 秒 PV 花掉了原本三倍的钱）。只要默认值是"安全的那一个"，模型没有理由去猜。
+ *
+ * 候选只有 full / standard / compact：`skim` / `brief` 会改采样（丢积分帧、合并切点），
+ * 排出来的不是同一批画面，拿它们比"张数"没有意义，所以不进候选，只能显式点名。
+ */
+export const AUTO_STRATEGY = 'auto';
+/** 从省到贵。auto 只在这里面挑。 */
+export const AUTO_CANDIDATES = Object.freeze(['compact', 'standard', 'full']);
+/** auto 的下限：最小格至少要到这一档，否则"这格是不是同一个镜头"都判断不了。 */
+const AUTO_MIN_READABILITY = 'shot';
+
+const READABILITY_RANK = Object.freeze({ composition: 0, shot: 1, scene: 2, text: 3 });
+/** 可读性从差到好。调用方要比较"够不够清楚"时用它，别自己排字符串数组。 */
+export const READABILITY_ORDER = Object.freeze(['composition', 'shot', 'scene', 'text']);
+
+/**
+ * auto 的**张数预算**：一段视频摊到几张图上，只由时长决定，跟切点密度无关。
+ *
+ * 这是用户 2026-11-01 的口径："让固定时长的一段视频有尽量相同的 chunk 数量，
+ * 尽量 5 分钟一张图，或者 2~3 分钟一张图"。默认 240 s ≈ 4 分钟一张，落在他的区间中线：
+ * 10 分钟 → 3 张，30 分钟 → 8 张，一部 2.5 小时的片子 → 37 张（整片概览时）。
+ *
+ * 为什么必须是"按时长"而不是"按张数上限"：切点密度能差一个数量级（一条 5 分钟的
+ * 快剪 PV 有 300 刀，一段 5 分钟的讲座只有 3 刀）。同一句"最多 8 张"在两边意味着
+ * 完全不同的钱和完全不同的画面。按时长定预算，用户每次付的钱才可预期。
+ */
+const AUTO_SECONDS_PER_IMAGE = 240;
+
+/**
+ * 时长 → 这一窗最多几张图（auto 用）。环境变量 `DSH_STORYBOARD_SECONDS_PER_IMAGE` 可调。
+ * @returns {number} 1..max 的整数
+ */
+export function autoSheetCap(duration, { secondsPerImage = AUTO_SECONDS_PER_IMAGE, max = 64 } = {}) {
+  const per = Number(secondsPerImage) > 0 ? Number(secondsPerImage) : AUTO_SECONDS_PER_IMAGE;
+  const d = Number(duration);
+  if (!(d > 0)) return 1;
+  return Math.max(1, Math.min(max, Math.round(d / per)));
+}
+
+/**
+ * 从若干候选里挑一个。纯函数，便于单测。
+ *
+ * 排序口径（**钱优先，信息量其次**）：
+ *   1. 张数少 —— 一张图 ≈ 384 token，这是唯一真正花钱的维度；
+ *   2. 张数相同时**帧多**的赢 —— 同样的钱，多看几个瞬间；
+ *   3. 再相同就按候选顺序（省的那档在前），保证结果可复现。
+ *
+ * 也就是说：只要能保持"最小格还认得出"，永远选最省的那档。**不做"更清楚优先"** ——
+ * 在一个已经够用的画面上多花一倍钱，正是这次要治的病。
+ *
+ * @param {Array<{name:string, bins:number, frames?:number, minW:number, minH:number}>} variants
+ * @returns {string|null} 选中的策略名；没有候选时 null
+ */
+export function pickAutoStrategy(variants = []) {
+  const ok = (Array.isArray(variants) ? variants : [])
+    .filter((v) => v && AUTO_CANDIDATES.includes(v.name) && Number.isFinite(v.bins));
+  if (ok.length === 0) return null;
+  const rank = (v) => READABILITY_RANK[readabilityOf(v.minW, v.minH)] ?? 0;
+  const fits = ok.filter((v) => rank(v) >= READABILITY_RANK[AUTO_MIN_READABILITY]);
+  const order = (v) => AUTO_CANDIDATES.indexOf(v.name);
+  // 一个都看不清时**先看钱，再看格子**。
+  //
+  // 这里踩过坑：原来按"最小格面积最大"退，等于永远选 full —— 因为 full 把 1 档帧
+  // 原样留着（一帧独占整张画布），格子在数字上确实最大，可一张图就只能装一帧。
+  // 实测一条 191 刀的 5 分钟素材：full **59 张**、compact 9 张、skim 3 张，差 6.5 倍钱，
+  // 而三者都到不了 shot 可读性。反正都要糊，那就糊在少花钱的那一档上。
+  if (fits.length === 0) {
+    return [...ok].sort((a, b) => (a.bins - b.bins)
+      || ((b.minW * b.minH) - (a.minW * a.minH))
+      || (order(a) - order(b)))[0].name;
+  }
+  return [...fits].sort((a, b) => (a.bins - b.bins)
+    || ((b.frames ?? 0) - (a.frames ?? 0))
+    || (order(a) - order(b)))[0].name;
+}
+
 export function applyStrategy(tiers, strategy = DEFAULT_STRATEGY) {
   const s = STRATEGIES[resolveStrategy(strategy)] ?? STRATEGIES[DEFAULT_STRATEGY];
   // 固定档：不管原来算出来是几档，全部压到同一档（恭喜发财档就是全 1/8）
@@ -246,23 +426,40 @@ export function applyStrategy(tiers, strategy = DEFAULT_STRATEGY) {
 /* ------------------------------------------------------------------ 积分取帧 */
 
 /**
+ * 积分阈值的**绝对**参考分："中等强度画面"每帧该有的变化量（0–255 尺度）。
+ *
+ * 标定自真实素材的 clean 均分（剔除真切点 ±0.35s 后真正参与积分的样本）：
+ * 慢节奏动画 0.79 / 实拍 2.92 / 连续运动 3.37 / 快剪 4.75 / 缓慢渐变 7.33。
+ * 取 4 让"常规实拍运动"落在原来的 equivSeconds 附近，只在两端拉开差距。
+ */
+export const INTEGRAL_REF_SCORE = 4;
+
+/**
  * **积分采样点（假切点）**：沿时间累加画面变化率，累够阈值就记一个点、然后清零。
  *
  * 这是用户要的"积分取帧"，顺序上**排在真切点之后**：
  *   - 真切点先定边界（它们是硬切，不能动）；
  *   - 假切点只在真切点之间补，并且离真切点太近就不补（真切点自己已经是边界）。
  *
- * 阈值 `T = 全片平均每秒变化量 × equivSeconds`，所以每个采样点代表"约 equivSeconds 秒
- * 的平均变化"：长时间静止的段落一个点都攒不出来（那一段就该一张整帧），
- * 摇镜/推拉/连续动作的地方会连续触发（那一段自然多几帧）。
+ * **阈值必须是绝对值**：`T = INTEGRAL_REF_SCORE × fps × equivSeconds`。
+ *
+ * 曾经写成 `T = 全片平均每秒变化量 × equivSeconds` —— 那是错的：画面动得越厉害，
+ * 平均分越高，阈值也跟着涨，两者抵消，于是不管素材多快多慢，都是固定
+ * `equivSeconds` 秒一个点（实测变化率 2/s 到 64/s 都输出 19 个点、间隔恒为 6.0s）。
+ * 积分就此退化成等间隔抽样，"动的快的地方多取帧"这个能力完全消失。
+ * 同一段素材内部的快慢差异（相对）当时是保留的，丢的是**整段素材的快慢**（绝对）。
+ *
+ * 换成绝对阈值后：慢素材要攒更久（帧少、格子大），快素材很快攒满（帧多、格子小），
+ * 这才是用户要的"跟着画面走"。
  *
  * @param {{duration:number, series:Array<{t:number,score:number}>, cuts?:number[],
- *          start?:number, equivSeconds?:number, minGap?:number, skipNearCut?:number}} o
+ *          start?:number, equivSeconds?:number, minGap?:number, skipNearCut?:number,
+ *          fps?:number}} o
  * @returns {number[]} 采样时刻（绝对秒，升序）
  */
 export function integralMarks({
   duration, series = [], cuts = [], start = 0,
-  equivSeconds = 6, minGap = 0.8, skipNearCut = 0.35,
+  equivSeconds = 6, minGap = 0.8, skipNearCut = 0.35, fps,
 } = {}) {
   if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
   const pts = (Array.isArray(series) ? series : [])
@@ -272,9 +469,14 @@ export function integralMarks({
   // 真切点附近的分不参与累加：那一帧的分是"跨过这一刀"的差值（40~100），
   // 混进来会把阈值抬到"只有连续狂甩才够"。
   const clean = pts.filter((s) => !real.some((c) => Math.abs(c - s.t) < skipNearCut));
-  const total = clean.reduce((acc, s) => acc + Math.max(0, Number(s.score) || 0), 0);
-  if (!(total > 0)) return [];
-  const T = (total / duration) * equivSeconds;
+  // 阈值只跟"参考画面 + 时间"有关，**和本片自己的平均变化量无关**（见上面的说明）。
+  // 缺省用 series 自身的采样率推 fps：stats 是逐帧来的，间隔就是 1/fps。
+  const rate = Number(fps) > 0
+    ? Number(fps)
+    : (pts.length > 1 && pts[pts.length - 1].t > pts[0].t
+      ? (pts.length - 1) / (pts[pts.length - 1].t - pts[0].t)
+      : 12);
+  const T = INTEGRAL_REF_SCORE * rate * equivSeconds;
   if (!(T > 0)) return [];
 
   const out = [];
@@ -379,7 +581,7 @@ export function framesFromBounds({
  * 加在 `applyStrategy` **之前**：策略是全局偏向（quality 全体升一档），
  * 假切点的额外 +2 是内容驱动的，两者叠起来才能让"运动段"在任何策略下都比周围细。
  */
-export const MARK_BOOST = 2;
+export const MARK_BOOST = 3;
 
 export function applyMarkBoost(tiers, segs, boost = MARK_BOOST) {
   return tiers.map((t, i) => {

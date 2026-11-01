@@ -8,7 +8,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  DETAIL_CHARS, countTextInSilence, formatManifest, truncateAtSentence, withSheetSuffix,
+  DETAIL_CHARS, countTextInSilence, formatManifest, formatPlanPreview, truncateAtSentence,
+  withSheetSuffix,
 } from '../src/storyboard/pipeline.js';
 
 /** 造一个 64 格的 result（每格 300 字），不跑 ffmpeg */
@@ -26,7 +27,9 @@ function makeResult({ cells = 64, textLen = 300 } = {}) {
           t_end: i * 145,
           t_frame: (i - 1) * 145 + 70,
           sharp: 1200,
-          text: '这是一句很长的台词'.repeat(Math.ceil(textLen / 8)).slice(0, textLen),
+          // 每格的台词**互不相同**（真实片子的常态）。共用一个固定字符串会让
+          // "重复只印一次"的压缩把它们并成一行，那测的就不是分页/截断了。
+          text: `#${i} ` + '这是一句很长的台词'.repeat(Math.ceil(textLen / 8)).slice(0, textLen),
         };
       }),
     };
@@ -102,8 +105,9 @@ test('清单头部带 cell/tokens/ffmpeg/sha256 与 plan 输入', () => {
   r.provenance = { ffmpeg: '6.1.1-essentials_build', sha256: 'abc123' };
   const text = formatManifest(r, { maxChars: 200_000 });
   assert.match(text, /cell>=559x248/);
-  // 一张图固定 384 token（DS 的 800×800 上限），不再按 42px 网格算 418
-  assert.match(text, /tokens="384 \(384\/img: 800x800 cap\)"/);
+  // 一张图按**它自己的网格**算钱：1064×600 → 26×15 格 → 15×(26+1)+2 = 407。
+  // 旧口径不管多大都报 384（800×800 那版文档），连方向都是错的。
+  assert.match(text, /tokens="407"/);
   assert.match(text, /ffmpeg="6\.1\.1-essentials_build"/);
   assert.match(text, /sha256="abc123"/);
   assert.match(text, /plan: strategy=balanced/);
@@ -430,9 +434,9 @@ test('看不清时清单必须主动说，并给三条可执行的改法', () =>
   const text = formatManifest(r, { maxChars: 200_000 });
   assert.match(text, /!! the smallest cells are 100x56/);
   assert.match(text, /colour blocks rather than/);
-  assert.match(text, /strategy:"quality"/, '要给出"升一档"这条路');
+  assert.match(text, /strategy:"full"/, '要给出"升一档"这条路（新名字）');
   assert.match(text, /video_zoom/, '要给出 zoom 这条路');
-  assert.match(text, /capped at 800x800/, '要说明加预算没用（800 是硬上限）');
+  assert.match(text, /1300x1300/, '要说明加预算的天花板在哪（1300 之后就开始说假话）');
   // 格子够大时不要唠叨
   r.plan = { ...r.plan, cell: { w: 400, h: 225, readability: 'scene' } };
   assert.ok(!/!! the smallest cells/.test(formatManifest(r, { maxChars: 200_000 })));
@@ -442,7 +446,7 @@ test('成本按"图数 x token + ASR 秒数"报，不报 CPU', () => {
   const r = makeResult({ cells: 16 });
   r.transcript = { ...r.transcript, source: 'asr', asrSeconds: 192.4, asrCached: false };
   const text = formatManifest(r, { maxChars: 200_000 });
-  assert.match(text, /cost: 1 image\(s\) × ~384 = ~384 vision tokens/);
+  assert.match(text, /cost: 1 image\(s\) ≈ ~407 vision tokens \(407\/img avg/);
   assert.match(text, /ASR 192\.4 s/);
 
   r.transcript = { ...r.transcript, asrCached: true, asrSeconds: 0 };
@@ -488,4 +492,104 @@ test('omitTranscript 时 ASR 的账照报，但要注明"词在别处"（不能�
   const off = formatManifest(r, { maxChars: 200_000, omitTranscript: true });
   assert.match(off, /ASR 192\.4 s/, '账要留着 —— 删了模型会以为这段没转写、再去转一次');
   assert.match(off, /words sent separately/, '要说明白词去哪了');
+});
+
+/* ---------------------------------------------------------------- 重复台词压缩 */
+
+/** 21 格、同一句歌词落在每一格里（PV / 歌词向视频的常态） */
+function makeLyricResult({ linesPerCell = 3 } = {}) {
+  const LINE = '穿过那片没有名字的海 我把你的名字写在浪上';
+  const cells = Array.from({ length: 21 }, (_, k) => ({
+    i: k + 1, sheet: 1,
+    t_start: 3.2 + k * 4.1, t_end: 3.2 + (k + 1) * 4.1, t_frame: 3.2 + k * 4.1 + 2,
+    text: LINE,
+    ...(linesPerCell > 1 ? {
+      lines: Array.from({ length: linesPerCell }, (_, j) => ({
+        from: 3.2 + k * 4.1 + j * 1.3, to: 3.2 + k * 4.1 + j * 1.3 + 1.2, text: LINE,
+      })),
+    } : {}),
+    tier: 5,
+  }));
+  return {
+    info: { path: 'pv.mp4', duration: 92.4, fps: 30, aspect: 16 / 9 },
+    window: { from: 0, to: 92.4, duration: 92.4 },
+    cuts: Array.from({ length: 46 }, (_, i) => i * 2),
+    transcript: { source: 'asr', segments: 12 }, audio: null,
+    plan: {
+      cells: 21, sheets: 1, produced: 21, frames: 21,
+      strategy: 'compact', strategyNote: '每帧尺寸降一档', maxFrames: 0,
+      cell: { w: 160, h: 90, readability: 'shot' },
+      canvas: { width: 800, height: 450 }, fill: 88.4, tiers: { 5: 21 }, sampleMarks: 6,
+      pick: 'mid', burn: 'index', trace: [],
+      inputs: { duration: 92.4, cuts: 46, meanLufs: -15, motion: 6.2 },
+    },
+    sheets: [{ sheet: 1, cols: 4, rows: 6, width: 800, height: 450, cells }],
+  };
+}
+
+test('同一句歌词横跨 21 格：只印一次，格子留 L# 引用', () => {
+  const r = makeLyricResult();
+  const text = formatManifest(r, { maxChars: 200_000 });
+  // 21 个格子必须还在（时间码是唯一凭据），但台词不再逐格重印
+  assert.equal(text.split('\n').filter((l) => l.startsWith('cell ')).length, 21);
+  assert.match(text, /shared speech — printed ONCE/);
+  assert.match(text, /L1 ×21 cells 1-21:/);
+  // 全篇只出现一次那句词（legend 里）
+  const hits = text.split('穿过那片没有名字的海').length - 1;
+  assert.equal(hits, 1, `同一句词出现了 ${hits} 次，应该只印 1 次`);
+  assert.match(text, /→ L1/, '格子要指回 legend，否则模型不知道这句词属于它');
+  // 体积回归：不压缩的话光台词就是 21 格 × 3 句 × 21 字 ≈ 1300 字，再加 21 行格子头。
+  // 现在整份清单（头部 + 计划 + 成本 + legend + 21 行格子）压在 2400 字以内。
+  assert.ok(text.length < 2400, `整份清单 ${text.length} 字符，超出预期`);
+});
+
+test('一格里的重复句子折叠成 ×n（副歌循环不是三条信息）', () => {
+  const text = formatManifest(makeLyricResult({ linesPerCell: 3 }), { maxChars: 200_000 });
+  assert.match(text, /" ×3/, '同一格里的 3 句应折叠成 ×3');
+});
+
+test('只有 2~4 格的重复不值得单列 legend（省下的比表头少）', () => {
+  const r = makeLyricResult();
+  r.sheets[0].cells = r.sheets[0].cells.slice(0, 3);
+  r.plan.produced = 3;
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.ok(!/shared speech/.test(text), '3 格重复用 legend 反而更长');
+});
+
+test('整窗同一档位时，只在开头说一次 k=，不逐格重复', () => {
+  const text = formatManifest(makeLyricResult(), { maxChars: 200_000 });
+  assert.match(text, /every cell in this window has the same size: k=5/);
+  const kPerCell = text.split('\n').filter((l) => l.startsWith('cell ') && /k=5/.test(l));
+  assert.deepEqual(kPerCell, [], '统一档位下每格不该再写 k=');
+});
+
+test('工具 schema 的体积有上限（它每轮 API 请求都要重发，不进清单也照样收费）', async () => {
+  // 五个工具的 schema 是**每轮固定重发**的：不进对话历史，但每次请求都在。
+  // 实测过 22855 字符 ≈ 14.9k token/轮 —— 一个 20 轮的会话光"说明书"就是 30 万 token。
+  // 这里只守上限，不锁具体文案：改描述随时可以，别把它养肥就行。
+  const { storyboardToolSpec, zoomToolSpec, subtitlesToolSpec, locateToolSpec, probeToolSpec }
+    = await import('../src/storyboard/tool-spec.js');
+  const total = [storyboardToolSpec, zoomToolSpec, subtitlesToolSpec, locateToolSpec, probeToolSpec]
+    .reduce((n, f) => n + JSON.stringify(f()).length, 0);
+  assert.ok(total < 13500, `五个工具 schema 共 ${total} 字符，超过 13500 —— 每轮重发的固定开销`);
+  const sb = JSON.stringify(storyboardToolSpec()).length;
+  assert.ok(sb < 6000, `video_storyboard 单独 ${sb} 字符，超过 6000`);
+});
+
+test('说明书只在干跑且扫描新鲜时出现一次（它按次收费，不能每轮都印）', () => {
+  // 完整说明从 schema 搬到了干跑结果里：schema 每轮重发，干跑结果只收一次。
+  // 必须守住"只印一次" —— 每轮都印就等于又把钱花回去了。
+  const base = {
+    info: { path: 'C:/x/a.mp4', duration: 40 },
+    window: { duration: 40, from: 0, to: 40 },
+    plan: { sheets: 1, frames: 16, cells: 4, produced: 16, canvas: { width: 800, height: 450 }, auto: null },
+    variants: [{ name: 'compact', bins: 1, minW: 178, minH: 94, readability: 'shot' }],
+  };
+  const fresh = formatPlanPreview({ ...base, cached: false });
+  const cached = formatPlanPreview({ ...base, cached: true });
+  assert.match(fresh, /full manual/, '首次干跑要给说明书');
+  assert.doesNotMatch(cached, /full manual/, '缓存命中时不能再印一遍');
+  // 关键数字必须在手册里：模型据此决定要不要选 full
+  assert.match(fresh, /Never pass "full" as a safe default/);
+  assert.match(fresh, /NOT "one frame every N seconds"/);
 });
