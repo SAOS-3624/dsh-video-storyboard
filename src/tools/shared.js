@@ -45,14 +45,16 @@ export function serviceOf(ctx, name) {
 export async function attachSheetImages(ctx, result) {
   // **运行期探测，不是 inject 声明**（原因见 src/index.js 的 inject 注释）：
   // 宿主没注册 attachments 时，插件必须照样能加载、工具照样能跑，只是拿不到图片。
-  const saveImage = serviceOf(ctx, 'attachments')?.saveImage;
-  if (typeof saveImage !== 'function') {
+  // **不要解构出 saveImage**：真实 LocalAttachmentStore.saveImage 依赖 this.compression。
+  // ctx.get() 返回的是服务实例本身，解构后调用 this 就是 undefined（0.5.12 出图失败）。
+  const store = serviceOf(ctx, 'attachments');
+  if (typeof store?.saveImage !== 'function') {
     throw new Error('this DSH build has no `attachments` service, so the storyboard image '
       + 'cannot be shown. Upgrade DSH, or use `video_probe` / `video_locate` (text only).');
   }
   const images = [];
   for (const sheet of result.sheets) {
-    images.push(await saveImage({
+    images.push(await store.saveImage({
       data: sheet.png,
       mediaType: 'image/png',
       name: `storyboard-${sheet.sheet}.png`,

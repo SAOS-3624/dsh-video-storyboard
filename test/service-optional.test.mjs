@@ -90,3 +90,21 @@ test('attachSheetImages：有 attachments 时正常提交每张图', async () =>
   assert.deepEqual(saved, ['storyboard-1.png', 'storyboard-2.png']);
   assert.equal(images.length, 2);
 });
+
+test('attachSheetImages：调用 saveImage 时必须保留 receiver', async () => {
+  // 真实宿主 LocalAttachmentStore.saveImage 第一句就读 this.compression；解构后 this=undefined。
+  const store = {
+    saved: [],
+    async saveImage(a) {
+      assert.equal(this, store, 'saveImage 的 this 必须是 attachments 实例，不能是 undefined');
+      this.saved.push(a.name);
+      return { url: a.name };
+    },
+  };
+  const ctx = cordisCtx({ provided: { attachments: store } });
+  const images = await attachSheetImages(ctx, {
+    sheets: [{ png: Buffer.from('a'), sheet: 1 }],
+  });
+  assert.deepEqual(store.saved, ['storyboard-1.png']);
+  assert.equal(images.length, 1);
+});

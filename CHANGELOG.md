@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed — `attachments.saveImage` receiver
+
+0.5.12 改用 `ctx.get('attachments')` 后，`shared.js` / `subtitles.js` 仍然把 `saveImage` 解构成
+局部函数再调用；真实 `LocalAttachmentStore.saveImage` 第一句读 `this.compression`，于是所有带图的
+工具都报 `Cannot read properties of undefined (reading 'compression')`（用户实报，issue #53）。
+
+现在保留服务实例并调用 `store.saveImage(...)`，两处一起修；回归测试用一个依赖 `this` 的 fake
+服务覆盖，避免 `ctx.get` 修好之后再次在 receiver 上翻车。
+
 ## [0.5.11] - 2026-11-01
 
 > `0.5.10` 已废弃（deprecated）：它带着下面第一条那个崩溃，别装。内容全部并进本版。
