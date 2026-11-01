@@ -29,6 +29,7 @@
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./client": "./lib/client.js",
     "./plan": "./src/storyboard/plan.js",
     "./scan": "./src/storyboard/scan.js",
     "./segments": "./src/storyboard/segments.js",
@@ -56,6 +57,7 @@
   },
   "files": [
     "src",
+    "lib",
     "bin",
     "scripts",
     "docs",
@@ -91,6 +93,9 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   }
 }

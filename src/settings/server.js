@@ -1,9 +1,9 @@
 /**
  * settings/server.js — 插件自己的本机设置页与 API。
  *
- * 为什么不注册 DSH settings slot：这两个包是 host-only 的，加浏览器半侧要额外构建
- * lazy-CJS bundle；设置页只有表单和自检，独立 HTML 更小、部署面更少。代价是页面不在
- * DSH 设置导航里，而是由 video_storyboard_settings 工具给出带随机 token 的地址。
+ * 页面本体仍是独立 HTML（表单、自检、下载按钮都在这一份里）；为了让用户能在
+ * DSH 设置里找到，另挂一个极小的 lazy-CJS 半侧：只把 tokenized URL 塞进 iframe，
+ * 不重做表单。同一地址也仍由 video_storyboard_settings 工具返回。
  *
  * 安全边界：
  *  - 只有本机 webServer 存在时才注册；
@@ -21,6 +21,7 @@ import { settingsPage } from './page.js';
 const PAGE_PATH = '/dsh-video-storyboard/settings';
 const API_PREFIX = PAGE_PATH + '/api';
 const MAX_BODY = 64 * 1024;
+const INDEX_GLOBAL = '__DSH_VIDEO_STORYBOARD_SETTINGS__';
 
 function json(res, status, data) {
   const body = JSON.stringify(data);
@@ -129,13 +130,28 @@ export function createSettingsPage({ ctx, env = process.env, log = () => {} } = 
 
   const origin = webServer.getOrigin?.() || ('http://127.0.0.1:' + webServer.port);
   const url = origin + PAGE_PATH + '?token=' + token;
+
+  // The DSH settings tab runs in the same browser origin; hand it the tokenized
+  // URL through the boot injection table instead of adding a second API.
+  let offIndex = null;
+  if (typeof ctx.on === 'function') {
+    try {
+      offIndex = ctx.on('webserver/index-inject', (table) => {
+        table.push({ kind: 'global', name: INDEX_GLOBAL, value: { url } });
+      });
+    } catch (e) {
+      log('[dsh-video-storyboard] settings index injection unavailable: ' + String(e?.message ?? e));
+    }
+  }
+
   const tool = {
     name: 'video_storyboard_settings',
     description: [
       'Open the local video_storyboard settings page: ASR on/off, API key,',
       'OpenAI-compatible endpoint/model/language, browser debugging port, and',
       'a read-only dependency check with official download links and copyable commands.',
-      'Returns a tokenized local URL; secrets are never returned.',
+      'Returns a tokenized local URL; the same page is a Settings > Built-in plugins tab in the Web GUI.',
+      'Secrets are never returned.',
     ].join(' '),
     parameters: {},
     output: {
@@ -175,6 +191,7 @@ export function createSettingsPage({ ctx, env = process.env, log = () => {} } = 
     dispose() {
       if (disposed) return;
       disposed = true;
+      try { offIndex?.(); } catch { /* ignore */ }
       try { routeDispose?.(); } catch { /* ignore */ }
     },
   };

@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
+import { runInNewContext } from 'node:vm';
 
 import { canTranscribe } from '../src/storyboard/asr.js';
 import {
@@ -66,12 +67,25 @@ test('settings: video.json 端口与 launchBrowser 合并写入', () => {
 
 function fakeWeb() {
   let handler = null;
+  let inject = null;
   const webServer = {
     port: 3080,
     register(route) { handler = route.handler; return () => { handler = null; }; },
     getOrigin() { return 'http://127.0.0.1:3080'; },
   };
-  return { webServer, handler: () => handler };
+  const ctx = {
+    get: () => webServer,
+    on(event, callback) {
+      if (event === 'webserver/index-inject') inject = callback;
+      return () => { inject = null; };
+    },
+  };
+  return {
+    webServer,
+    ctx,
+    handler: () => handler,
+    injections() { const table = []; inject?.(table); return table; },
+  };
 }
 
 function response() {
@@ -98,10 +112,13 @@ test('settings server: 页面 token、API token、保存后不回显 key', async
   const dir = home();
   const env = envOf(dir);
   const web = fakeWeb();
-  const page = createSettingsPage({ ctx: { get: () => web.webServer }, env });
+  const page = createSettingsPage({ ctx: web.ctx, env });
   assert.ok(page, '有 webServer 时应注册');
   const token = new URL(page.url).searchParams.get('token');
   assert.match(page.url, /^http:\/\/127\.0\.0\.1:3080\/dsh-video-storyboard\/settings\?token=/);
+  const table = web.injections();
+  assert.equal(table[0].name, '__DSH_VIDEO_STORYBOARD_SETTINGS__');
+  assert.equal(table[0].value.url, page.url, '设置 tab 必须拿到同一个带 token 的 URL');
 
   const forbidden = await invoke(web.handler(), { url: '/dsh-video-storyboard/settings?token=wrong' });
   assert.equal(forbidden.status, 403);
@@ -139,6 +156,22 @@ test('settings server: 页面 token、API token、保存后不回显 key', async
   const result = await page.tool.execute();
   assert.equal(result.available, true);
   assert.equal(result.url, page.url);
+});
+
+test('settings: DSH 设置 tab 的 client bundle 可注册', () => {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(pkg.dsh.client.platform, 'web');
+  assert.equal(pkg.exports['./client'], './lib/client.js');
+  let handoff = null;
+  const sandbox = { window: { __ModuleLoader__: { load: (h) => { handoff = h; } } }, globalThis: {}, console };
+  runInNewContext(readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
+  const mod = handoff.factory(() => ({ createElement: () => ({}) }));
+  let registered = null;
+  mod.apply({ slots: { inject(_name, callback) { callback(); }, register(options, component) { registered = { options, component }; } } });
+  assert.equal(registered.options.name, 'settings.plugins.tab');
+  assert.equal(registered.options.id, 'video-storyboard');
+  assert.equal(registered.options.label(), '视频分镜');
+  assert.equal(typeof registered.component, 'function');
 });
 
 test('settings server: 没有 webServer 时返回 null', () => {
