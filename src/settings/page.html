@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>视频分镜 · 设置</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--text:#1c1f24;--muted:#68707d;--line:#dfe3e9;--accent:#2563eb;--ok:#12805c;--bad:#b42318;--code:#f0f2f5}
+@media(prefers-color-scheme:dark){:root{--bg:#111418;--card:#191d23;--text:#e8eaed;--muted:#9aa3af;--line:#2b313a;--accent:#7aa2ff;--ok:#5bd6a8;--bad:#ff8b82;--code:#0e1115}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:900px;margin:0 auto;padding:32px 20px 64px}h1{font-size:24px;margin:0 0 4px}h2{font-size:16px;margin:0 0 12px}p{margin:6px 0;color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin:16px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+label.field{display:flex;flex-direction:column;gap:6px;font-weight:600;font-size:13px}
+input[type=text],input[type=password],input[type=number],select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
+input[type=checkbox]{margin-right:8px}.check{display:flex;align-items:center;font-weight:500;color:var(--text)}
+.hint{font-size:12px;color:var(--muted);font-weight:400}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:16px}
+button{padding:9px 14px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--text);font:inherit;cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button:disabled{opacity:.55;cursor:default}
+#status{font-size:13px;color:var(--muted)}#status.ok{color:var(--ok)}#status.bad{color:var(--bad)}
+.paths{font-size:12px;color:var(--muted);margin-top:10px}.paths code{background:var(--code);padding:2px 5px;border-radius:4px;color:var(--text)}
+.dep{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}.dep:last-child{border-bottom:0}
+.dot{width:9px;height:9px;border-radius:50%;margin-top:6px;flex:none;background:var(--muted)}.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}
+.dep .name{font-weight:600}.dep .detail{font-size:12px;color:var(--muted)}
+.dep .links{display:flex;gap:8px;flex-wrap:wrap;margin-top:7px}
+.dep a.dl{display:inline-block;font-size:12px;font-weight:600;text-decoration:none;padding:5px 9px;border:1px solid var(--accent);border-radius:7px;color:var(--accent)}
+.dep a.dl:hover{background:var(--accent);color:#fff}
+.copy{font-size:12px;padding:2px 7px;margin-left:6px;border-radius:6px}
+.help h3{font-size:14px;margin:14px 0 4px}.help ul{margin:6px 0 0;padding-left:20px}.help li{margin:5px 0;color:var(--muted)}
+code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--code);padding:2px 5px;border-radius:4px;color:var(--text)}
+.banner{padding:10px 12px;border-radius:8px;background:var(--code);font-size:12px;color:var(--muted);margin:10px 0}
+</style>
+</head>
+<body><main>
+<h1>视频分镜 · 设置</h1>
+<p>本页只写本机 JSON，密钥不会回显；保存后工具下一次调用即生效（ASR 配置按 mtime 热读）。</p>
+
+<div class="card">
+  <h2>台词与 ASR</h2>
+  <div class="grid">
+    <label class="field">转写模式
+      <select id="asrMode"><option value="auto">自动（推荐）</option><option value="off">关闭自动转写</option></select>
+      <span class="hint">关闭后只读内嵌字幕；不会为了转写去下载音频。</span>
+    </label>
+    <label class="field">Base URL
+      <input id="baseUrl" type="text" placeholder="http://127.0.0.1:8000/v1">
+      <span class="hint">OpenAI 兼容的 /audio/transcriptions 端点；留空用内置默认。</span>
+    </label>
+    <label class="field">模型
+      <input id="model" type="text" placeholder="FunAudioLLM/SenseVoiceSmall">
+    </label>
+    <label class="field">语言
+      <input id="language" type="text" placeholder="zh">
+    </label>
+    <label class="field">API Key
+      <input id="key" type="password" autocomplete="off" placeholder="留空保持已保存的 key">
+      <span class="hint" id="keyHint">密钥只保存在本机 asr.json。</span>
+    </label>
+  </div>
+  <label class="check" style="margin-top:10px"><input id="clearKey" type="checkbox"> 清除已保存的 key（环境变量里的 key 不受影响）</label>
+  <div class="banner" id="asrSource"></div>
+</div>
+
+<div class="card">
+  <h2>视频与浏览器</h2>
+  <div class="grid">
+    <label class="field">浏览器调试端口
+      <input id="browserPort" type="number" min="1" max="65535" placeholder="9333；留空关闭">
+      <span class="hint">给 Edge 加 --remote-debugging-port=9333 后，插件才能读真实播放位置。</span>
+    </label>
+    <label class="check" style="margin-top:22px"><input id="launchBrowser" type="checkbox"> 允许插件自己打开浏览器（默认关闭）</label>
+  </div>
+</div>
+
+<div class="card">
+  <h2>依赖与下载</h2>
+  <p>缺少的依赖会出现官方下载按钮；插件只打开官方来源，不静默安装、不执行下载的文件。装好后回到本页点“重新检查”。</p>
+  <div id="deps"></div>
+  <div class="help">
+    <h3>ffmpeg / ffprobe</h3>
+    <ul>
+      <li>Windows：<a href="https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" target="_blank" rel="noopener noreferrer">下载官方 FFmpeg zip</a>，解压后把里面的 <code>bin</code> 目录加进 PATH；或用 <code>winget install Gyan.FFmpeg</code><button class="copy" data-copy="winget install Gyan.FFmpeg">复制</button>。</li>
+      <li>macOS：<code>brew install ffmpeg</code><button class="copy" data-copy="brew install ffmpeg">复制</button>；Linux：用发行版包管理器。</li>
+      <li>装完用 <code>ffmpeg -version</code> 和 <code>ffprobe -version</code> 确认；本页只检查，不替你执行安装包。</li>
+    </ul>
+    <h3>yt-dlp（B 站/YouTube 链接才需要）</h3>
+    <ul>
+      <li>Windows 可直接<a href="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" target="_blank" rel="noopener noreferrer">下载 yt-dlp.exe</a>，放到 PATH 里的目录。</li>
+      <li>或用 <code>python -m pip install -U yt-dlp</code><button class="copy" data-copy="python -m pip install -U yt-dlp">复制</button>；装完运行 <code>yt-dlp --version</code> 确认。</li>
+    </ul>
+    <h3>Python（可选）</h3>
+    <ul>
+      <li>只有用 pip 安装 yt-dlp 或跑 Python 工具时才需要：<a href="https://www.python.org/downloads/windows/" target="_blank" rel="noopener noreferrer">下载 Python</a>，安装时勾选 “Add python.exe to PATH”。</li>
+    </ul>
+    <h3>本地 ASR / SenseVoice</h3>
+    <ul>
+      <li>优先在 DSH 的语音设置里下载并选中本地语音提供方；本插件检测到宿主 speechToText 会优先用本地模型。<a href="https://huggingface.co/FunAudioLLM/SenseVoiceSmall" target="_blank" rel="noopener noreferrer">模型页面</a>。</li>
+      <li>直接下模型文件不会自动接上宿主，仍需在 DSH 语音设置里选提供方；本页只做检测。</li>
+      <li>没有本地模型时，填一个 OpenAI 兼容端点 + key 即可；只转写台词，不下载整片。</li>
+    </ul>
+    <h3>API Key</h3>
+    <ul>
+      <li>云端示例：<a href="https://cloud.siliconflow.cn/account/ak" target="_blank" rel="noopener">获取 SiliconFlow API Key</a>。本机端点（127.0.0.1/localhost）按设计不需要 key。</li>
+      <li>环境变量优先于本页；如果 DSH_ASR_KEY 已设置，本页的 key 不会覆盖它。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+  <div class="paths" id="paths"></div>
+  <div class="actions"><button class="primary" id="save">保存设置</button><button id="check">重新检查环境</button><span id="status"></span></div>
+</div>
+</main>
+<script>
+(() => {
+  const token = new URLSearchParams(location.search).get('token') || '';
+  const apiBase = '/dsh-video-storyboard/settings/api';
+  const $ = (id) => document.getElementById(id);
+  const state = { asr: null, video: null, checks: [], paths: {} };
+
+  async function api(path, body) {
+    const res = await fetch(apiBase + path, {
+      method: body ? 'POST' : 'GET',
+      headers: { 'x-settings-token': token, 'content-type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    return data;
+  }
+
+  function setStatus(text, kind) {
+    const el = $('status');
+    el.textContent = text || '';
+    el.className = kind || '';
+  }
+
+  function escapeHtml(value) {
+    return String(value || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function render() {
+    const a = state.asr || {};
+    $('asrMode').value = a.enabled === false ? 'off' : 'auto';
+    $('baseUrl').value = a.baseUrl || '';
+    $('model').value = a.model || '';
+    $('language').value = a.language || '';
+    $('key').value = '';
+    $('clearKey').checked = false;
+    $('keyHint').textContent = a.keyFromEnv
+      ? '检测到环境变量 DSH_ASR_KEY：它优先于本页；本页保存的 key 不会覆盖它。'
+      : (a.hasKey ? '已保存 key；留空保持，勾选下方可清除。' : '还没有保存 key；本机端点通常不需要。');
+    $('clearKey').disabled = !a.hasKey;
+    const eff = a.effective ? (a.effective.source + ' · ' + a.effective.baseUrl + ' · ' + a.effective.model) : '未知';
+    $('asrSource').textContent = '当前生效：' + eff
+      + (a.envOverrides && a.envOverrides.length ? '；环境变量覆盖：' + a.envOverrides.join(', ') : '')
+      + (a.error ? '；文件错误：' + a.error : '');
+    const v = state.video || {};
+    $('browserPort').value = v.browserPort || '';
+    $('launchBrowser').checked = v.launchBrowser === true;
+    $('paths').innerHTML = '<div>asr.json：<code>' + escapeHtml(state.paths.asr || '') + '</code></div>'
+      + '<div>video.json：<code>' + escapeHtml(state.paths.video || '') + '</code></div>';
+  }
+
+  function renderChecks() {
+    const box = $('deps');
+    if (!state.checks.length) { box.textContent = '尚未检查。'; return; }
+    box.innerHTML = '';
+    for (const c of state.checks) {
+      const row = document.createElement('div');
+      row.className = 'dep';
+      const dot = document.createElement('span');
+      dot.className = 'dot ' + (c.ok ? 'ok' : 'bad');
+      const body = document.createElement('div');
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = c.label || c.id;
+      const detail = document.createElement('div');
+      detail.className = 'detail';
+      detail.textContent = c.detail || (c.ok ? '可用' : '不可用');
+      body.append(name, detail);
+      if (!c.ok && /^https:\/\//.test(c.downloadUrl || '')) {
+        const links = document.createElement('div');
+        links.className = 'links';
+        const a = document.createElement('a');
+        a.className = 'dl';
+        a.href = c.downloadUrl;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = c.downloadLabel || '下载';
+        links.append(a);
+        body.append(links);
+      }
+      row.append(dot, body);
+      box.append(row);
+    }
+  }
+
+  async function load() {
+    setStatus('加载中…');
+    try {
+      const data = await api('/state');
+      state.asr = data.asr; state.video = data.video; state.checks = data.checks || []; state.paths = data.paths || {};
+      render(); renderChecks();
+      setStatus('');
+      check();
+    } catch (e) { setStatus(e.message, 'bad'); }
+  }
+
+  async function save() {
+    setStatus('保存中…');
+    try {
+      const asr = {
+        enabled: $('asrMode').value === 'auto',
+        baseUrl: $('baseUrl').value,
+        model: $('model').value,
+        language: $('language').value,
+        clearKey: $('clearKey').checked,
+      };
+      if ($('key').value) asr.key = $('key').value;
+      const video = {
+        browserPort: $('browserPort').value === '' ? false : Number($('browserPort').value),
+        launchBrowser: $('launchBrowser').checked,
+      };
+      const data = await api('/save', { asr, video });
+      state.asr = data.asr; state.video = data.video;
+      render();
+      setStatus('已保存；下次工具调用生效。', 'ok');
+    } catch (e) { setStatus(e.message, 'bad'); }
+  }
+
+  async function check() {
+    setStatus('检查中…');
+    try {
+      const data = await api('/check', {});
+      state.checks = data.checks || [];
+      renderChecks();
+      setStatus('检查完成。', 'ok');
+    } catch (e) { setStatus(e.message, 'bad'); }
+  }
+
+  $('save').addEventListener('click', save);
+  $('check').addEventListener('click', check);
+  document.addEventListener('click', async (event) => {
+    const btn = event.target.closest('button.copy');
+    if (!btn) return;
+    try {
+      await navigator.clipboard.writeText(btn.dataset.copy || '');
+      setStatus('命令已复制。', 'ok');
+    } catch (e) { setStatus('复制失败，请手动选择命令。', 'bad'); }
+  });
+  load();
+})();
+</script>
+</body></html>

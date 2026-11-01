@@ -25,6 +25,7 @@
 
 // 四个视频识别工具各自的注册入口：契约、handler、注册都在 src/storyboard/ 里。
 import { storyboardTools } from './storyboard/register.js';
+import { createSettingsPage } from './settings/server.js';
 
 export const name = 'dsh-video-storyboard';
 /**
@@ -96,6 +97,31 @@ async function registerAll(ctx) {
   // 工具注册成功了，解绑函数却从来没登记过（插件卸载时不会解绑，而且没人知道出过错）。
   const disposers = [];
   disposers.push(...tools.map((tool) => ctx.tools.register(tool)));
+
+  // 设置页是可选能力：没有本机 webServer 的 CLI 宿主照常只注册五个工具。
+  const attachSettings = (settingsCtx) => {
+    try {
+      const settings = createSettingsPage({ ctx: settingsCtx, env: process.env, log: (message) => settingsCtx?.logger?.warn?.(message) });
+      if (settings) {
+        disposers.push(settings.dispose);
+        disposers.push(settingsCtx.tools.register(defineTool(settings.tool)));
+      }
+    } catch (e) {
+      try { settingsCtx?.logger?.warn?.('[dsh-video-storyboard] settings page failed: ' + String(e?.message ?? e)); } catch { /* ignore */ }
+    }
+  };
+  // webServer 可能晚于插件就绪；动态 inject 比 apply 时硬探测更可靠。
+  if (typeof ctx.inject === 'function') {
+    try {
+      const off = ctx.inject(['webServer'], (webCtx) => attachSettings(webCtx));
+      if (typeof off === 'function') disposers.push(off);
+    } catch (e) {
+      try { ctx?.logger?.warn?.('[dsh-video-storyboard] settings injection failed: ' + String(e?.message ?? e)); } catch { /* ignore */ }
+    }
+  } else {
+    attachSettings(ctx);
+  }
+
   return () => {
     for (const dispose of disposers.reverse()) dispose?.();
   };

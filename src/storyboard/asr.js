@@ -102,6 +102,7 @@ export function effectiveAsrKey(cfg = ASR_DEFAULTS, apiKey) {
  * `transcribe()` 的门用同一句话，否则清单与实际行为会朝反方向偏差。
  */
 export function canTranscribe(cfg = ASR_DEFAULTS, apiKey) {
+  if (cfg.enabled === false) return false;
   return !needsCloudKey(cfg.baseUrl, effectiveAsrKey(cfg, apiKey));
 }
 
@@ -118,7 +119,9 @@ export function resolveAsrConfig(env = process.env) {
   const envLanguage = cleanEnvValue(env.DSH_ASR_LANG);
   const keyEnv = cleanEnvValue(env.DSH_ASR_KEY_ENV) || 'DSH_ASR_KEY';
   const fromEnv = Boolean(envBaseUrl || env[keyEnv]);
+  const enabled = env.DSH_ASR_ENABLED === '0' ? false : (file.enabled !== false);
   const resolved = {
+    enabled,
     baseUrl: envBaseUrl || file.baseUrl || 'https://api.siliconflow.cn/v1',
     model: envModel || file.model || 'FunAudioLLM/SenseVoiceSmall',
     keyEnv,
@@ -154,7 +157,7 @@ function asrConfigStamp(env) {
       return `${p}:-`;
     }
   });
-  const envBits = ['DSH_ASR_BASE_URL', 'DSH_ASR_MODEL', 'DSH_ASR_LANG', 'DSH_ASR_KEY_ENV', 'DSH_ASR_KEY']
+  const envBits = ['DSH_ASR_BASE_URL', 'DSH_ASR_MODEL', 'DSH_ASR_LANG', 'DSH_ASR_KEY_ENV', 'DSH_ASR_KEY', 'DSH_ASR_ENABLED']
     .map((k) => `${k}=${env[k] ?? ''}`);
   return [...files, ...envBits].join('|');
 }
