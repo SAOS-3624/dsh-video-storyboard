@@ -248,9 +248,29 @@ export async function prefetchTranscript({
   }
 
   // 2) 本地媒体（页面 URL 会在这里下载/复用，和画面轨同一个 mediaKey）
-  const { path: media } = await resolveInput(input, fetchOptions ?? {});
+  // cookies 是 prefetch 的独立参数（站点 CC 已经用了）；下载也要用它，否则登录片在
+  // 这一步退成匿名请求，可能直接失败或拿到低清源。
+  const fetchOpts = { ...(fetchOptions ?? {}) };
+  if (cookies) fetchOpts.cookies = cookies;
+  const { path: media } = await resolveInput(input, fetchOpts);
   const info = await probeVideo(media, { ffprobePath });
   if (!info.hasAudio) return done({ ok: false, source: 'no-audio', segments: [], reason: 'no-audio' });
+
+  // 3) 内嵌字幕：和 resolveTranscript 同一级（站点 CC → 内嵌字幕 → 缓存 → ASR）。
+  // 以前这里直接跳去 canTranscribe()，本地带字幕的片子因此在没有 ASR key 时被误报 no-key。
+  if (info.hasSubtitle) {
+    const subtitle = await extractSubtitleTrack({ input: media, ffmpegPath }).catch(() => null);
+    if (subtitle) {
+      const segs = cutRange(subtitle, start, end);
+      return done({
+        ok: segs.length > 0,
+        source: 'subtitle',
+        segments: segs,
+        cached: false,
+        ...(segs.length > 0 ? {} : { reason: 'subtitle-empty' }),
+      });
+    }
+  }
 
   const asrCfg = resolveAsrConfig();
   if (!canTranscribe(asrCfg, asrKey)) {

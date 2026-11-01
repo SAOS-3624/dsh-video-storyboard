@@ -13,7 +13,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -36,6 +36,26 @@ async function makeMedia(dir, { audio = true } = {}) {
   if (audio) args.push('-f', 'lavfi', '-i', 'sine=frequency=440:duration=12', '-c:a', 'aac');
   args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', out);
   await run(DEFAULT_FFMPEG, args);
+  return out;
+}
+
+/** 带音轨 + 内嵌 mov_text 字幕的本地片：用来验证“内嵌字幕优先于 ASR” */
+async function makeMediaWithSubtitles(dir) {
+  const srt = join(dir, 'embedded.srt');
+  const out = join(dir, 'with-subtitles.mp4');
+  await writeFile(srt, [
+    '1', '00:00:00,000 --> 00:00:02,500', '内嵌第一句', '',
+    '2', '00:00:02,500 --> 00:00:05,500', '内嵌第二句', '',
+  ].join('\n'));
+  await run(DEFAULT_FFMPEG, [
+    '-hide_banner', '-v', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=s=160x90:r=10:d=6',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=6',
+    '-i', srt,
+    '-map', '0:v', '-map', '1:a', '-map', '2:s',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-c:s', 'mov_text', out,
+  ]);
   return out;
 }
 
@@ -88,6 +108,36 @@ test('没有音轨：直接说不行，不要假装成功', async (t) => {
     assert.equal(r.source, 'no-audio');
     assert.deepEqual(r.segments, [], '拿不到就说没有，不要给空壳句子');
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('内嵌字幕 + 无 ASR key：字幕先到，不要回 no-key', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'tp-sub-'));
+  process.env.DSH_VIDEO_CACHE_DIR = dir;
+  const prev = {
+    key: process.env.DSH_ASR_KEY,
+    base: process.env.DSH_ASR_BASE_URL,
+    model: process.env.DSH_ASR_MODEL,
+  };
+  delete process.env.DSH_ASR_KEY;
+  delete process.env.DSH_ASR_BASE_URL;
+  delete process.env.DSH_ASR_MODEL;
+  try {
+    const media = await makeMediaWithSubtitles(dir);
+    const r = await prefetchTranscript({
+      input: media, from: 0, to: 5, ffmpegPath: DEFAULT_FFMPEG,
+    });
+    assert.equal(r.source, 'subtitle', `应走内嵌字幕，实得 ${r.source}：${r.reason ?? ''}`);
+    assert.equal(r.ok, true, '内嵌字幕有句子时必须 ok');
+    assert.ok(r.segments.some((s) => /内嵌第一句/.test(s.text)), '要把字幕原句带回来');
+  } finally {
+    for (const [k, v] of [
+      ['DSH_ASR_KEY', prev.key], ['DSH_ASR_BASE_URL', prev.base], ['DSH_ASR_MODEL', prev.model],
+    ]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
     await rm(dir, { recursive: true, force: true });
   }
 });
