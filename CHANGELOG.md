@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`scripts/reference-server-sherpa.py`** —— 本机 ASR 服务端的最小参考实现（sherpa-onnx 2.x +
+  paraformer / ct-transformer / silero VAD，只依赖标准库 + numpy）。补上 `docs/CONFIG.zh.md` §7.1
+  「自己写」那条路缺的那份可对照代码：`--models` 目录内按已知文件名自动发现，也可逐个覆盖路径，
+  `--check` 只验模型能否加载。两条降级边界按文档口径实现 —— 标点加载或调用失败照常 200 + 不带标点的
+  文本，VAD 缺失或运行期出错退回整段一次识别。`scripts/` 不在 `files` 里，所以不进 npm 包，
+  只是给人复制出去用的。
+
 ## [0.5.11] - 2026-11-01
 
 > `0.5.10` 已废弃（deprecated）：它带着下面第一条那个崩溃，别装。内容全部并进本版。
