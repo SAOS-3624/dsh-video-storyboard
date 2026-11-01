@@ -35,6 +35,13 @@ const opt = parse(process.argv.slice(2), {
   'transcript-file': null, 'source-hash': false, quality: 'medium',
 });
 const input = opt._[0];
+// 不认识的开关要喊一声：0.6 删了 --cells / --sheets / --need，而外面的教程、脚本还是老写法，
+// 静默忽略会让人以为参数生效了（"我明明写了 --cells 9，怎么格子数还是 auto 挑的"）。
+if (opt.$unknown?.length) {
+  console.error(`[warn] 未识别的参数：${opt.$unknown.map((k) => `--${k}`).join(' ')}（已忽略）。`
+    + ' 0.6 起没有 --cells/--sheets/--need，改用 --frames N / --strategy auto|compact|standard|skim|full，'
+    + '先加 --dry-run 可以只报代价不出图。');
+}
 if (!input) {
   console.error('usage: node bin/storyboard.mjs <video-or-url> [--frames N] [--max-sheets N] [--from 0] [--to 300] ...');
   process.exit(2);
