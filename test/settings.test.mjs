@@ -166,12 +166,15 @@ test('settings: DSH 设置 tab 的 client bundle 可注册', () => {
   const sandbox = { window: { __ModuleLoader__: { load: (h) => { handoff = h; } } }, globalThis: {}, console };
   runInNewContext(readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
   const mod = handoff.factory(() => ({ createElement: () => ({}) }));
-  let registered = null;
-  mod.apply({ slots: { inject(_name, callback) { callback(); }, register(options, component) { registered = { options, component }; } } });
-  assert.equal(registered.options.name, 'settings.plugins.tab');
-  assert.equal(registered.options.id, 'video-storyboard');
-  assert.equal(registered.options.label(), '视频分镜');
-  assert.equal(typeof registered.component, 'function');
+  const registered = [];
+  mod.apply({ slots: { inject(_name, callback) { callback(); }, register(options, component) { registered.push({ options, component }); } } });
+  const tab = registered.find((entry) => entry.options.name === 'settings.plugins.tab');
+  assert.equal(tab.options.id, 'video-storyboard');
+  assert.equal(tab.options.label(), '视频分镜');
+  assert.equal(typeof tab.component, 'function');
+  const bundle = registered.find((entry) => entry.options.name === 'plugins.bundle.config');
+  assert.equal(bundle.options.key, 'dsh-video-storyboard');
+  assert.equal(bundle.component({ view: 'summary' }), null);
 });
 
 test('settings server: 没有 webServer 时返回 null', () => {
