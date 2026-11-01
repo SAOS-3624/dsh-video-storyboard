@@ -114,6 +114,8 @@ export async function runStoryboard(opts) {
     hotwords,
     ocr = false,
     asrKey,
+    // 工具层探测到宿主 speechToText 时传入的适配器；CLI / 无桌面宿主不传，行为不变。
+    hostAsr = null,
     asrIdleMs = null,
     cache = true,
     textOnly = false,
@@ -207,7 +209,7 @@ export async function runStoryboard(opts) {
   // planOnly 是"先告诉我多少刀"的预演：它连台词都不需要，转写直接关掉（否则要等一整轮 ASR）。
   const transcriptP = resolveTranscript({
     input, info, sourceInfo, fetchOptions, transcript: planOnly ? 'off' : transcript, transcriptFile,
-    winStart, winDur, silences, ffmpegPath, hotwords, asrKey, asrMaxChunk, cache,
+    winStart, winDur, silences, ffmpegPath, hotwords, asrKey, asrMaxChunk, cache, hostAsr,
   }).then((r) => {
     asrLife = r.asrLife;
     asrSeconds = r.asrSeconds;
