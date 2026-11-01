@@ -284,7 +284,9 @@ export function toRects(cells, { width, height, gutter = 0, bin = null } = {}) {
   //   垂直——下一行的上边缘贴到本行的下边缘（否则相邻行会重叠 1px，渲染时后画的盖住前一行）。
   const rows = new Map();
   out.forEach((c) => {
-    const k = `${Math.round(c.y * height)}|${Math.round(c.h * height)}`;
+    // 同一视觉行按 **y** 分组，不能把 h 也放进键里：混合档位的一行里每格高度不同，
+    // 带 h 会把 0 档补位格和相邻大格分成两组，取整后的 1px 重叠就修不掉。
+    const k = c.y;
     if (!rows.has(k)) rows.set(k, []);
     rows.get(k).push(c);
   });
