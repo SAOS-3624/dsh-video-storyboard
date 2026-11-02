@@ -119,7 +119,10 @@ So configure through a file:
 {
   "cookies": "D:/path/to/cookies.txt",
   "scanHeight": 360,
-  "zoomHeight": 1080
+  "zoomHeight": 1080,
+  "cacheDir": "D:/dsh-cache",
+  "mediaDir": "D:/dsh-media",
+  "mediaMaxMb": 300
 }
 ```
 
@@ -141,7 +144,8 @@ it mark `degraded` and add a note.
 |---|---|---|
 | `DSH_YTDLP_PATH` | auto-discovered | Path to the yt-dlp binary |
 | `DSH_VIDEO_COOKIES` | none | Path to cookies.txt |
-| `DSH_VIDEO_MEDIA_DIR` | `os.tmpdir()/dsh-video-storyboard/media` | Where the low-res copy is cached |
+| `DSH_VIDEO_CACHE_DIR` | system cache dir | Scan cache location (also `cacheDir` in `video.json`) |
+| `DSH_VIDEO_MEDIA_DIR` | `os.tmpdir()/dsh-video-storyboard/media` | Where the low-res copy is cached (also `mediaDir` in `video.json`) |
 | `DSH_VIDEO_MEDIA_MAX_MB` | `300` | Media cache cap; evicts oldest by mtime |
 | `DSH_FFMPEG_PATH` | auto-discovered | ffmpeg path; explicit value wins over `DSH_HOME`/PATH lookup |
 

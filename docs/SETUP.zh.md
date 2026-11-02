@@ -121,7 +121,10 @@ video_storyboard({ input: "...", cookies: "D:/.../cookies.txt" })
 {
   "cookies": "D:/path/to/cookies.txt",
   "scanHeight": 360,
-  "zoomHeight": 1080
+  "zoomHeight": 1080,
+  "cacheDir": "D:/dsh-cache",
+  "mediaDir": "D:/dsh-media",
+  "mediaMaxMb": 300
 }
 ```
 
@@ -142,7 +145,8 @@ video_storyboard({ input: "...", cookies: "D:/.../cookies.txt" })
 |---|---|---|
 | `DSH_YTDLP_PATH` | 自动发现 | yt-dlp 可执行文件路径 |
 | `DSH_VIDEO_COOKIES` | 无 | cookies.txt 路径 |
-| `DSH_VIDEO_MEDIA_DIR` | `os.tmpdir()/dsh-video-storyboard/media` | 低清全片落盘位置 |
+| `DSH_VIDEO_CACHE_DIR` | 系统缓存目录 | 扫描缓存位置（也可写 `video.json` 的 `cacheDir`） |
+| `DSH_VIDEO_MEDIA_DIR` | `os.tmpdir()/dsh-video-storyboard/media` | 低清全片落盘位置（也可写 `video.json` 的 `mediaDir`） |
 | `DSH_VIDEO_MEDIA_MAX_MB` | `300` | 媒体缓存上限，超了按 mtime 从旧删 |
 | `DSH_FFMPEG_PATH` | `ffmpeg` | ffmpeg 路径（沿用 0.2.x） |
 
