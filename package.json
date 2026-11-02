@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-storyboard",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Turn a video into storyboard images you can cite: one frame per shot, cell size follows cut density (1/1 … 1/8), row-packed into as few images as possible, with a timestamped index the model can quote and a tier map it can override.",
   "keywords": [
     "dsh",
