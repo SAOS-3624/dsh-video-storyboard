@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { assertFetchableUrl, isHttpUrl, normalizeUrl } from '../src/storyboard/url.js';
 import { discoverYtdlp, explainYtdlpError, formatSelector, loadVideoConfig, resolveAuth, summariseInfo, unwrapSingle } from '../src/storyboard/ytdlp.js';
 import { audioEvidence, fetchMedia } from '../src/storyboard/fetch.js';
-import { mediaKey, pruneMedia } from '../src/storyboard/media-store.js';
+import { freeBytes, mediaKey, pruneMedia } from '../src/storyboard/media-store.js';
 import { DEFAULT_FFMPEG, probeVideo } from '../src/storyboard/probe.js';
 import { pickVideoFormat, resolveDirectUrl, __clearDirectCache } from '../src/storyboard/direct-url.js';
 
@@ -420,6 +420,23 @@ test('pruneMedia: 上限够用时一个都不删', async () => {
     const result = await pruneMedia({ dir, maxBytes: 1024 * 1024 });
     assert.equal(result.removed, 0);
     assert.deepEqual(await readdir(dir), ['a']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('freeBytes: 按媒体目录所在的盘算，目录还没建也找最近的祖先', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-free-'));
+  try {
+    const seen = [];
+    const statfs = async (path) => {
+      seen.push(path);
+      return { bavail: 2, bsize: 1024 };
+    };
+    // 目标目录还不存在：应该退到已经存在的 root，而不是系统 tmpdir
+    const bytes = await freeBytes(join(root, 'not-created', 'media'), { statfs });
+    assert.equal(bytes, 2048);
+    assert.deepEqual(seen, [root]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
