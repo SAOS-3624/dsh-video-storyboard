@@ -115,6 +115,10 @@ function fetchOptionsFor(args = {}, kind = 'board', geom = null) {
     cookies: args.cookies,
     allowAnonymous: args.allowAnonymous === true,
     scanHeight,
+    // 键里带清晰度：zoom / 陪看的本地副本只做探测和兜底，隔壁已有同一条链接的副本就直接用，
+    // 不为一个兜底文件重新解析 + 重新下载（匿名重下高清会 503，2026-11-02 实报）。
+    // **分镜不能开**：它的本地副本就是产出源，清晰度必须严格照参数走。
+    ...(kind !== 'board' ? { reuseCached: true } : {}),
     // zoom 回原始流取高清：它是"看细节"的，不该被 board 的像素预算拖低
     ...(kind === 'zoom' ? { zoomHeight: args.zoomHeight ?? 1080 } : {}),
   };

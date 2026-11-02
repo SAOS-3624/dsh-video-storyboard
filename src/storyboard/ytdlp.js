@@ -224,6 +224,12 @@ export function explainYtdlpError(stderr, code = 1) {
   if (/HTTP Error 412/i.test(text)) {
     return 'HTTP 412: the site rate-limited this request. Wait a moment and retry.';
   }
+  if (/HTTP Error 503/i.test(text)) {
+    return 'HTTP 503 from the media host: the signed media URL expired, or the site is throttling ' +
+      'this request — anonymous high-bitrate links (1080P+) get refused first. Retry; if it persists, ' +
+      'lower `zoomHeight` / `scanHeight`, or export cookies.txt. If you already ran video_storyboard ' +
+      'on this link, a video_zoom re-run reuses the cached copy instead of downloading again.';
+  }
   if (/Requested format is not available|No video formats found/i.test(text)) {
     return 'no usable format matched the selector: C站 serves DASH tracks, ' +
       'use "bv*[height<=N]+ba" rather than "b[height<=N]".';

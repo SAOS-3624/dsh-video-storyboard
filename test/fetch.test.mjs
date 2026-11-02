@@ -613,3 +613,48 @@ test('fetchMedia: yt-dlp 只留了视频轨时，用旁边的 m4a 自己合流�
     await h.cleanup();
   }
 });
+
+test('fetchMedia: reuseCached 复用同一链接的别的清晰度副本，为兜底文件重下是 503 的根因', async () => {
+  const h = await makeHarness();
+  try {
+    const url = 'https://www.bilibili.com/video/BV1reuse';
+    // 分镜口径存一份 720 —— 这正是"扫描副本已经在缓存里"的那种现场
+    const board = await fetchMedia(url, {
+      scanHeight: 720, ytdlp: h.ytdlp, env: h.env, cookies: h.cookies,
+    });
+    assert.equal(board.source.scanHeight, 720);
+
+    // 一个**一定会失败**的 yt-dlp：只要网络被碰一下就 HTTP 503，和实报的现场一致
+    const fail = join(h.root, 'fail-ytdlp.mjs');
+    await writeFile(fail, [
+      "console.error('ERROR: [download] Got error: HTTP Error 503: Service Unavailable');",
+      'process.exit(1);',
+    ].join('\n'), 'utf8');
+    const failYtdlp = { bin: process.execPath, prefix: [fail] };
+
+    // zoom 口径是 360，键必然对不上 720 的目录 —— 不开 reuseCached 就得重下（这里会 503）
+    await assert.rejects(
+      () => fetchMedia(url, { scanHeight: 360, ytdlp: failYtdlp, env: h.env, cookies: h.cookies }),
+      /HTTP 503/,
+      '不开 reuseCached 时必须照旧走网络（分镜的清晰度不能被悄悄换掉）',
+    );
+
+    const zoom = await fetchMedia(url, {
+      scanHeight: 360, reuseCached: true, ytdlp: failYtdlp, env: h.env, cookies: h.cookies,
+    });
+    assert.equal(zoom.path, board.path, '要复用隔壁那份副本，路径必须和分镜那次完全一致');
+    assert.equal(zoom.source.cached, true);
+    assert.equal(zoom.source.scanHeight, 720, '清单要照实说本地副本是 720p，不能谎报 360');
+    assert.equal(zoom.source.maxAvailable, 1080, 'meta 里的源信息要跟着一起带回来');
+
+    // 一条从没缓存过的链接不享受这个待遇：没有副本就只能老实报错，不许静默降级
+    await assert.rejects(
+      () => fetchMedia('https://www.bilibili.com/video/BV1nobody', {
+        scanHeight: 360, reuseCached: true, ytdlp: failYtdlp, env: h.env, cookies: h.cookies,
+      }),
+      /HTTP 503/,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});

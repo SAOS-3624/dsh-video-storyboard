@@ -112,12 +112,61 @@ export async function audioEvidence(dir, { localHasAudio, sourceHasAudio } = {})
 
 
 /**
+ * 同一条链接**已经落过盘的别的副本**（清晰度不同的那个目录）。
+ *
+ * 缓存键是 `mediaKey(url, height)`，而各入口的落盘清晰度口径本来就不同：分镜默认 720
+ * （预算 ≥300k）或 480，zoom / 陪看是 360。于是"先分镜、再 zoom"必然 miss 一次 ——
+ * 整片就躺在隔壁目录里，却要重新解析（2.4 s）+ 重新下载；这条重下对匿名高清源就是
+ * `HTTP Error 503`，**失败点还是"为了拿一个只用来兜底的本地文件"**（2026-11-02 实报）。
+ *
+ * 只给 `reuseCached` 的入口用（zoom / 陪看：本地副本只做探测和兜底）。
+ * **分镜不能用** —— 它的本地副本就是产出源，清晰度必须严格照参数走。
+ *
+ * @returns {Promise<null|{path:string,dir:string,stat:object,meta:object,height:number}>}
+ */
+async function findCachedCopy(normalized, { wantHeight = 0, env = process.env } = {}) {
+  const root = mediaDir(env);
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const hits = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const dir = join(root, e.name);
+    let meta;
+    try {
+      meta = JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8'));
+    } catch {
+      continue;                        // 没 meta 的老目录无法确认是哪条链接，不猜
+    }
+    if (!meta?.url || normalizeUrl(meta.url) !== normalized) continue;
+    const path = join(dir, 'video.mp4');
+    let st;
+    try {
+      st = await stat(path);
+    } catch {
+      continue;
+    }
+    if (!(st.size > 0)) continue;
+    hits.push({ path, dir, stat: st, meta, height: Number(meta.scanHeight) || 0 });
+  }
+  if (hits.length === 0) return null;
+  // 优先"不比要的更低"里最矮的那份：够用就行，解码还便宜。都不够就退最高的那份。
+  const enough = hits.filter((h) => h.height >= wantHeight).sort((a, b) => a.height - b.height);
+  return enough[0] ?? hits.sort((a, b) => b.height - a.height)[0];
+}
+
+/**
  * 把 URL 变成一份可以喂给现有管线的本地文件，并把"这条链接能拿到什么"记下来。
  *
  * @param {string} input  http(s) 链接
  * @param {object} opts
  * @param {number} [opts.scanHeight=360]   落盘用的清晰度上限
  * @param {number} [opts.zoomHeight=1080]  只记录，供 zoom 用
+ * @param {boolean} [opts.reuseCached=false] 键 miss 时复用同一链接的别的清晰度副本（zoom / 陪看）
  * @param {string} [opts.cookies]
  * @param {boolean} [opts.allowAnonymous=false]
  * @param {string} [opts.ffmpegPath]  传给 yt-dlp 的 ffmpeg 路径（合流用）
@@ -129,6 +178,7 @@ export async function fetchMedia(input, opts = {}) {
   const {
     scanHeight = 360,
     zoomHeight = 1080,
+    reuseCached = false,
     cookies,
     allowAnonymous = false,
     // yt-dlp 自己不会去 DSH 的 bin 目录找 ffmpeg；不告诉它路径时，DASH 的 `+ba` 合流
@@ -151,8 +201,19 @@ export async function fetchMedia(input, opts = {}) {
   const ffmpegAbs = isAbsolute(ffmpegPath) ? ffmpegPath : (resolveMediaBinary('ffmpeg', { env }) ?? null);
 
   const key = mediaKey(normalized, scanHeight);
-  const dir = join(mediaDir(env), key);
-  const target = join(dir, 'video.mp4');
+  let dir = join(mediaDir(env), key);
+  let target = join(dir, 'video.mp4');
+
+  // 键里带清晰度，所以 zoom（360）看分镜存下的 720 副本一定是 miss。
+  // 允许复用隔壁副本：整片已经在本地时，**不该为了一个兜底文件再走一次网络**。
+  if (reuseCached && !(await fileExists(target))) {
+    const copy = await findCachedCopy(normalized, { wantHeight: scanHeight, env });
+    if (copy) {
+      dir = copy.dir;
+      target = copy.path;
+      onProgress?.({ phase: 'cache-reuse', path: target, height: copy.height });
+    }
+  }
 
   /**
    * 用旁边的音轨文件把 video.mp4 补成有声的（`-c copy`，不重编码）。
