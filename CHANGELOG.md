@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.6.3] - 2026-11-02
+
+> 主题：**把"能用但用不了"的三处修掉** —— 宿主 ASR 拒收音频、zoom 不接宿主 ASR、zoom 为一个
+> 兜底文件重下整片。顺手把 0.6.2 之后只落在 main 上的 CLI 与文档改动一起发出去。
+> **基线一处没动**：`strategy:"auto"` 的默认代价、`pack.solve` 的排布口径、图片 token 换算
+> 都还是 0.6.2 的，接着提的 PR 可以照旧直接落。
+
+### Fixed
+
+- **宿主 `speechToText` 交出去的音频不是宿主认的 WAV**（@大肥鱼 2026-11-02 实报，macOS 26 / Apple
+  Silicon）—— 启用 Voice Input（SenseVoice）后，任何带人声的视频都得到
+  `transcript="asr-failed"`，理由只有一句 `ASR call failed`。真因是 `-f wav -` 走管道：
+  `RIFF size` / `data size` 回填不了（`0xFFFFFFFF`），ffmpeg 还默认塞一个 `LIST/INFO` 把 `data`
+  从偏移 36 顶到 70。宿主的 `validateWave()` 逐字节认死「`RIFF size === len-8`、`data` 在
+  **36**、`data size === len-44`」，三条全灭。
+  **不是 macOS 专有**：同一份代码也在 Windows 包里，只是用 asr.json/HTTP 端点时走不到这条路。
+  修法是在内存里重写头（`canonicalizeWav()`：按 chunk 走一遍、只留 `fmt ` + `data`、重算长度），
+  **不写临时文件**——管道拿不到的长度我们自己会算，win/mac 同一套、零额外 I/O。
+  结构认不出来就明确抛错，不再静默跳过一整段台词。
+  `test/host-asr.test.mjs` 把宿主的 `validateWave()` 逐条复刻成断言，这个坑不会再回来。
+- **`video_zoom` 不接宿主 ASR** —— 它自己直调 `runStoryboard()`，绕过了 `shared.js` 的
+  `runWithHost()`，于是同一个文件「分镜能转写、放大变 `no-key`」。两个入口现在共用
+  `runWithHost()`，以后再有第三个入口也接同一个口子。
+- **`video_zoom` 读链接时会为一个"只用来兜底"的本地文件重新下载** —— 缓存键是
+  `mediaKey(url, height)`，而分镜落盘用 720/480、zoom 和陪看用 360，于是「先分镜再 zoom」
+  必然 miss 一次：整片就在隔壁目录里，却要重新解析（2.4 s）+ 重新下载，而这条重下对匿名高清源
+  就是 `HTTP Error 503`（同一位用户实报，从 macOS 跟到 Windows 都会）。现在 `fetchMedia` 支持
+  `reuseCached`：键 miss 时找同一链接**已经落过盘的别的清晰度副本**（优先"不比要的更低"里最矮的
+  那份），直接当本地副本用，**根本不去碰网络**。只给 zoom / 陪看开——分镜的本地副本就是产出源，
+  清晰度必须严格照参数走，**不许被复用悄悄换掉**。清单照实报 `scanned at 720p`。
+  另外 `explainYtdlpError` 补了 `HTTP Error 503` 的结论（签名直链过期 / 匿名高清被限流），
+  以前它只落到"最后三行原文"。
+  高清直链取帧失败回落本地副本本来就有一套（`frames.js` 的 `local-fallback`，
+  清单里有 "N cell(s) fell back to the low-resolution copy"），这次没动它。
+
+### Added
+
+- **CLI 遇到不认识的开关会当场说出来**（0.6 删了 `--cells` / `--sheets` / `--need`，外面的教程和
+  脚本还是老写法）。以前静默忽略，用户以为"参数生效了、只是效果不明显"；现在 stderr 会点名
+  `--cells`，并直接给出新写法（`--frames N` / `--strategy …` / 先 `--dry-run` 看代价）。
+  `bin/_args.mjs` 把未知项收进 `$unknown`，`bin/storyboard.mjs` 负责打印；`test/cli-args.test.mjs` 守着。
+
+### Changed
+
+- **安装文档规范化**（closes #68）：以 `dsh plugin --profile web add` 为主路径，桌面版单独说明
+  `install-dev`；`README` / `README.en` / `docs/INSTALL.zh.md` / `docs/USAGE*` 里 0.6 已删掉的
+  `--cells` 写法一并清掉，不再让新用户照着老命令试。
+- **清单措辞两处**（@大肥鱼 提，纯文本、无逻辑变化）：`→ L2` 这个标记现在写明「**这格有台词**，
+  就是上面列出的那句」，只有引号里空着才是真没声音——原来 legend 只说「读一次」，用户会以为
+  这些格子静音；格子太小时不再鼓励硬看，改成「**别从这种尺寸的格子描述人脸/道具/画面文字，
+  这个尺寸你是在猜**」，并按代价给出修法顺序（zoom → compact/standard → full）。
+
+### Docs
+
+- **FAQ 记下一条已知限制**（#70）：字幕轨本身可能是错的（平台 ASR 自动生成的经常错到离谱），
+  我们**不会**把它和画面硬字幕做交叉校验。`detail:"high"` 的 OCR 只校正命中的那一句、不并列两版；
+  真要核对就自己看一眼画面。交叉校验缺"什么算不一致"的判据与样本集，先不做。
+
 ## [0.6.2] - 2026-11-01
 
 > 主题：**把社区提的 6 个 PR 收进来**（4 修 bug + 2 加功能），每个都先单独 rebase 到 0.6.1
