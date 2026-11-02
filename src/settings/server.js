@@ -22,6 +22,41 @@ const API_PREFIX = PAGE_PATH + '/api';
 const MAX_BODY = 64 * 1024;
 const INDEX_GLOBAL = '__DSH_VIDEO_STORYBOARD_SETTINGS__';
 
+export const SETTINGS_TOOL_NAME = 'video_storyboard_settings';
+
+/**
+ * 设置页工具的**契约部分**（name / description / parameters / output）。
+ *
+ * 单独抽出来只为一件事：它是**第六个**工具，schema 同样每轮重发。
+ * `test/manifest.test.mjs` 的体积守门要能称到它 —— 建工具对象需要 webServer，
+ * 测试里造不出来；契约在这里就可以直接 `JSON.stringify`。
+ */
+export function settingsToolSpec() {
+  return {
+    name: SETTINGS_TOOL_NAME,
+    // 描述只说"能干什么、回什么"。**别写 GUI 里还有一份同样的设置页** ——
+    // 那是给人看的，模型每轮要为这句话付一次钱。
+    description: 'Open the local settings page (ASR on/off, API key, endpoint/model/language, '
+      + 'browser port, read-only dependency check). Returns a tokenized local URL; '
+      + 'secrets are never returned.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          url: { type: 'string', required: true },
+          available: { type: 'boolean', required: true },
+          text: { type: 'string', required: true },
+        },
+      },
+      render(_args, value) {
+        return [{ type: 'text', text: value.text }];
+      },
+    },
+  };
+}
+
 function json(res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
@@ -144,29 +179,7 @@ export function createSettingsPage({ ctx, env = process.env, log = () => {} } = 
   }
 
   const tool = {
-    name: 'video_storyboard_settings',
-    description: [
-      'Open the local video_storyboard settings page: ASR on/off, API key,',
-      'OpenAI-compatible endpoint/model/language, browser debugging port, and',
-      'a read-only dependency check with official download buttons.',
-      'Returns a tokenized local URL; the Web GUI also renders the same settings natively in the bundle detail page and Settings > Built-in plugins.',
-      'Secrets are never returned.',
-    ].join(' '),
-    parameters: {},
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          url: { type: 'string', required: true },
-          available: { type: 'boolean', required: true },
-          text: { type: 'string', required: true },
-        },
-      },
-      render(_args, value) {
-        return [{ type: 'text', text: value.text }];
-      },
-    },
+    ...settingsToolSpec(),
     timeoutMs: 10_000,
     isConcurrencySafe() { return true; },
     async execute() {

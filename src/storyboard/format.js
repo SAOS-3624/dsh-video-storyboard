@@ -642,9 +642,10 @@ export function formatManifest(result, {
   {
     const marks = (hasSheets ? all : []).filter((c) => c.via === 'mark').length;
     if (marks > 0) {
-      lines.push(`badges: ${marks} of ${all.length} cells are integral-sample points (a long take that kept ` +
-        'changing, split every ~6 s) and carry NO number on the image — that is why the numbers skip. ' +
-        'They are real frames; cite them by cell number from this list.');
+      // 一句话说完三件事：为什么跳号 / 它们是真帧 / 怎么引用。三句拆开读起来更顺，
+      // 但这段每次调用都在（换一支视频也照印），省下的是真金白银。
+      lines.push(`badges: ${marks} of ${all.length} cells are integral-sample points (long take split `
+        + 'every ~6 s) — no number on the image, still real frames; cite by cell number.');
     }
   }
   const planLine = formatPlanLine(result.plan);
@@ -682,10 +683,9 @@ export function formatManifest(result, {
       const rows = auto.options.map((o) => `${o.name}=${o.bins}img/${o.minW}x${o.minH}`);
       // 一张图在这个画布上多少钱：让"别的档要几张"能直接换算成钱（模型看不见单价就会乱选）
       const perSheet = plan.canvas ? imageTokens(plan.canvas.width, plan.canvas.height) : 0;
-      lines.push(`same window under the other policies: ${rows.join(' · ')}`
-        + ` (img = images this call would cost; ≈${perSheet} vision tokens each at this canvas). `
-        + '**"full" is the most expensive, not the most complete** — pass strategy only when the user'
-        + ' asks for bigger cells, and "skim"/"brief" when you only need to know what happens.');
+      lines.push(`other policies: ${rows.join(' · ')}`
+        + ` (${perSheet} vision tokens/img here) — **"full" is the expensive one, not the fuller one**;`
+        + ' pass strategy only when the user asks for bigger cells, "skim"/"brief" for the gist.');
     }
   }
   if (omitTranscript) {
@@ -694,9 +694,8 @@ export function formatManifest(result, {
   }
   // 多张图时先把"每张各管一段"说清楚：图上的抬头就是证据，模型容易把几张串成一条时间轴。
   if (hasSheets && result.sheets.length > 1) {
-    lines.push(`each image carries a header such as "0:00-5:00 1/3" — that is this sheet's own time ` +
-      `range and its index out of ${result.sheets.length}. The sheets are ${result.sheets.length} separate ` +
-      'windows, not one long strip: read the numbers on the image before stitching anything together.');
+    lines.push(`${result.sheets.length} sheets = that many separate windows, not one strip — each `
+      + 'header is that sheet\'s own range + index. Read the numbers on the image before stitching.');
   }
   // **要了多少、出了多少、为什么少**：旧版只写一个数，模型以为 16 格都看到了。
   // 少给通常不是 bug（窗口里只有 8 个镜头，再多就是重复帧），但必须说出来并给改法。
@@ -774,8 +773,7 @@ export function formatManifest(result, {
       (suspect.length > 1 ? ' (+more; see transcript.suspectInjection in the JSON manifest)' : ''));
   }
   if (result.audio) {
-    lines.push('footer strip shares the timeline: teal bars = loudness (taller = louder), ' +
-      'grey blocks = silence, yellow ticks = cut points.');
+    lines.push('footer: teal = loudness (taller = louder), grey = silence, yellow ticks = cuts.');
   }
   // 这一句专治"把格的起点当画面时刻"：标题板常常出现在格的中后段，
   // 不给 frame@ 的话，模型会以为格首就是标题板，整段判断提前几十秒。

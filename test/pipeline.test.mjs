@@ -680,8 +680,11 @@ test('e2e: strategy=auto 按时长压张数，并把三档代价写进清单', a
 
   const text = formatManifest(r);
   assert.match(text, /size policy: auto chose/);
-  assert.match(text, /same window under the other policies/);
+  // 标签从 "same window under the other policies" 压成了 "other policies"（每轮重发，省字）；
+  // 但**三档代价 + full 最贵这句警告**必须留着，否则模型下一轮还是只能猜。
+  assert.match(text, /^other policies: /m);
   assert.match(text, /full=/, '三档代价都要列出来，否则模型下一轮还是只能猜');
+  assert.match(text, /"full" is the expensive one/, 'full 的价码警告不能跟着散文一起删');
 });
 
 test('auto: 不给 maxSheets 时压张数仍然执行（capSheets 兜底是 Infinity，别用 >0 判）', async (t) => {

@@ -1,5 +1,31 @@
 # Changelog
 
+## [Unreleased]
+
+> 主题：**再把"每轮重发"的钱刮一遍**。0.6.1 把 schema 从 22.8k 压到 11.8k，
+> 但还有三处漏网：清单头部每次调用都重印的散文、设置页工具（它也是 schema，
+> 守门却只称五个工具）、以及"六工具合计"从来没被断言过。
+
+### Changed
+
+- **清单头部的说明性散文压短**（4 段，句子结构不动、事实一个不删）：
+  `badges:` 从三句变一句（仍是"为什么跳号 / 它们是真帧 / 按格号引用"），
+  多张图那条改成 `${n} sheets = n separate windows, not one strip`，
+  `footer strip shares the timeline:` → `footer:`（图例含义不变），
+  档位对照从 `same window under the other policies:` 改 `other policies:`，
+  并保留 `**"full" is the expensive one, not the fuller one**` —— 这句是防"选 full"的唯一提示。
+  实测（沧野 5 分钟窗 / 18 格 / 2 张 / 真字幕）：**5,592 → 5,275 字符**，头部 2,080 → 1,763。
+  剩下的 33% 头部全是事实（路径、档位分布、最小格、fill、单价），不再动。
+- **设置页工具的描述**删掉"Web GUI 里也有一份同样的设置页"这类**给人看**的话，
+  648 → **456 字符**。契约抽成 `settingsToolSpec()`（`src/settings/server.js` 导出），
+  只为让测试称得出它 —— 建工具对象要 webServer，测试里造不出来。
+
+### Fixed
+
+- **体积守门漏了第六个工具**：断言只加五个视频工具（<13,500），
+  而桌面版（有 webServer）每轮实际发六个。现在五工具 <12,500、**六工具 <13,000** 都锁住，
+  当前实测 **11,777 / 12,233**。
+
 ## [0.6.3] - 2026-11-02
 
 > 主题：**把"能用但用不了"的三处修掉** —— 宿主 ASR 拒收音频、zoom 不接宿主 ASR、zoom 为一个

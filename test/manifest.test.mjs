@@ -569,9 +569,14 @@ test('工具 schema 的体积有上限（它每轮 API 请求都要重发，不�
   // 这里只守上限，不锁具体文案：改描述随时可以，别把它养肥就行。
   const { storyboardToolSpec, zoomToolSpec, subtitlesToolSpec, locateToolSpec, probeToolSpec }
     = await import('../src/storyboard/tool-spec.js');
-  const total = [storyboardToolSpec, zoomToolSpec, subtitlesToolSpec, locateToolSpec, probeToolSpec]
+  // **第六个工具**：设置页（只有宿主有 webServer 时才注册，桌面版一定有）。
+  // 它以前不在这个断言里 —— 守门称的是"五个"，实际每轮发六个。
+  const { settingsToolSpec } = await import('../src/settings/server.js');
+  const five = [storyboardToolSpec, zoomToolSpec, subtitlesToolSpec, locateToolSpec, probeToolSpec]
     .reduce((n, f) => n + JSON.stringify(f()).length, 0);
-  assert.ok(total < 13500, `五个工具 schema 共 ${total} 字符，超过 13500 —— 每轮重发的固定开销`);
+  const six = five + JSON.stringify(settingsToolSpec()).length;
+  assert.ok(five < 12500, `五个视频工具 schema 共 ${five} 字符，超过 12500 —— 每轮重发的固定开销`);
+  assert.ok(six < 13000, `含设置页共 ${six} 字符，超过 13000 —— 这才是每轮真实发出的量`);
   const sb = JSON.stringify(storyboardToolSpec()).length;
   assert.ok(sb < 6000, `video_storyboard 单独 ${sb} 字符，超过 6000`);
 });
