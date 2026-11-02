@@ -63,6 +63,25 @@ test('settings: video.json 端口与 launchBrowser 合并写入', () => {
   const off = writeVideoSettings({ browserPort: false }, env);
   assert.equal(off.browserPort, null);
   assert.throws(() => writeVideoSettings({ browserPort: 70000 }, env), /65535/);
+
+  const full = writeVideoSettings({
+    cookies: '  C:\\Users\\me\\.dsh\\cookies.txt  ',
+    storyboardAuto: false,
+  }, env);
+  assert.equal(full.cookies, 'C:\\Users\\me\\.dsh\\cookies.txt');
+  assert.equal(full.storyboardAuto, false);
+  const raw2 = JSON.parse(readFileSync(join(dir, 'video.json'), 'utf8'));
+  assert.equal(raw2.custom, true);
+  assert.equal(raw2.storyboard.auto, false);
+  assert.equal(writeVideoSettings({ storyboardAuto: true }, env).storyboardAuto, true);
+  assert.throws(() => writeVideoSettings({ cookies: 42 }, env), /cookies 必须是字符串/);
+
+  const overridden = readVideoSettings({
+    ...env,
+    DSH_VIDEO_COOKIES: 'D:/env/cookies.txt',
+    DSH_STORYBOARD_AUTO: '0',
+  });
+  assert.deepEqual(overridden.envOverrides, ['DSH_VIDEO_COOKIES', 'DSH_STORYBOARD_AUTO']);
 });
 
 function fakeWeb() {
@@ -137,7 +156,10 @@ test('settings server: 页面 token、API token、保存后不回显 key', async
   const saved = await api('/save', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ asr: { enabled: true, baseUrl: 'http://127.0.0.1:9999/v1', key: 'secret' }, video: { browserPort: 9333 } }),
+    body: JSON.stringify({
+      asr: { enabled: true, baseUrl: 'http://127.0.0.1:9999/v1', key: 'secret' },
+      video: { browserPort: 9333, cookies: 'C:\\tmp\\cookies.txt', storyboardAuto: false },
+    }),
   });
   assert.equal(saved.status, 200);
   const state = JSON.parse(saved.body);
@@ -145,6 +167,8 @@ test('settings server: 页面 token、API token、保存后不回显 key', async
   assert.equal(JSON.stringify(state).includes('secret'), false, '响应里不能出现 key 明文');
   assert.equal(readFileSync(join(dir, 'asr.json'), 'utf8').includes('secret'), true);
   assert.equal(existsSync(join(dir, 'video.json')), true);
+  assert.equal(state.video.cookies, 'C:\\tmp\\cookies.txt');
+  assert.equal(state.video.storyboardAuto, false);
   const checked = await api('/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   assert.equal(checked.status, 200);
   const checks = JSON.parse(checked.body).checks;

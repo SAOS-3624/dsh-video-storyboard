@@ -147,8 +147,9 @@ export function createSettingsPage({ ctx, env = process.env, log = () => {} } = 
     name: 'video_storyboard_settings',
     description: [
       'Open the local video_storyboard settings page: ASR on/off, API key,',
-      'OpenAI-compatible endpoint/model/language, browser debugging port, and',
-      'a read-only dependency check with official download buttons.',
+      'OpenAI-compatible endpoint/model/language, browser debugging port,',
+      'cookies file, automatic storyboard, and a read-only dependency check',
+      'with official download buttons.',
       'Returns a tokenized local URL; the Web GUI also renders the same settings natively in the bundle detail page and Settings > Built-in plugins.',
       'Secrets are never returned.',
     ].join(' '),
