@@ -388,12 +388,14 @@ export function readabilityAdvice(plan) {
   const tier = plan.tiers ? Object.keys(plan.tiers).sort((a, b) => Number(b) - Number(a))[0] : '8';
   return `!! the smallest cells are ${w}x${h} — that is "${readability}", colour blocks rather than ` +
     `content. The 1/${tier} tier exists because that stretch cuts fast (many short shots), so each ` +
-    'frame there is a real shot but only that wide. Fix it one of three ways: ' +
-    'strategy:"full" (every frame one tier bigger — same frames, more images, each billed by its ' +
-    'pixels), leave strategy at "auto"/"compact" instead of "skim"/"brief" (those pin every cell to ' +
-    '1/8 on purpose), or video_zoom on the 1-2 frames you actually need (one short window, big cells). ' +
-    'Raising budget only helps up to 1300x1300 (the vision API stops scaling there); past that the ' +
-    'numbers in this list would be fiction.';
+    'frame there is a real shot but only that wide. **Do not describe faces, props or on-screen text ' +
+    'from cells this small — at this size you are guessing.** Fix it, cheapest first: ' +
+    '(1) video_zoom on the 1-2 cells you actually care about, passing that cell\'s own from/to — ' +
+    'one short window, big cells, one image; (2) re-run with strategy:"compact"/"standard" ' +
+    '(1/4 or 1/2 cells, more images); (3) strategy:"full" only if every cell must be readable. ' +
+    'Leaving strategy at "auto"/"compact" instead of "skim"/"brief" avoids this entirely — those two ' +
+    'pin every cell to 1/8 on purpose. Raising budget does NOT help beyond 1300x1300 (the vision API ' +
+    'stops scaling there); past that the numbers would be fiction.';
 }
 
 /**
@@ -926,8 +928,9 @@ export function formatManifest(result, {
   const tierSet = new Set(picked.map((c) => c.tier).filter((t) => Number.isFinite(t)));
   const uniformTier = picked.length > 1 && tierSet.size === 1 ? [...tierSet][0] : null;
   if (shared.length > 0) {
-    lines.push('shared speech — printed ONCE, referenced by L# below (the same sentence falls inside '
-      + 'several cells; read it once, not once per cell):');
+    lines.push('shared speech — printed ONCE, referenced by L# below. A cell line ending in "→ L2" '
+      + 'MEANS THAT CELL HAS SPEECH (it is the sentence listed above), not that it is silent. Only a '
+      + 'line with "" is actually empty:');
     for (const g of shared) {
       lines.push(`  ${g.id} ×${g.cells.length} cells ${compressRanges(g.cells)}: ${g.text}`);
     }
