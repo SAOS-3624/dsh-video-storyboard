@@ -22,7 +22,16 @@ as the accuracy ceiling: if you need gradual transitions (dissolves, wipes), use
 
 **PySceneDetect — `ContentDetector`** (BSD-3-Clause) <https://www.scenedetect.com/>
 Where the *idea* of weighting hue/saturation/value deltas separately comes from. Our `scan.js` is an
-independent implementation (64×36 HSV, three-channel mean, no adaptive per-channel thresholding).
+independent implementation (64×36 HSV, three-channel mean, no adaptive per-channel thresholding) that
+diverges in four places, each forced by the material we score: hue is compared on a **ring** (359° vs 0°
+is a 1° change, not a 359° one, otherwise red→magenta gradients register as a huge cut); the hue term is
+**down-weighted by the lower of the two saturations** (near-grey pixels have no meaningful hue);
+scores are **normalised by frame brightness** (×1–3) so one threshold means the same thing in a night
+scene and a bright one; and **letterbox bars are measured and divided out** (they are a constant in the
+denominator, which quietly depresses every score on a 2.39:1 film).
+
+No PySceneDetect code is copied. If we ever lift a module wholesale (`FlashFilter` is the obvious
+candidate), its BSD-3 notice and full licence text have to move into `NOTICE` first.
 
 **FFmpeg `scdet` filter** <https://ffmpeg.org/ffmpeg-filters.html#scdet>
 The baseline we benchmark against in the README: 4/9 hard cuts on our fixture versus our 9/9. `scdet`
@@ -79,7 +88,30 @@ See [asr-contract.md](./asr-contract.md).
 
 ---
 
-## 6. Deliberately not used
+## 6. Evaluation datasets
+
+The accuracy numbers quoted in the README are measured on these public sets, using the protocol of
+TransNetV2's `training/metrics_utils.py` (scene lists → transition intervals, 2-frame tolerance). We
+download the videos locally to measure; **this project does not redistribute either dataset** — only the
+benchmark scripts under `bench/` are ours.
+
+**L. Baraldi, C. Grana, R. Cucchiara, "Shot and Scene Detection via Hierarchical Clustering for
+Re-visited TV Material", CAIP 2015.**
+BBC Planet Earth (11 episodes, 4844 shot transitions) and RAI (10 items, ~98 min, scene-level labels
+only — do not score a shot detector on it). The BBC set is what the **F1 90.2** refers to. Note when
+quoting it: 96 % of its transitions are hard cuts, which flatters every frame-difference detector.
+RAI's mirror we used carries semantic *scene* annotations rather than shot labels; scoring SBD against
+it yields a meaningless ~15 % F1, so it is not used for any published number.
+
+**W. Zhu, Y. Huang, X. Xie, W. Liu, J. Deng, D. Zhang, Z. Wang, J. Liu, "AutoShot: A Short Video Dataset
+and State-of-the-Art Shot Boundary Detection", CVPRW 2023, arXiv:2304.06116.**
+SHOT (200 test videos, 2516 transitions, median shot ≈1.6 s). This is the hard set — short-form video
+cuts between visually similar frames, and our F1 there is **69.8 %**. Quote 90.2 and 69.8 together, never
+90 alone.
+
+---
+
+## 7. Deliberately not used
 
 | Technique | Why not |
 |---|---|
