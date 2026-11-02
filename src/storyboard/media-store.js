@@ -11,6 +11,7 @@ import { access, readdir, rm, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { configuredText, readVideoFile } from './user-config.js';
 
 /** 文件在不在、可不可读。**一行一个坑**：裸 access() 抛异常，用 try 包住才是判断而不是报错。 */
 export async function fileExists(path) {
@@ -29,12 +30,17 @@ export const DEFAULT_MEDIA_MAX_MB = 300;
 /* ------------------------------------------------------------------ 媒体缓存 */
 
 export function mediaDir(env = process.env) {
-  return env[MEDIA_ENV] || join(tmpdir(), 'dsh-video-storyboard', 'media');
+  const configured = configuredText(readVideoFile(env), 'mediaDir');
+  return env[MEDIA_ENV] || configured || join(tmpdir(), 'dsh-video-storyboard', 'media');
 }
 
 export function mediaMaxBytes(env = process.env) {
-  const mb = Number(env[MEDIA_MAX_MB_ENV]);
-  return (Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_MEDIA_MAX_MB) * 1024 * 1024;
+  const fromEnv = Number(env[MEDIA_MAX_MB_ENV]);
+  const fromConfig = Number(readVideoFile(env).mediaMaxMb);
+  const mb = Number.isFinite(fromEnv) && fromEnv > 0
+    ? fromEnv
+    : Number.isFinite(fromConfig) && fromConfig > 0 ? fromConfig : DEFAULT_MEDIA_MAX_MB;
+  return mb * 1024 * 1024;
 }
 
 /** 缓存键：归一化链接 + 落盘清晰度。**路径必须稳定**，否则下游的 sha1(路径+窗口) 会全部失效。 */

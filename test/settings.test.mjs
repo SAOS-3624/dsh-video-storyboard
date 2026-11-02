@@ -7,6 +7,8 @@ import { Readable } from 'node:stream';
 import { runInNewContext } from 'node:vm';
 
 import { canTranscribe } from '../src/storyboard/asr.js';
+import { cacheDir } from '../src/storyboard/cache.js';
+import { mediaDir, mediaMaxBytes } from '../src/storyboard/media-store.js';
 import {
   readAsrSettings, readVideoSettings, writeAsrSettings, writeVideoSettings,
 } from '../src/settings/config.js';
@@ -76,12 +78,48 @@ test('settings: video.json 端口与 launchBrowser 合并写入', () => {
   assert.equal(writeVideoSettings({ storyboardAuto: true }, env).storyboardAuto, true);
   assert.throws(() => writeVideoSettings({ cookies: 42 }, env), /cookies 必须是字符串/);
 
+  const storage = writeVideoSettings({
+    cacheDir: '  C:\\cache  ',
+    mediaDir: 'D:\\media',
+    mediaMaxMb: 512,
+  }, env);
+  assert.equal(storage.cacheDir, 'C:\\cache');
+  assert.equal(storage.mediaDir, 'D:\\media');
+  assert.equal(storage.mediaMaxMb, 512);
+  const raw3 = JSON.parse(readFileSync(join(dir, 'video.json'), 'utf8'));
+  assert.equal(raw3.cacheDir, 'C:\\cache');
+  assert.equal(raw3.mediaMaxMb, 512);
+  assert.throws(() => writeVideoSettings({ mediaMaxMb: 0 }, env), /mediaMaxMb/);
+  assert.throws(() => writeVideoSettings({ mediaDir: 42 }, env), /mediaDir 必须是字符串/);
+
   const overridden = readVideoSettings({
     ...env,
     DSH_VIDEO_COOKIES: 'D:/env/cookies.txt',
     DSH_STORYBOARD_AUTO: '0',
   });
   assert.deepEqual(overridden.envOverrides, ['DSH_VIDEO_COOKIES', 'DSH_STORYBOARD_AUTO']);
+});
+
+test('settings: 缓存与媒体路径用配置，环境变量优先', () => {
+  const dir = home();
+  const env = envOf(dir);
+  writeVideoSettings({
+    cacheDir: 'C:\\cache',
+    mediaDir: 'D:\\media',
+    mediaMaxMb: 512,
+  }, env);
+  assert.equal(cacheDir(env), 'C:\\cache');
+  assert.equal(mediaDir(env), 'D:\\media');
+  assert.equal(mediaMaxBytes(env), 512 * 1024 * 1024);
+  const overridden = {
+    ...env,
+    DSH_VIDEO_CACHE_DIR: 'E:\\env-cache',
+    DSH_VIDEO_MEDIA_DIR: 'E:\\env-media',
+    DSH_VIDEO_MEDIA_MAX_MB: '42',
+  };
+  assert.equal(cacheDir(overridden), 'E:\\env-cache');
+  assert.equal(mediaDir(overridden), 'E:\\env-media');
+  assert.equal(mediaMaxBytes(overridden), 42 * 1024 * 1024);
 });
 
 function fakeWeb() {

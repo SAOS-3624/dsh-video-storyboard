@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { configuredText, readVideoFile } from './user-config.js';
 
 // 缓存版本：**切点判定逻辑一变就要加 1** —— 版本进了 key，旧条目自动失效，不需要用户手清。
 // 1 → 2：0.4.3 改了极静素材的相对基线判定（spikeCuts）、平铺格与 suppressClose 的用法，
@@ -53,6 +54,8 @@ export const PROTECTED_FILES = Object.freeze([
 
 export function cacheDir(env = process.env) {
   if (env.DSH_VIDEO_CACHE_DIR) return env.DSH_VIDEO_CACHE_DIR;
+  const configured = configuredText(readVideoFile(env), 'cacheDir');
+  if (configured) return configured;
   if (process.platform === 'win32' && env.LOCALAPPDATA) {
     return join(env.LOCALAPPDATA, 'dsh-video-storyboard', 'cache');
   }

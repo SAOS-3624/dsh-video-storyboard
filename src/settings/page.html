@@ -76,6 +76,18 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
       <span class="hint">Netscape cookies.txt，给需要登录的 B 站/YouTube 用；也可用 DSH_VIDEO_COOKIES 环境变量。</span>
     </label>
     <label class="check"><input id="storyboardAuto" type="checkbox"> 自动生成分镜（storyboard.auto）</label>
+    <label class="field" style="grid-column:1/-1">扫描缓存目录
+      <input id="cacheDir" type="text" placeholder="留空用默认缓存目录">
+      <span class="hint">DSH_VIDEO_CACHE_DIR 优先；空着用系统缓存目录。</span>
+    </label>
+    <label class="field" style="grid-column:1/-1">媒体缓存目录
+      <input id="mediaDir" type="text" placeholder="留空用系统临时目录">
+      <span class="hint">下载的片副本放这里；DSH_VIDEO_MEDIA_DIR 优先。</span>
+    </label>
+    <label class="field">媒体缓存上限
+      <input id="mediaMaxMb" type="number" min="1" placeholder="300">
+      <span class="hint">单位 MB；留空用默认 300；DSH_VIDEO_MEDIA_MAX_MB 优先。</span>
+    </label>
   </div>
 </div>
 
@@ -167,6 +179,9 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
     $('launchBrowser').checked = v.launchBrowser === true;
     $('cookies').value = v.cookies || '';
     $('storyboardAuto').checked = v.storyboardAuto !== false;
+    $('cacheDir').value = v.cacheDir || '';
+    $('mediaDir').value = v.mediaDir || '';
+    $('mediaMaxMb').value = v.mediaMaxMb || '';
     $('videoSource').textContent = Array.isArray(v.envOverrides) && v.envOverrides.length
       ? '环境变量优先：' + v.envOverrides.join('、') + '；这里的改动不会覆盖它们。'
       : '';
@@ -235,6 +250,9 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
         launchBrowser: $('launchBrowser').checked,
         cookies: $('cookies').value,
         storyboardAuto: $('storyboardAuto').checked,
+        cacheDir: $('cacheDir').value,
+        mediaDir: $('mediaDir').value,
+        mediaMaxMb: $('mediaMaxMb').value === '' ? '' : Number($('mediaMaxMb').value),
       };
       const data = await api('/save', { asr, video });
       state.asr = data.asr; state.video = data.video;

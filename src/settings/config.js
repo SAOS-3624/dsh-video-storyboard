@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path';
 import { resolveAsrConfig } from '../storyboard/asr.js';
 
 const MAX_TEXT = 200;
+const MAX_PATH = 500;
 
 /** $DSH_HOME 或 ~/.dsh（与 asr.js 的约定一致） */
 export function dshHome(env = process.env) {
@@ -61,6 +62,20 @@ function text(value, field) {
   const v = value.trim();
   if (v.length > MAX_TEXT) throw new Error(`${field} 太长（最多 ${MAX_TEXT} 字）`);
   return v;
+}
+
+function pathText(value, field) {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error(`${field} 必须是字符串`);
+  const v = value.trim();
+  if (v.length > MAX_PATH) throw new Error(`${field} 太长（最多 ${MAX_PATH} 字）`);
+  return v;
+}
+
+function positiveInt(value, field, max = 1000000) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > max) throw new Error(`${field} 必须是 1-${max} 的整数`);
+  return n;
 }
 
 function bool(value, field) {
@@ -137,8 +152,17 @@ export function readVideoSettings(env = process.env) {
     launchBrowser: raw.data.launchBrowser === true,
     cookies: typeof raw.data.cookies === 'string' ? raw.data.cookies : '',
     storyboardAuto: !(storyboard && typeof storyboard === 'object' && storyboard.auto === false),
-    envOverrides: ['DSH_VIDEO_COOKIES', 'DSH_STORYBOARD_AUTO']
-      .filter((k) => env[k] !== undefined && env[k] !== ''),
+    cacheDir: typeof raw.data.cacheDir === 'string' ? raw.data.cacheDir : '',
+    mediaDir: typeof raw.data.mediaDir === 'string' ? raw.data.mediaDir : '',
+    mediaMaxMb: Number.isFinite(Number(raw.data.mediaMaxMb)) && Number(raw.data.mediaMaxMb) > 0
+      ? Number(raw.data.mediaMaxMb) : null,
+    envOverrides: [
+      'DSH_VIDEO_COOKIES',
+      'DSH_STORYBOARD_AUTO',
+      'DSH_VIDEO_CACHE_DIR',
+      'DSH_VIDEO_MEDIA_DIR',
+      'DSH_VIDEO_MEDIA_MAX_MB',
+    ].filter((k) => env[k] !== undefined && env[k] !== ''),
   };
 }
 
@@ -168,6 +192,23 @@ export function writeVideoSettings(patch = {}, env = process.env) {
       ? next.storyboard
       : {};
     next.storyboard = { ...prev, auto: storyboardAuto };
+  }
+  const cacheDir = pathText(patch.cacheDir, 'cacheDir');
+  if (cacheDir !== undefined) {
+    if (cacheDir) next.cacheDir = cacheDir;
+    else delete next.cacheDir;
+  }
+  const mediaDir = pathText(patch.mediaDir, 'mediaDir');
+  if (mediaDir !== undefined) {
+    if (mediaDir) next.mediaDir = mediaDir;
+    else delete next.mediaDir;
+  }
+  if (patch.mediaMaxMb !== undefined) {
+    if (patch.mediaMaxMb === '' || patch.mediaMaxMb === null || patch.mediaMaxMb === false) {
+      delete next.mediaMaxMb;
+    } else {
+      next.mediaMaxMb = positiveInt(patch.mediaMaxMb, 'mediaMaxMb');
+    }
   }
   writeObject(path, next);
   return readVideoSettings(env);
