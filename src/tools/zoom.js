@@ -12,10 +12,9 @@ import { lookupCell } from '../storyboard/cells.js';
 import { resolveInput } from '../storyboard/fetch.js';
 import { isHttpUrl } from '../storyboard/url.js';
 import { resolveDirectUrl } from '../storyboard/direct-url.js';
-import { runStoryboard } from '../storyboard/pipeline.js';
 import { formatForDetail } from '../storyboard/format.js';
 import { validateZoomArgs } from '../storyboard/tool-spec.js';
-import { attachSheetImages } from './shared.js';
+import { attachSheetImages, runWithHost } from './shared.js';
 
 export async function execute(ctx, args) {
   const problems = validateZoomArgs(args);
@@ -47,7 +46,9 @@ export async function execute(ctx, args) {
       /* 直链拿不到就退回本地低清：糊一点，但整次调用不该失败 */
     }
   }
-  const result = await runStoryboard({ ...opts, frameSource });
+  // 必须走 shared.js 的 runWithHost()：自己直调 runStoryboard() 就漏掉宿主 speechToText，
+  // 同一个文件会「分镜能转写、放大变 no-key」（2026-11-02 实测）。
+  const result = await runWithHost(ctx, { ...opts, frameSource });
   return {
     images: await attachSheetImages(ctx, result),
     text: formatForDetail(result, { detail: args.detail ?? 'med' }),

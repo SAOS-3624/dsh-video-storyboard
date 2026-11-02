@@ -67,6 +67,18 @@ export async function attachSheetImages(ctx, result) {
 }
 
 /**
+ * 跑一次管线，**带上宿主的 speechToText**（有就优先，没有就原样走 asr.json/HTTP）。
+ *
+ * 两个工具都必须走这里，不要各自 `runStoryboard()`：
+ * `video_zoom` 曾经自己直调，于是同一个文件「分镜能转写、放大变 no-key」（2026-11-02 实报）。
+ * 以后再加入口也请先接这个函数。
+ */
+export async function runWithHost(ctx, options) {
+  const hostAsr = hostSpeechToText(ctx);
+  return runStoryboard(hostAsr ? { ...options, hostAsr } : options);
+}
+
+/**
  * 跑一次管线，把每张图提交成附件，返回规范值 { images, text }。
  *
  * 预算：单次工具结果有上限，超出会被宿主折进磁盘（模型常常不会去读）。
@@ -75,8 +87,7 @@ export async function attachSheetImages(ctx, result) {
 export async function runAndAttach(ctx, options, problems, cellRange) {
   if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
   // 宿主有本地 speechToText 时优先用它；没有则 options 原样不变，继续走 asr.json/HTTP。
-  const hostAsr = hostSpeechToText(ctx);
-  const result = await runStoryboard(hostAsr ? { ...options, hostAsr } : options);
+  const result = await runWithHost(ctx, options);
   // 预演：没有图可提交，也**不去碰 attachments 服务**（干跑不该要求宿主有出图能力）
   if (result.planOnly) {
     return { images: [], text: formatPlanPreview(result) };

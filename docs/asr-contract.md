@@ -93,3 +93,33 @@ Config resolution order: **env vars → `$DSH_HOME/asr.json` → built-in defaul
 
 The file path exists because a Windows DSH host process often cannot see user environment variables
 its launcher never inherited.
+
+## The host `speechToText` path (desktop build)
+
+When the DSH desktop build exposes a `speechToText` service, this plugin prefers it over any HTTP
+endpoint — no key, no network, no model download of our own. It is a **different contract**, and it is
+stricter than HTTP:
+
+The host's `validateWave()` (`dsh-experimental-speech-to-text/lib/types/wave.js`, called by the
+SenseVoice worker) accepts **canonical** 16 kHz mono PCM16 only:
+
+- `RIFF` size **must equal** `len - 8`
+- the `data` chunk **must sit at byte offset 36**
+- `data` size **must equal** `len - 44`
+
+`ffmpeg … -f wav -` (writing to a pipe) violates two of those three by construction:
+
+1. a pipe cannot seek, so `RIFF size` / `data size` stay `0xFFFFFFFF`;
+2. ffmpeg also emits a `LIST/INFO` (`ISFT=Lavf…`) chunk by default, pushing `data` from 36 to 70.
+
+The host then throws `Audio must be a canonical 16 kHz mono PCM16 WAV recording`, which surfaces as
+`transcript="asr-failed"` — with no hint about the header. This is **not** a macOS quirk: the same code
+ships in the Windows build, it simply never fires there if you use an HTTP endpoint instead.
+
+`host-asr.js` therefore re-writes the header in memory (`canonicalizeWav()`): walk the RIFF chunks,
+keep only `fmt ` + `data`, re-emit a 44-byte header with the lengths we can now compute. No temp file,
+no extra I/O, identical on every platform. If the output ever stops being parseable it **throws**
+rather than silently transcribing nothing.
+
+If you touch that file, run `node --test test/host-asr.test.mjs` — the test re-implements the host's
+`validateWave()` byte for byte, so a regression fails locally instead of on a user's machine.

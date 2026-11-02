@@ -20,6 +20,69 @@ export const HOST_ASR_ID = 'host:speechToText';
 const MAX_HOST_CHUNK = 30;
 
 /**
+ * 把 ffmpeg 吐出来的 WAV 改写成宿主认的 **canonical** 形式。
+ *
+ * 宿主的 `validateWave()`（`dsh-experimental-speech-to-text/lib/types/wave.js`）不是
+ * "能解码就行"，它逐字节认死三条：
+ *   - `RIFF size === len - 8`
+ *   - `data` 块**必须正好在偏移 36**
+ *   - `data size === len - 44`
+ *
+ * 而 `-f wav -` 走管道时这两点必坏：
+ *   1. 管道不能 seek → `RIFF size` / `data size` 都写 `0xFFFFFFFF`（没法回填）；
+ *   2. ffmpeg 默认还塞一个 `LIST/INFO`（`ISFT=Lavf61…`），把 `data` 从 36 顶到 70。
+ * 三条校验全灭 → 宿主抛 "Audio must be a canonical 16 kHz mono PCM16 WAV recording"
+ * → 被折成 `transcript="asr-failed"`，日志里看不出任何线索（2026-11-02 macOS 实报）。
+ *
+ * **不写临时文件**：管道拿不到的长度我们自己会算（`len-8` / `len-44`）。
+ * 按 RIFF chunk 走一遍、只留 `fmt ` + `data`，重组成 44 字节头 —— 零额外磁盘 I/O，
+ * win/mac 同一套代码，也不会有残留临时文件。
+ *
+ * @param {Buffer|Uint8Array} input  ffmpeg 直接写到 stdout 的字节
+ * @returns {Buffer} 44 字节头 + PCM payload
+ * @throws 结构认不出来时**明确报错**（宁可失败也别静默跳过一整段台词）
+ */
+export function canonicalizeWav(input) {
+  const bytes = Buffer.isBuffer(input)
+    ? input
+    : Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  if (bytes.length < 44 || bytes.toString('latin1', 0, 4) !== 'RIFF'
+    || bytes.toString('latin1', 8, 12) !== 'WAVE') {
+    throw new Error('host ASR: ffmpeg output is not a RIFF/WAVE stream');
+  }
+  let fmt = null;
+  let payload = null;
+  for (let p = 12; p + 8 <= bytes.length;) {
+    const id = bytes.toString('latin1', p, p + 4);
+    const size = bytes.readUInt32LE(p + 4);
+    const body = p + 8;
+    if (id === 'data') {
+      // 管道写的 size 是 0xFFFFFFFF（流式没法回填）→ 只能读到哪算哪
+      const end = size === 0xFFFFFFFF ? bytes.length : Math.min(bytes.length, body + size);
+      payload = bytes.subarray(body, end - ((end - body) & 1)); // PCM16 长度必须偶数
+      break;
+    }
+    if (id === 'fmt ' && size >= 16 && body + 16 <= bytes.length) fmt = bytes.subarray(body, body + 16);
+    if (size === 0xFFFFFFFF || body + size > bytes.length) break;  // 后面没法再走了
+    p = body + size + (size & 1);   // chunk 按 2 字节对齐
+  }
+  if (!fmt) throw new Error('host ASR: WAV has no `fmt ` chunk');
+  if (!payload) throw new Error('host ASR: WAV has no `data` chunk');
+
+  const out = Buffer.alloc(44 + payload.length);
+  out.write('RIFF', 0, 'latin1');
+  out.writeUInt32LE(out.length - 8, 4);
+  out.write('WAVE', 8, 'latin1');
+  out.write('fmt ', 12, 'latin1');
+  out.writeUInt32LE(16, 16);       // PCM 的 fmt 块固定 16 字节
+  fmt.copy(out, 20);               // 格式字段原样保留，采样率对不对交给宿主判
+  out.write('data', 36, 'latin1');
+  out.writeUInt32LE(payload.length, 40);
+  payload.copy(out, 44);
+  return out;
+}
+
+/**
  * 宿主 provider 不会因为“服务存在”就自动加载模型；先 prepare 并等它 ready。
  * snapshot 不可用时直接放行，让 transcribe() 给出它自己的错误。
  */
@@ -88,7 +151,10 @@ export function hostSpeechToText(ctx) {
         encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs,
       });
       if (stdout.length < 1024) continue;
-      const spec = service.resolve({ audio: new Uint8Array(stdout), language, ...(providerId ? { providerId } : {}) });
+      // 管道 WAV 的两个头字段回填不了 → 在这里补齐，否则宿主直接拒收（见 canonicalizeWav）
+      const audio = canonicalizeWav(stdout);
+      if (audio.length < 1024) continue;
+      const spec = service.resolve({ audio: new Uint8Array(audio), language, ...(providerId ? { providerId } : {}) });
       // 宿主 provider 的 transcribe 需要显式 signal；单次超时由这里的 timeout 管。
       const result = await service.transcribe(spec, AbortSignal.timeout(timeoutMs));
       const text = String(result?.text ?? '').trim();
