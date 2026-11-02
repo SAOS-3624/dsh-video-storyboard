@@ -128,12 +128,17 @@ export function readVideoSettings(env = process.env) {
   const path = videoConfigPath(env);
   const raw = readObject(path);
   const p = Number(raw.data.browserPort);
+  const storyboard = raw.data.storyboard;
   return {
     path,
     exists: raw.exists,
     error: raw.error,
     browserPort: Number.isFinite(p) && p > 0 ? p : null,
     launchBrowser: raw.data.launchBrowser === true,
+    cookies: typeof raw.data.cookies === 'string' ? raw.data.cookies : '',
+    storyboardAuto: !(storyboard && typeof storyboard === 'object' && storyboard.auto === false),
+    envOverrides: ['DSH_VIDEO_COOKIES', 'DSH_STORYBOARD_AUTO']
+      .filter((k) => env[k] !== undefined && env[k] !== ''),
   };
 }
 
@@ -152,6 +157,18 @@ export function writeVideoSettings(patch = {}, env = process.env) {
   }
   const launch = bool(patch.launchBrowser, 'launchBrowser');
   if (launch !== undefined) next.launchBrowser = launch;
+  const cookies = text(patch.cookies, 'cookies');
+  if (cookies !== undefined) {
+    if (cookies) next.cookies = cookies;
+    else delete next.cookies;
+  }
+  const storyboardAuto = bool(patch.storyboardAuto, 'storyboardAuto');
+  if (storyboardAuto !== undefined) {
+    const prev = next.storyboard && typeof next.storyboard === 'object' && !Array.isArray(next.storyboard)
+      ? next.storyboard
+      : {};
+    next.storyboard = { ...prev, auto: storyboardAuto };
+  }
   writeObject(path, next);
   return readVideoSettings(env);
 }
