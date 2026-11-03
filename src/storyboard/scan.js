@@ -666,10 +666,11 @@ export function scanShots(opts) {
     zWindow = 300,
   } = opts;
 
-  // 判定下限随口径走：abs=12（历史值）、mc=60（占比 0.235，全 11 集 BBC 上实测最优）、z=10（10 倍噪声）
-  // 别照搬 abs 的量级：mc 是占比刻度，同样"看着差不多"的 40 会让召回拉满、精度掉到 67%
-  // （实测 BBC 全量 40 → 79.8%，60 → 85.2%）。
-  const minCutScore = opts.minCutScore ?? (normalize === 'z' ? 10 : scoreMode === 'mc' ? 60 : MIN_CUT_SCORE);
+  // 判定下限随口径走：abs=12（历史值）、mc=80（占比 0.31，全 11 集 BBC 上实测最优）、z=10（10 倍噪声）。
+  // 别照搬 abs 的量级：mc 是占比刻度，同一个"看着差不多"的数会让召回拉满、精度崩。
+  // 全 11 集 BBC（照抄 pipeline 推导步骤）实测：40 → 79.8%、60 → 85.2%、**80 → 88.4%**、abs 基线 85.2%。
+  // SHOT 27 段：60 → 77.8%、80 → 77.2%（略降 0.6，换 BBC +3.2，划算）。
+  const minCutScore = opts.minCutScore ?? (normalize === 'z' ? 10 : scoreMode === 'mc' ? 80 : MIN_CUT_SCORE);
   // 尖峰门默认跟着口径走：mc 下开（2.5×邻域），abs 下不开（abs 上它只值 +1.2，且要重标）。
   const spikeK = opts.spikeK ?? (scoreMode === 'mc' ? 2.5 : 0);
 
