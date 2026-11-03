@@ -16,6 +16,7 @@
 import { spawn } from 'node:child_process';
 
 import { DEFAULT_FFMPEG } from './probe.js';
+import { headerHeight } from './tiers.js';
 
 export const BACKGROUND = [18, 18, 20];
 export const PAD_FILL = [42, 42, 46];
@@ -44,12 +45,10 @@ export const DIGIT_W = 5;
 export const DIGIT_H = 7;
 
 /**
- * 顶部时间抬头的高度（像素）。只跟图宽有关 —— 字号是点阵整数倍，宽了就该更高一点。
- * `layoutCanvas` 会按同一个公式**预留**这条带子，`addSheetHeader` 按实际宽度画。
+ * 顶部时间抬头的高度（像素）。**公式在 tiers.js** —— `fitCanvas` 要按它算总高
+ * （出图 = 格子区 + 这条抬头），两份实现会漂移，所以这里只做转发、不再本地定义。
  */
-export function headerHeight(width) {
-  return Math.max(18, Math.round(width * 0.024));
-}
+export { headerHeight };
 
 const clamp255 = (v) => (v < 0 ? 0 : v > 255 ? 255 : v | 0);
 /** 在 RGB 画布上填一块矩形（支持 alpha 混合） */

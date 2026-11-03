@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_STRATEGY, LEVEL_THRESHOLDS, MARK_BOOST, STRATEGIES, TIER_MAX, TIER_MIN,
   applyMarkBoost, applyStrategy, applyTierMap, autoSheetCap,
-  IMAGE_UPSCALE_AREA, INTEGRAL_REF_SCORE, MAX_CANVAS_SIDE, fitCanvas, framesFromBounds, imageTokens, integralMarks, levelAt,
+  IMAGE_UPSCALE_AREA, INTEGRAL_REF_SCORE, MAX_CANVAS_SIDE, fitCanvas, framesFromBounds, headerHeight, imageTokens, integralMarks, levelAt,
   levelCurve,
   pickAutoStrategy,
   readabilityOf,
@@ -323,19 +323,24 @@ test('imageTokens: 地板区间内"把图画大"几乎不要钱（这是地板�
 
 test('fitCanvas: 预算低于 544² 地板时抬到地板（画小不省钱，只会更糊）', () => {
   const small = fitCanvas(16 / 9, { budget: 120_000 });
-  // 圆整会少几十像素（725×408 = 295,800，比 544² 差 0.05%），但计费落在同一档
-  assert.ok(small.width * small.height >= IMAGE_UPSCALE_AREA * 0.999, '不能明显小于地板面积');
-  assert.equal(imageTokens(small.width, small.height), 192, '实际按地板档收费');
-  assert.deepEqual([small.width, small.height], [725, 408], '16:9 的地板画布');
+  const sh = headerHeight(small.width);
+  // 出图 = 格子区 + 页眉。725×402 的格子区 + 18px 页眉 = 725×420，10 行，仍在地板档（192）
+  assert.ok(small.width * (small.height + sh) >= IMAGE_UPSCALE_AREA, '含页眉的面积不能小于地板');
+  assert.equal(imageTokens(small.width, small.height + sh), 192, '实际按地板档收费');
+  assert.deepEqual([small.width, small.height], [725, 402], '16:9 的地板画布（高度压到含页眉整行）');
   // 和"直接给地板"必须一模一样，否则说明两条路径算得不一样
   assert.deepEqual(fitCanvas(16 / 9, { budget: IMAGE_UPSCALE_AREA }), small);
   // 默认预算在地板之上，原样返回 —— 但宽度向下对齐到 42px 的计费格。
   // 800 对齐到 patch 网格后是 812（20 列），798 只要 19 列，每行省 1 个分隔 token：
   // 11×(20+1)+2 = 233 → 11×(19+1)+2 = 222，面积只少 0.25%。
   const def = fitCanvas(16 / 9);
-  assert.deepEqual([def.width, def.height], [798, 449]);
+  const dh = headerHeight(def.width);
+  assert.deepEqual([def.width, def.height], [798, 443]);
   assert.equal(def.width % 42, 0, '宽度必须落在计费格整数倍上');
-  assert.equal(imageTokens(def.width, def.height), 222, '比 800×450 的 233 便宜 4.7%');
+  // **出图高度要算上页眉**：798×462 = 11 行 = 222；不压的话 798×468 是 12 行 = 242。
+  // 压掉的 6px 只占格子区 1.3%，换一整行 token 回来。
+  assert.equal(imageTokens(def.width, def.height + dh), 222, '含页眉的总高不能跨行');
+  assert.ok(def.height + dh <= 42 * 11, '总高不超过 11 行的上界');
   // 上限仍然生效
   const big = fitCanvas(16 / 9, { budget: 99_999_999 });
   assert.ok(Math.max(big.width, big.height) <= MAX_CANVAS_SIDE);

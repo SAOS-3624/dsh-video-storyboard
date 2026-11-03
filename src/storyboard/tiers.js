@@ -140,6 +140,38 @@ export function imageTokens(w, h) {
 }
 
 /**
+ * 顶部时间抬头的高度（像素）。**只跟图宽有关** —— 字号是 5×7 点阵的整数倍，
+ * 宽了就该更高一点。
+ *
+ * 定义在 tiers 而不是 sheet，是因为 `fitCanvas` 要按它算**总高**（见下面的高度卡线）：
+ * 出图尺寸 = 格子区 + 这条抬头，只对格子区做对齐会把它漏掉。
+ */
+export function headerHeight(width) {
+  return Math.max(18, Math.round((Number(width) || 0) * 0.024));
+}
+
+/**
+ * 把格子区高度压回"格子区 + 页眉 = 42 的整数倍"，**只在溢出量 <= 8px 时生效**。
+ *
+ * 出图时顶上会叠一条 `headerHeight` 的抬头，真正的 PNG 高度是两者之和。
+ * 不把抬头算进来就会卡在行边界上多收一整行 token：
+ *
+ *   449 + 19 = 468 → 12 行 → 242 token
+ *   443 + 19 = 462 → 11 行 → 222 token   ← 格子区只矮 1.3%
+ *
+ * 压太多（差 30px 也去压）是拿面积换 token —— 两者近似线性，不划算。所以设 8px 的闸。
+ */
+function snapHeightToHeader(height, width) {
+  const hh = headerHeight(width);
+  const over = (height + hh) % IMAGE_CELL;
+  if (over <= 0 || over > 8) return height;
+  const next = height - over;
+  if (next < 36) return height;
+  // **只在真降价时才压**：地板区（<544²）压多少都是同一个价，白掉像素反而是亏。
+  return imageTokens(width, next + hh) < imageTokens(width, height + hh) ? next : height;
+}
+
+/**
  * 画布尺寸：面积 <= budget，且**任一边不超过 maxSide**。
  *
  * 16:9 + 640k 算出来是 1066×600，会被 800 卡成 800×450 —— 这正是用户实测的
@@ -153,9 +185,10 @@ export function imageTokens(w, h) {
  *   800×450 → 812 对齐 → 20 列 → 11×(20+1)+2 = 233
  *   798×450 → 19 列       → 11×(19+1)+2 = 222   ← 面积只少 0.25%，便宜 4.7%
  *
- * 只对"对齐真能降价"的情况生效（656 行那个 if）：地板区（<544²）本来就按
- * 544² 收费，对齐只会白掉像素，所以原样返回。高度不对齐 —— 450→420 会掉 7%
- * 面积，向上到 462 又不降价，两头都不划算。
+ * 只对"对齐真能降价"的情况生效（下面那个 if）：地板区（<544²）本来就按 544² 收费，
+ * 对齐只会白掉像素，所以原样返回。
+ *
+ * 高度则**按含页眉的总高**卡线（`snapHeightToHeader`），不是简单地对齐 450 这个数。
  */
 export function fitCanvas(aspect, { maxSide = MAX_CANVAS_SIDE, budget = DEFAULT_BUDGET } = {}) {
   const a = Math.max(0.2, Math.min(5, Number(aspect) || 16 / 9));
@@ -166,11 +199,11 @@ export function fitCanvas(aspect, { maxSide = MAX_CANVAS_SIDE, budget = DEFAULT_
   const h = w / a;
   const shrink = Math.min(1, maxSide / w, maxSide / h);
   const width = Math.max(64, Math.round(w * shrink));
-  const height = Math.max(36, Math.round(h * shrink));
+  const height = snapHeightToHeader(Math.max(36, Math.round(h * shrink)), width);
 
   const snapped = Math.floor(width / IMAGE_CELL) * IMAGE_CELL;
   if (snapped >= 64) {
-    const snapH = Math.max(36, Math.round(snapped / a));
+    const snapH = snapHeightToHeader(Math.max(36, Math.round(snapped / a)), snapped);
     if (imageTokens(snapped, snapH) < imageTokens(width, height)) {
       return { width: snapped, height: snapH, aspect: a };
     }
