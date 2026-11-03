@@ -329,9 +329,13 @@ test('fitCanvas: 预算低于 544² 地板时抬到地板（画小不省钱，�
   assert.deepEqual([small.width, small.height], [725, 408], '16:9 的地板画布');
   // 和"直接给地板"必须一模一样，否则说明两条路径算得不一样
   assert.deepEqual(fitCanvas(16 / 9, { budget: IMAGE_UPSCALE_AREA }), small);
-  // 默认预算在地板之上，原样返回
+  // 默认预算在地板之上，原样返回 —— 但宽度向下对齐到 42px 的计费格。
+  // 800 对齐到 patch 网格后是 812（20 列），798 只要 19 列，每行省 1 个分隔 token：
+  // 11×(20+1)+2 = 233 → 11×(19+1)+2 = 222，面积只少 0.25%。
   const def = fitCanvas(16 / 9);
-  assert.deepEqual([def.width, def.height], [800, 450]);
+  assert.deepEqual([def.width, def.height], [798, 449]);
+  assert.equal(def.width % 42, 0, '宽度必须落在计费格整数倍上');
+  assert.equal(imageTokens(def.width, def.height), 222, '比 800×450 的 233 便宜 4.7%');
   // 上限仍然生效
   const big = fitCanvas(16 / 9, { budget: 99_999_999 });
   assert.ok(Math.max(big.width, big.height) <= MAX_CANVAS_SIDE);

@@ -137,6 +137,11 @@ export function readVideoSettings(env = process.env) {
     launchBrowser: raw.data.launchBrowser === true,
     cookies: typeof raw.data.cookies === 'string' ? raw.data.cookies : '',
     storyboardAuto: !(storyboard && typeof storyboard === 'object' && storyboard.auto === false),
+    // 全局默认切点门槛；null = 没设，走内核默认（mc:80）
+    cutFloor: (() => {
+      const n = Number(storyboard && typeof storyboard === 'object' ? storyboard.cutFloor : NaN);
+      return Number.isInteger(n) && n >= 1 && n <= 255 ? n : null;
+    })(),
     envOverrides: ['DSH_VIDEO_COOKIES', 'DSH_STORYBOARD_AUTO']
       .filter((k) => env[k] !== undefined && env[k] !== ''),
   };
@@ -163,11 +168,23 @@ export function writeVideoSettings(patch = {}, env = process.env) {
     else delete next.cookies;
   }
   const storyboardAuto = bool(patch.storyboardAuto, 'storyboardAuto');
-  if (storyboardAuto !== undefined) {
-    const prev = next.storyboard && typeof next.storyboard === 'object' && !Array.isArray(next.storyboard)
+  const sbPrev = next.storyboard && typeof next.storyboard === 'object' && !Array.isArray(next.storyboard)
+    ? next.storyboard
+    : {};
+  if (storyboardAuto !== undefined) next.storyboard = { ...sbPrev, ...(next.storyboard ?? {}), auto: storyboardAuto };
+  if (patch.cutFloor !== undefined) {
+    const base = next.storyboard && typeof next.storyboard === 'object' && !Array.isArray(next.storyboard)
       ? next.storyboard
       : {};
-    next.storyboard = { ...prev, auto: storyboardAuto };
+    // 空 / 0 = 清掉这项，恢复内核默认
+    if (patch.cutFloor === '' || patch.cutFloor === null || Number(patch.cutFloor) === 0) {
+      const { cutFloor: _drop, ...rest } = base;
+      next.storyboard = rest;
+    } else {
+      const n = Number(patch.cutFloor);
+      if (!Number.isInteger(n) || n < 1 || n > 255) throw new Error('cutFloor 必须是 1-255 的整数');
+      next.storyboard = { ...base, cutFloor: n };
+    }
   }
   writeObject(path, next);
   return readVideoSettings(env);

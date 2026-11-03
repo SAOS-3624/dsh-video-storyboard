@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  UNIT, bounds, bestPlan, DEFAULT_GROW, rowOptions, solve, toRects,
+  UNIT, bounds, bestPlan, DEFAULT_GROW, DEFAULT_STRETCH, rowOptions, solve, toRects,
 } from '../src/storyboard/pack.js';
 
 const overlaps = (rects) => {
@@ -60,13 +60,17 @@ test('bounds: 1 档只许缩到 1/2，2 档只许缩小，3 档起可跨相邻�
   assert.deepEqual(bounds(8), [UNIT / 9, UNIT / 7]);
 });
 
-test('toRects: 不重叠、宽高比偏差不超过 ±20%、编号全局递增', () => {
+test('toRects: 不重叠、宽高比偏差不超过容差、编号全局递增', () => {
   const p = solve([4, 4, 4, 3, 5, 6, 4, 4, 2, 2, 7, 8]);
   const rects = toRects(p.cells, { width: 800, height: 450 });
   assert.equal(overlaps(rects), 0, '相邻格不能重叠');
   const target = 800 / 450;
+  // 阈值跟着 DEFAULT_STRETCH 走：它定义的就是"一个格子最多走形多少"。
+  // 多留 0.05：像素取整会再偏几个点（400 组随机压测量到 τ=0.3 时实测最大 33.6%，
+  // 理论值正好 30%，剩下 3.6 是 toRects 修 1px 缝隙造成的）。
+  const tol = DEFAULT_STRETCH + 0.05;
   for (const r of rects) {
-    assert.ok(Math.abs(r.pw / r.ph / target - 1) <= 0.22, `${r.index}: ${r.pw}x${r.ph} 变形过头`);
+    assert.ok(Math.abs(r.pw / r.ph / target - 1) <= tol, `${r.index}: ${r.pw}x${r.ph} 变形过头`);
     assert.ok(r.px >= 0 && r.py >= 0 && r.px + r.pw <= 800 && r.py + r.ph <= 450, `${r.index} 越界`);
   }
   assert.deepEqual(rects.map((r) => r.index), rects.map((_, i) => i + 1));
@@ -154,4 +158,47 @@ test('rowOptions: grow 参与缓存键（决定能不能升档）', () => {
   const allow = rowOptions([3, 3], DEFAULT_GROW, 0.2, true);
   const deny = rowOptions([3, 3], DEFAULT_GROW.map(() => 0), 0.2, true);
   assert.notDeepEqual(allow, deny, 'grow 不同必须算出不同的候选');
+});
+
+/* ---------------------------------------------------------------- 排布的三条新前提（2026-11-04） */
+/*
+ * 这三条是补的：把 DEFAULT_STRETCH / flat 判据 / 部分拉伸逐个改回旧行为，
+ * 上面 517 条测试**一条都不会红** —— 也就是说这三个收益没有任何守卫。
+ * 补完之后做了变异验证：每个改坏都会被抓到。
+ */
+
+test('DEFAULT_STRETCH 是 0.3，而且它确实比 0.2 排得紧', () => {
+  assert.equal(DEFAULT_STRETCH, 0.3, '容差被回滚的话这条会红');
+  // 这条序列在 0.2 下要 2 张（44.3%），0.3 下 1 张（89.7%）。挑它是因为两者差一整张图，
+  // 不是靠小数点后的 fill 差异 —— 那种断言换个平台就会飘。
+  const seq = [3, 4, 4, 4, 7, 7, 7, 2, 2];
+  const now = solve(seq);
+  const old = solve(seq, { stretch: 0.2 });
+  assert.equal(old.bins, 2, '0.2 容差下这 9 帧应该装不下');
+  assert.equal(now.bins, 1, '0.3 容差下应该刚好一张');
+  assert.ok(now.fill > old.fill + 0.2, `占用率该明显更高：${now.fill} vs ${old.fill}`);
+});
+
+test('flat 只在该行 最宽/最窄 <= (1+τ)² 时出现（别偷偷拉过头）', () => {
+  // [2,4,4,4] 的水位解是 s = [1/3, 2/9, 2/9, 2/9]，wmax/wmin = 1.5。
+  //   τ=0.2：边界 (1.2)² = 1.44 → 1.5 超了，不许 flat。
+  //          旧的 (1+τ)/(1−τ) = 1.5 会放行，最窄格被拉到 1.25（+25%），
+  //          比"最多走形 20%"多出四分之一 —— 这就是要拦的。
+  //   τ=0.3：边界 (1.3)² = 1.69 → 1.5 放行。
+  const tight = rowOptions([2, 4, 4, 4], DEFAULT_GROW, 0.2, true);
+  assert.equal(tight.some((o) => o.flat), false, '20% 容差下这行不该有 flat 候选');
+  const loose = rowOptions([2, 4, 4, 4], DEFAULT_GROW, 0.3, true);
+  assert.equal(loose.some((o) => o.flat), true, '30% 容差下应该允许');
+});
+
+test('部分拉伸：矮格被拉高，但不超过行高、也不超过 (1+τ) 倍', () => {
+  // [1,4,4] 一行里宽度差 2 倍，flat 不可行（超过 (1+τ)²），只能靠逐格拉。
+  const tau = 0.3;
+  const p = solve([1, 4, 4], { stretch: tau });
+  const stretched = p.cells.filter((c) => c.h > c.w + 1e-9);
+  assert.ok(stretched.length > 0, '宽度不等又没有 flat 的行，应该有格子被拉高');
+  for (const c of p.cells) {
+    assert.ok(c.h <= c.w * (1 + tau) + 1e-9, `拉伸超过容差：${c.w.toFixed(3)} -> ${c.h.toFixed(3)}`);
+    assert.ok(Math.abs(c.h * c.stretch - c.w) < 1e-9, 'h / stretch 字段必须自洽（渲染按 st 反查宽高）');
+  }
 });

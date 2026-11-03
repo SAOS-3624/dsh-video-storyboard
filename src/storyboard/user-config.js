@@ -33,3 +33,14 @@ export function configuredText(data, key) {
   const value = data && data[key];
   return typeof value === 'string' && value.trim() ? value.trim() : '';
 }
+
+/**
+ * 按 `"a.b.c"` 路径读一个数字；不存在/非数字/越界都返回 null。
+ * 嵌套路径是为了 `storyboard.cutFloor` 这种分组字段（和 `storyboard.auto` 同一层）。
+ */
+export function configuredNumber(data, path, { min = -Infinity, max = Infinity } = {}) {
+  const raw = String(path).split('.')
+    .reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), data);
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= min && n <= max ? n : null;
+}

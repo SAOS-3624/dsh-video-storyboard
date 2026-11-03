@@ -76,6 +76,20 @@ test('settings: video.json 端口与 launchBrowser 合并写入', () => {
   assert.equal(writeVideoSettings({ storyboardAuto: true }, env).storyboardAuto, true);
   assert.throws(() => writeVideoSettings({ cookies: 42 }, env), /cookies 必须是字符串/);
 
+  // cutFloor：与 storyboardAuto 共用一个 storyboard 对象，**互不覆盖**（这是最容易写错的地方）
+  assert.equal(writeVideoSettings({ cutFloor: 60 }, env).cutFloor, 60);
+  const withBoth = JSON.parse(readFileSync(join(dir, 'video.json'), 'utf8'));
+  assert.equal(withBoth.storyboard.cutFloor, 60);
+  assert.equal(withBoth.storyboard.auto, true, '设置 cutFloor 不能把 auto 冲掉');
+  assert.equal(writeVideoSettings({ storyboardAuto: false }, env).cutFloor, 60,
+    '设置 auto 也不能把 cutFloor 冲掉');
+  assert.equal(readVideoSettings(env).cutFloor, 60);
+  // 越界要报错；传 0 / 空串表示"清掉，恢复内核默认"
+  assert.throws(() => writeVideoSettings({ cutFloor: 256 }, env), /1-255/);
+  assert.throws(() => writeVideoSettings({ cutFloor: 12.5 }, env), /1-255/);
+  assert.equal(writeVideoSettings({ cutFloor: 0 }, env).cutFloor, null);
+  assert.equal(readVideoSettings(env).storyboardAuto, false, '清 cutFloor 不能顺带把 auto 重置');
+
   const overridden = readVideoSettings({
     ...env,
     DSH_VIDEO_COOKIES: 'D:/env/cookies.txt',

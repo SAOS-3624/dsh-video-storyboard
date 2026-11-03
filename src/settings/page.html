@@ -76,6 +76,14 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
       <span class="hint">Netscape cookies.txt，给需要登录的 B 站/YouTube 用；也可用 DSH_VIDEO_COOKIES 环境变量。</span>
     </label>
     <label class="check"><input id="storyboardAuto" type="checkbox"> 自动生成分镜（storyboard.auto）</label>
+    <label class="field">切点灵敏度默认值（storyboard.cutFloor）
+      <select id="cutFloor">
+        <option value="">默认 · 80（纪录片 / 电影，长镜头）</option>
+        <option value="60">60 · 短视频 / 快剪（中位镜头 &lt; 3 秒）</option>
+        <option value="40">40 · 极快剪（刀数和图会明显变多）</option>
+      </select>
+      <span class="hint">只影响没显式传 cutFloor 的调用。调低 → 检出更多镜头，图更多、token 更多，但画面被拼到一起的情况更少。</span>
+    </label>
   </div>
 </div>
 
@@ -167,6 +175,7 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
     $('launchBrowser').checked = v.launchBrowser === true;
     $('cookies').value = v.cookies || '';
     $('storyboardAuto').checked = v.storyboardAuto !== false;
+    $('cutFloor').value = v.cutFloor == null ? '' : String(v.cutFloor);
     $('videoSource').textContent = Array.isArray(v.envOverrides) && v.envOverrides.length
       ? '环境变量优先：' + v.envOverrides.join('、') + '；这里的改动不会覆盖它们。'
       : '';
@@ -235,6 +244,7 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
         launchBrowser: $('launchBrowser').checked,
         cookies: $('cookies').value,
         storyboardAuto: $('storyboardAuto').checked,
+        cutFloor: $('cutFloor').value === '' ? 0 : Number($('cutFloor').value),
       };
       const data = await api('/save', { asr, video });
       state.asr = data.asr; state.video = data.video;

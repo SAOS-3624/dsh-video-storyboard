@@ -50,6 +50,7 @@ test('snapCells: 粗估档位只给预览用，输入乱也给一个整数', () 
   assert.equal(snapCells(0), 4);
   assert.equal(snapCells(8), 9);
   assert.ok(Number.isInteger(snapCells(13)));
-  // 默认画布 800×450 与宿主计费一致是 233（旧口径的 384 已过期）
-  assert.equal(PLAN_IMAGE_TOKENS, 233);
+  // 默认画布宽度对齐到 42px 计费格后是 798×449 = 222（800×450 会多算一整列 = 233，
+  // 旧口径的 384 更早就过期了）。这个数必须从 fitCanvas 现算，不能写死。
+  assert.equal(PLAN_IMAGE_TOKENS, 222);
 });

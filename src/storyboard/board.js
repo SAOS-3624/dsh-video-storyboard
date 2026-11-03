@@ -14,6 +14,8 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { configuredNumber, readVideoFile } from './user-config.js';
+
 import {
   AUTO_STRATEGY, DEFAULT_STRATEGY, STRATEGIES, resolveStrategy,
   DEFAULT_BUDGET as TIER_DEFAULT_BUDGET,
@@ -206,6 +208,18 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
   return {
     ...base,
     strategy,
+    // 切点判定下限。三层优先序，与项目里其它配置一致：
+    //   ① 本次调用显式传的 args.cutFloor
+    //   ② ~/.dsh/video.json 里的 storyboard.cutFloor（设置页写的默认值）
+    //   ③ 不传 —— scanShots 按口径取默认（mc:80 / abs:12）
+    // 这是"这段素材该怎么切"的入口：80 适合纪录片/电影，60 适合短视频/快剪。
+    ...(() => {
+      const explicit = Number(args.cutFloor);
+      const v = Number.isFinite(explicit) && explicit > 0
+        ? explicit
+        : configuredNumber(readVideoFile(), 'storyboard.cutFloor', { min: 1, max: 255 });
+      return v ? { cutFloor: Math.min(255, Math.round(v)) } : {};
+    })(),
     // **默认不封顶**：帧数由切点决定，张数由排布决定，用户要看多少就给多少
     maxFrames: clampFrames(args.maxFrames, 0),
     maxSheets: clampFrames(args.maxSheets, 0),

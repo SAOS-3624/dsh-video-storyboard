@@ -316,12 +316,17 @@ export function formatTimeline(rows, { title = 'batch timeline' } = {}) {
   const total = rows.reduce((n, r) => n + (r.to - r.from), 0);
   const totalCells = rows.reduce((n, r) => n + r.cells, 0);
   const totalChars = rows.reduce((n, r) => n + (r.chars ?? 0), 0);
+  // 单张的钱从**默认画布**现算，别写死 800×450 = 233：
+  // fitCanvas 会把宽度对齐到 42px 计费格（798×449 = 222），写死就会把账报错。
+  const def = fitCanvas(16 / 9);
+  const perImage = imageTokens(def.width, def.height);
   const lines = [
     `# ${title}`,
     '',
     `- windows: **${rows.length}** · total ${tc(total)} · cells ${totalCells} · transcript ${totalChars} chars`,
-    `- tokens: ${rows.length} image(s) ≈ **${rows.length * imageTokens(800, 450)}** ` +
-      `(est. at the default 800x450 canvas; a wider canvas is billed by its own token grid, 42px 一格)`,
+    `- tokens: ${rows.length} image(s) ≈ **${rows.length * perImage}** ` +
+      `(est. at the default ${def.width}×${def.height} canvas = ${perImage} each; ` +
+      'a wider canvas is billed by its own token grid, 42px 一格)',
     '',
     '| # | window | cells | cuts | chars | image |',
     '|---|---|---|---|---|---|',
@@ -514,7 +519,7 @@ const DRY_RUN_MANUAL = [
   '',
   '── full manual (printed once, while the scan is fresh) ──',
   '',
-  'COST. Images bill by PIXELS on a 42px token grid, not by frame count: 800x450 = 233 tokens,',
+  'COST. Images bill by PIXELS on a 42px token grid, not by frame count: 798x449 = 222 tokens,',
   'anything under 544x544 = 192 (the floor — drawing smaller saves nothing), 1300x1300 = 994',
   '(the ceiling). A window costs ≈ Σ(cell pixel area) ÷ fill, so packing MORE frames into the',
   'SAME canvas is nearly free, while opening one more image is not. The text index is billed on',

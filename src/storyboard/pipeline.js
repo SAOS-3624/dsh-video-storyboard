@@ -25,9 +25,10 @@ import { cpus } from 'node:os';
 import { probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
 import { resolveInput } from './fetch.js';
 import {
-  packPrints, packedFps, refineCutsByWindow, scanShots, spikeCuts, suppressClose, unpackPrints,
+  packPrints, packedFps, scanShots, unpackPrints,
 } from './scan.js';
-import { tagCuts } from './flash.js';
+// 切点链路（5 个阶段的顺序 + 准入门槛）全部收口在 cuts.js
+import { resolveCuts } from './cuts.js';
 import { rememberSegments } from './locate.js';
 import { isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import {
@@ -36,7 +37,7 @@ import {
   fitCanvas, pickAutoStrategy, resolveStrategy,
   framesFromBounds, integralMarks, levelAt, levelCurve, readabilityOf, tierHistogram,
 } from './tiers.js';
-import { solve, toRects } from './pack.js';
+import { DEFAULT_STRETCH, solve, toRects } from './pack.js';
 import { remember } from './memory.js';
 import { analyzeAudio, describeAudio, hasAudibleSamples } from './audio.js';
 import { alignCells, resolveAsrConfig } from './asr.js';
@@ -50,6 +51,12 @@ import { addAudioStrip, addSheetHeader, clock, composePacked, encodePngBuffer } 
 import { extractFrameWithFallback, extractFramesBatched, mapPool } from './frames.js';
 import { correctByOnScreenSubs } from './ocr-subs.js';
 import { resolveHwaccel } from './hwaccel.js';
+
+/**
+ * 排布用的宽高比容差。**只在这里引用一次**（源头是 `pack.DEFAULT_STRETCH`）：
+ * 以前 pipeline 里散着 8 处 `stretch: 0.2`，改默认值得改 8 个地方，漏一个就漂移。
+ */
+const PACK_STRETCH = DEFAULT_STRETCH;
 
 export const PICK_MODES = ['sharp', 'mid', 'thumb'];// 只有两种：时间码不烧进画面 —— 它占像素、压缩后先糊，而清单里已经有 0.01 秒精度的时间。
 // （历史上 `index+time` 在参数表里但从没实现过，等于一个会静默失效的选项。）
@@ -69,47 +76,9 @@ export const BURN_MODES = ['index', 'none'];
  * @param {'index'|'none'} [opts.burn]
  * @param {(p:object)=>void} [opts.onProgress]
  */
-/**
- * 「极静素材补刀」的结果该不该顶掉粗扫 —— 抽成纯函数，好测也好读。
- *
- * 旧判据只有一条：`spikes.length > cuts.length`，即"补出来的更多就用它"。它错了两次：
- *   1) 长纪录片每秒 0.15–0.2 刀，会被当成极静素材（入口门槛已收到 0.1 刀/秒）；
- *   2) 即便进了这条路径，"更多"也不等于"更对"——BBC 第一集实测补出 8792 刀（真值 503），
- *      精度从 82% 掉到 12%。
- *
- * 现在要求两条同时成立：
- *   ① 确实补出了更多刀（这条路径的原始目的：粗扫漏掉"只改几个像素"的翻页）；
- *   ② 补刀之后的密度仍在"静态素材"该有的范围内（≤0.3 刀/秒）。既然入口已经认定这是
- *      PPT/代码录屏，它就不可能每秒换 3 次画面；密度超了说明补刀在制造噪声，宁可不要。
- *
- * 试过再加一条"补刀时刻是否成簇"（真翻页成簇、噪声均匀），用 IQR/中位数 做判据——
- * 算下来均匀噪声和成簇分布都得到 ≈0，判据是反的，且没有素材能验证，故不采用。
- */
-export function shouldTakeSpikes({
-  coarse = 0, spikes = 0, winDur = 0, spikeTimes = null, coarseTimes = null,
-  novelGap = 2.0, minNovel = 0.4,
-} = {}) {
-  if (!(spikes > coarse)) return false;
-  if (spikes / Math.max(1e-6, winDur) > 0.3) return false;
-  // ③ 新颖度检验：补刀的意义是"找到粗扫漏掉的"，所以要求补出来的刀里，
-  //    有相当一部分**离任何粗扫刀都远**（>novelGap 秒）。全是已有刀的重复检测就没意义。
-  //    取 2 秒：同一刀的重复检测会差 1 秒左右（实测静态录屏 65.1/65.2 vs 粗扫 66.1），
-  //    而真漏掉的翻页离最近的粗扫刀通常好几秒。
-  //    实测一段静态屏幕录像：10 刀全部贴着粗扫的 6 刀（新颖度 0），拒绝；
-  //    一段游戏录像：密度 0.87 刀/秒，被 ② 挡下。
-  if (Array.isArray(spikeTimes) && Array.isArray(coarseTimes) && spikeTimes.length >= 4) {
-    let novel = 0;
-    for (const t of spikeTimes) {
-      let near = false;
-      for (const c of coarseTimes) {
-        if (Math.abs(t - c) <= novelGap) { near = true; break; }
-      }
-      if (!near) novel += 1;
-    }
-    if (novel / spikeTimes.length < minNovel) return false;
-  }
-  return true;
-}
+// 极静素材补刀的采纳判据随切点链路搬到了 cuts.js（见那边的阶段表）。
+// 这里 re-export 保持外部 import 路径不变（test/spike-fallback.test.mjs 就指着它）。
+export { shouldTakeSpikes } from './cuts.js';
 
 export async function runStoryboard(opts) {
   const {
@@ -124,6 +93,12 @@ export async function runStoryboard(opts) {
     refineBursts = true,
     // 打分口径：'mc'（默认，运动补偿占比）| 'abs'（历史整帧平均差）。见 scan.js 头注释。
     scanMode = 'mc',
+    // 切点判定下限（0–255 刻度）。null = 按口径取默认（mc: 80 / abs: 12）。
+    // **这是"这段素材该怎么切"的判断入口**：80 适合纪录片/电影（长镜头、剪辑稀疏），
+    // 60 适合短视频/快剪（平均镜头 <3 秒）。实测 SHOT 27 段：60 比 80 召回 +10 个点、
+    // 刀数 +13%；BBC 11 集反过来，60 比 80 掉 3.2 个点。没有一个常数能两头讨好，
+    // 所以交给调用方（模型/用户）按素材类型选，见 tool-spec 里的说明。
+    cutFloor = null,
     // 取帧并发数：每路 ffmpeg 只解一帧，互不依赖。实测 154 帧（16 核 i9-12900HX）：
     // 4 路 9.65s / 8 路 6.58s / 12 路 5.68s / 16 路 5.56s / 24 路 6.44s（过了 16 就抢不到核）。
     // 取 0.75×核数：16 核 → 12，比 8 快 14%，又不像 24 那样把机械盘和内存带宽打满。
@@ -264,6 +239,9 @@ export async function runStoryboard(opts) {
   // 扫描结果按 (文件, 窗口, 阈值策略) 缓存：storyboard 之后的 zoom 能直接复用
   const key = cache ? await cacheKey({
     input, start: winStart, end: winStart + winDur, threshold, minGap: capGap,
+    // **门槛必须进键**：它直接决定 cuts。漏了就会出现"改了参数却拿到上一次结果的缓存" ——
+    // minGap 踩过一模一样的坑（见 cacheKey 的注释）。
+    cutFloor,
   }) : null;
   let scanMeans = null;
   let scanPrints = null;
@@ -290,6 +268,9 @@ export async function runStoryboard(opts) {
         // 短视频 69.8→74.4、纪录片 86.1→89.4；代价是每帧打分 0.04→0.155 ms（整段扫描 +5%）。
         // 想回到旧口径：runStoryboard({ scanMode: 'abs' })。
         scoreMode: scanMode,
+        ...(Number.isFinite(Number(cutFloor)) && Number(cutFloor) > 0
+          ? { minCutScore: Number(cutFloor) }
+          : {}),
       });
       scanMeans = s.means;
       scanPrints = s.prints;
@@ -314,66 +295,18 @@ export async function runStoryboard(opts) {
   if (isOwned()) keepAlive();
   let cuts = scan.cuts;
 
-  // ---- 极静素材（PPT / 代码录屏 / 固定机位）：绝对阈值会漏掉"只改了几个像素"的翻页。
-  if (!precomputed && scan.stats.length > 20) {
-    const perSec = cuts.length / Math.max(1, winDur);
-    // 门槛从 0.25 收到 0.1：纪录片/慢节奏长片也会落到 0.15–0.2，于是被误判成"极静素材"，
-    // 补刀结果（spikeCuts）动辄几千刀，而这里只用"比原来多"就替换 —— 实测 BBC 第一集
-    // 503 刀被换成 8792 刀，精度掉到 6%。真正的静态素材（PPT/代码录屏）每秒远不到 0.1 刀。
-    if (perSec < 0.1) {
-      // minAbs 是按分数刻度定的：abs 口径 4 分（≈1.6% 像素变化）就够；
-      // mc 口径下同理的"噪音地板"要高得多（占比 4% ≈ 10 分），4 分会让整片疯狂补刀（实测 BBC 精度 6%）。
-      const minAbs = scanMode === 'mc' ? 25 : 4;
-      const spikes = suppressClose(spikeCuts(scan.stats, { k: 4, minAbs, halfWindow: 12 }), capGap);
-      if (shouldTakeSpikes({
-        coarse: cuts.length, spikes: spikes.length, winDur,
-        spikeTimes: spikes.map((c) => c.t), coarseTimes: cuts.map((c) => c.t),
-      })) cuts = spikes;
-    }
-  }
-
-  // ---- 爆点细扫：粗扫看不见 0.35s 以下的刀
-  let refinedBursts = [];
-  if (refineBursts && !precomputed && !textOnly) {
-    const r = refineCutsByWindow({
-      stats: scan.stats, coarseCuts: cuts, fps: info.fps, winStart, winDur,
-      coarseThreshold: scan.threshold ?? 0,
-    });
-    cuts = r.cuts;
-    refinedBursts = r.refined;
-  }
-
-  const trace = [];
-  if (hwaccelUsed) trace.push(`hwaccel:${hwaccelUsed}`);
-  // ---- 丐中丐档：**自适应加大切点最小间隔**，直到整段能装进一张图。
-  // 一张 1/8 档画布最多 8×8=64 格，留点余量取 56（格子会浮动到 1/7，那时只有 49 格）。
-  // 间隔是**对原始切点**逐轮放大的（不是在上一次结果上继续合并），所以单调、可复现。
-  if (STRATEGIES[strategy]?.fitOneSheet && !precomputed && cuts.length + 1 > 56) {
-    const ONE_SHEET = 56;
-    let gap = capGap > 0 ? capGap : 0.2;
-    let fitted = suppressClose(cuts, gap);
-    let rounds = 0;
-    while (fitted.length + 1 > ONE_SHEET && gap < 120 && rounds < 60) {
-      gap *= 1.3;
-      fitted = suppressClose(cuts, gap);
-      rounds += 1;
-    }
-    if (fitted.length < cuts.length) {
-      cuts = fitted;
-      trace.push(`cuts-merged:${scan.cuts.length}->${cuts.length}@gap${gap.toFixed(1)}s`);
-    }
-  }
-
-  // ---- 给每个切点打类型标签（flash / white / black / hardcut / dissolve / motion）。
-  // **一个都不删**：删掉误检会让这段在插件眼里变成"完全静止"。
-  if (!precomputed && !textOnly && Array.isArray(scanPrints) && scanPrints.length) {
-    cuts = tagCuts(cuts, {
-      prints: scanPrints,
-      means: scanMeans,
-      fps: info.fps,
-      scores: scan.stats?.map((s) => s.score),
-    });
-  }
+  // ================================================================ 切点链路
+  // 五个阶段的编排全部收口在 cuts.js（那边有顺序表和不许乱插的说明）。
+  // 这里只负责把上下文喂进去 —— 别在本函数里再加"改 cuts 的步骤"。
+  const cutChain = resolveCuts({
+    scan, scanMode, capGap, strategy, refineBursts, textOnly, precomputed,
+    fps: info.fps, winStart, winDur,
+    prints: scanPrints, means: scanMeans,
+  });
+  cuts = cutChain.cuts;
+  const refinedBursts = cutChain.refinedBursts;
+  const trace = cutChain.trace;
+  if (hwaccelUsed) trace.unshift(`hwaccel:${hwaccelUsed}`);
 
   // ---- 台词：显式文件 > 字幕轨 > ASR；三者都没有就静默跳过（绝不让分镜失败）
   const transcriptResult = await transcriptP;
@@ -437,7 +370,7 @@ export async function runStoryboard(opts) {
   // PACK / activeStrategy 是**可变的**：auto 要拿同一批帧把三个候选各排一次再挑，
   // 所以 build() 读的是当前生效的那一对，而不是闭包里钉死的一个。改完这里必须把
   // activeStrategy/PACK 还原成最终选中的那个，后面 trimTail / fillGaps 还在用。
-  const packFor = (name) => ({ stretch: 0.2, binCost: BIN_COST[name] ?? 1.02, fillRows: true });
+  const packFor = (name) => ({ stretch: PACK_STRETCH, binCost: BIN_COST[name] ?? 1.02, fillRows: true });
   let activeStrategy = strategy;
   let PACK = packFor(activeStrategy);
   // 低于 minFrames 就把最长的段反复二等分（zoom / 陪看用）
@@ -479,7 +412,7 @@ export async function runStoryboard(opts) {
       const k = Math.max(1, Math.min(8, Math.ceil(Math.sqrt(sg.length))));
       tr = sg.map(() => k);
     }
-    return { segs: sg, raw, tiers: tr, plan: solve(tr, { stretch: 0.2, ...PACK }) };
+    return { segs: sg, raw, tiers: tr, plan: solve(tr, { stretch: PACK_STRETCH, ...PACK }) };
   };
   const minCellOf = (b) => {
     const minW = Math.min(...b.plan.cells.map((c) => Math.round(c.w * canvas.width)));
@@ -503,7 +436,7 @@ export async function runStoryboard(opts) {
     if (b.plan.bins <= cap) return b;
     for (let bump = 1; bump <= 7; bump += 1) {
       const tr = b.tiers.map((t) => (Number(t) === 0 ? 0 : Math.min(8, Number(t) + bump)));
-      const p = solve(tr, { stretch: 0.2, ...PACK });
+      const p = solve(tr, { stretch: PACK_STRETCH, ...PACK });
       if (p.bins <= cap) return { ...b, tiers: tr, plan: p };
     }
     return null;                                  // 全压到 1/8 还装不下 → 交给减帧
@@ -586,7 +519,7 @@ export async function runStoryboard(opts) {
     const from = lastBin[0].seq;
     for (let step = 1; step <= 2; step += 1) {
       const bumped = b.tiers.map((t, i) => (i >= from ? Math.min(8, t + step) : t));
-      const p2 = solve(bumped, { stretch: 0.2, ...PACK });
+      const p2 = solve(bumped, { stretch: PACK_STRETCH, ...PACK });
       if (p2.bins < b.plan.bins) return { ...b, tiers: bumped, plan: p2 };
     }
     return b;
@@ -655,7 +588,7 @@ export async function runStoryboard(opts) {
           const segs2 = [...cur.segs.slice(0, first), ...newSegs, ...cur.segs.slice(last + 1)];
           const tiers2 = [...cur.tiers.slice(0, first),
             ...new Array(small).fill(tier), ...cur.tiers.slice(last + 1)];
-          const p2 = solve(tiers2, { stretch: 0.2, ...PACK });
+          const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
           if (process.env.DSH_PLAN_DEBUG) {
             console.error(`[fillGaps] coarsen bin=${worst.bin} ${nb}->${small} tier=${tier}`
               + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`
@@ -695,7 +628,7 @@ export async function runStoryboard(opts) {
           const segs2 = [...cur.segs.slice(0, first), ...newSegs, ...cur.segs.slice(last + 1)];
           const tiers2 = [...cur.tiers.slice(0, first),
             ...new Array(sq).fill(tier), ...cur.tiers.slice(last + 1)];
-          const p2 = solve(tiers2, { stretch: 0.2, ...PACK });
+          const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
           if (process.env.DSH_PLAN_DEBUG) {
             console.error(`[fillGaps] uniform bin=${worst.bin} ${nb}->${sq} tier=${tier}`
               + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`
@@ -740,7 +673,7 @@ export async function runStoryboard(opts) {
           segs2.splice(c2.i, 1, ...ps);
           tiers2.splice(c2.i, 1, cur.tiers[c2.i], cur.tiers[c2.i]);
         }
-        const p2 = solve(tiers2, { stretch: 0.2, ...PACK });
+        const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
         if (process.env.DSH_PLAN_DEBUG) {
           console.error(`[fillGaps] bin=${worst.bin} n=${n} toSquare=+${toSquare}`
             + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`
@@ -761,7 +694,7 @@ export async function runStoryboard(opts) {
           const parts = splitSeg(cur.segs[pick.i], frac);
           segs2.splice(pick.i, 1, ...parts);
           tiers2.splice(pick.i, 1, cur.tiers[pick.i], 0);
-          const p2 = solve(tiers2, { stretch: 0.2, ...PACK });
+          const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
           if (process.env.DSH_PLAN_DEBUG) {
             console.error(`[fillGaps] bin=${worst.bin} free-filler seg=${pick.i}`
               + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`

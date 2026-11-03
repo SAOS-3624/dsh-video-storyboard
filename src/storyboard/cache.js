@@ -23,7 +23,9 @@ import { configuredText, readVideoFile } from './user-config.js';
 // 条目就是几十 MB 的 {"0":12,…} 且类型全丢。现在指纹已改为不进缓存，升版本把可能写坏的条目作废。
 // 3 → 4：扫描结果里新增了 darkRuns（黑场段）。旧条目没有这一项，命中后黑场会并回内容格，
 // 同一支片子第一次跑和第二次跑出图不一样 —— 升版本让旧条目重扫一次。
-export const CACHE_VERSION = 25;
+export const CACHE_VERSION = 26;
+// 25 → 26：切点链路的编排搬进 cuts.js（行为不变），同时新增 `cutFloor` 维度并进了
+// cacheKey —— 同一份文件按不同门槛扫描会得到不同的 cuts，旧键里没有这个维度。
 // 4 → 5：扫描结果里新增了**抽稀指纹**（printPack，8fps base64）。
 // `frameDiv` 判据靠它，旧条目没有就只能退回 meanMotion —— 同一支片第一次跑和第二次跑
 // 摊开方式不一样，而且清单上看不出来。升版本让旧条目重扫一次。
@@ -63,10 +65,10 @@ export function cacheDir(env = process.env) {
 }
 
 /**
- * 缓存键：路径 + 大小 + mtime + 窗口 + 阈值模式。
+ * 缓存键：路径 + 大小 + mtime + 窗口 + 阈值模式 + 切点门槛。
  * 不用文件内容 hash —— 2GB 的文件读一遍比重新扫描还慢。
  */
-export async function cacheKey({ input, start, end, threshold, minGap }) {
+export async function cacheKey({ input, start, end, threshold, minGap, cutFloor }) {
   let size = 0;
   let mtime = 0;
   try {
@@ -78,8 +80,9 @@ export async function cacheKey({ input, start, end, threshold, minGap }) {
   }
   // **`minGap` 必须进键**：它改变切点判定（近邻合并），漏了就会出现"改参数却拿到上一次结果的缓存"。
   // 实测踩过：把阈值下限从 12 调到 20，刀数反而变多 —— 拿回来的是旧配置的 cuts。
+  // **`cutFloor` 同理**：它是切点判定下限，改了它 cuts 完全不同。
   const raw = [CACHE_VERSION, input, size, mtime, start ?? 0, end ?? 'eof',
-    String(threshold), String(minGap ?? 'def')].join('|');
+    String(threshold), String(minGap ?? 'def'), String(cutFloor ?? 'def')].join('|');
   return createHash('sha1').update(raw).digest('hex').slice(0, 20);
 }
 

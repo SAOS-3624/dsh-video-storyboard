@@ -19,6 +19,15 @@ export const DEFAULT_GROW = Object.freeze([3, 4, 5, 6, 7, 8]);
 export const UNIT = 840;
 
 /**
+ * 宽高比容差：一行里最宽的格压到 `1/(1+τ)`、最窄格拉到 `1/(1−τ)` 还算"同一个格子"。
+ *
+ * 0.3 是实测定的：混合档位素材上，0.2 → 0.3 张数 -4.7%、0.35 能到 -15%，
+ * 而 0.3 时格子最扁是 1.3:1（肉眼几乎看不出）。再往上（0.5 / 0.6）张数还能降，
+ * 但格子会扁到 1.5~1.6:1，开始明显走形 —— 那是调用方该自己选的事。
+ */
+export const DEFAULT_STRETCH = 0.3;
+
+/**
  * 档位 k 的边长区间（UNIT 单位）。
  *
  *   k=1  [1/2, 1]     —— 整幅只许缩到一半（两张 1 档正好并排）
@@ -46,7 +55,7 @@ export function bounds(k, grow = DEFAULT_GROW) {
 const ROW_CACHE = new Map();
 const ROW_CACHE_MAX = 20000;
 
-export function rowOptions(tiers, grow = DEFAULT_GROW, stretch = 0.2, fillRows = true) {
+export function rowOptions(tiers, grow = DEFAULT_GROW, stretch = DEFAULT_STRETCH, fillRows = true) {
   // **键必须覆盖所有影响结果的参数**（#64）：以前只编码 "stretch > 0.15" 这个布尔，
   // `grow` 完全没编 —— 于是「允许升档」和「不允许升档」两次调用会命中同一份候选，
   // 拿到别的情况下算出来的行高（flat 行高直接依赖精确的 stretch 值）。
@@ -96,11 +105,16 @@ function rowOptionsRaw(tiers, grow, stretch, fillRows = true) {
   }
 
   // 3) **格内拉伸**：同一行里各自纵向拉高到行高（宽高比变化 <= stretch）
-  //    可行条件是"最宽的格 / 最窄的格 <= 1 + 2*stretch"，此时行高取 最宽/(1+stretch)。
-  //    满足后这一行**零空隙**（面积 = 行高 × 1）。
+  //    可行条件是"最宽的格 / 最窄的格 <= (1+stretch)²"：
+  //      最宽格被压到 h/w = 1/(1+τ)（正好吃满 τ）
+  //      最窄格被拉到 h/w = (wmax/wmin)/(1+τ)，要 <= 1+τ ⇒ wmax/wmin <= (1+τ)²
+  //    以前写成 (1+τ)/(1−τ)：τ=0.2 时是 1.5 > 1.44，最窄格实际被拉到 1.25（+25%），
+  //    τ=0.3 时更糟，会到 1.43（+43%）—— 比"最多走形 30%"多出一半。
+  //    这是 400 组随机档位压测量到 33.6% 之后收紧的。
   if (stretch > 0 && s.length > 1) {
     const wmax = Math.max(...s), wmin = Math.min(...s);
-    if (wmax <= wmin * ((1 + stretch) / (1 - stretch)) + 1e-9) {
+    const lim = (1 + stretch) * (1 + stretch);
+    if (wmax <= wmin * lim + 1e-9) {
       const c2 = wmax / (1 + stretch);
       const A2 = c2 * sum(s);                    // 面积 = 行高 × 本行实占宽度（未满宽就不许虚报）
       if (!out.some((o) => Math.abs(o.c - c2) < 1e-9 && Math.abs(o.A - A2) < 1e-9)) {
@@ -112,7 +126,7 @@ function rowOptionsRaw(tiers, grow, stretch, fillRows = true) {
 }
 
 /** 预计算：ropt[i][ln-1] = seq[i..i+ln) 这一行的候选。DP 内层只查表。 */
-export function precompute(tiers, grow = DEFAULT_GROW, stretch = 0.2, fillRows = true) {
+export function precompute(tiers, grow = DEFAULT_GROW, stretch = DEFAULT_STRETCH, fillRows = true) {
   const n = tiers.length;
   const ropt = Array.from({ length: n }, () => []);
   for (let i = 0; i < n; i += 1) {
@@ -139,7 +153,7 @@ export function precompute(tiers, grow = DEFAULT_GROW, stretch = 0.2, fillRows =
  *          x/y/w/h 是归一化坐标（0..1，y 相对本张），t=档位，f=实际缩放系数
  */
 export function solve(tiers, {
-  grow = DEFAULT_GROW, mu = 1, stretch = 0.2, binCost = 1.02, fillRows = true,
+  grow = DEFAULT_GROW, mu = 1, stretch = DEFAULT_STRETCH, binCost = 1.02, fillRows = true,
 } = {}) {
   const n = tiers.length;
   if (!n) return { bins: 0, fill: 0, cells: [], area: 0 };
@@ -211,13 +225,18 @@ export function solve(tiers, {
     let x = 0;
     s.forEach((sv, k) => {
       const tier = tiers[i0 + k];
+      // **逐格部分拉伸**：行高不变，每格最多拉到自己 (1+stretch) 倍，
+      // 够不到行高的部分才留空。以前只有"整行 flat / 整行不拉"两档，宽度比超过
+      // (1+τ)/(1−τ) 的行一点空隙都收不回来 —— 混合档位里那种行才是空隙的大头。
+      // 这是**纯后处理**：不改行划分、不改箱数，只把已有的空白填上。
+      const hh = flat ? rowH : Math.min(rowH, sv * (1 + stretch));
       cells.push({
         x: x / UNIT,
         y: binH,
         w: sv / UNIT,
-        h: (flat ? rowH : sv) / UNIT,                 // 只有 flat 行才拉高；否则是正方格
+        h: hh / UNIT,
         s: sv / UNIT,                                 // 兼容旧字段
-        stretch: flat ? sv / rowH : 1,                // 宽/高（1 = 正方形格）
+        stretch: sv / hh,                             // 宽/高（1 = 正方形格）
         t: tier,
         f: (sv * tier) / UNIT,
         bin,                                          // 第几张图（0-based）

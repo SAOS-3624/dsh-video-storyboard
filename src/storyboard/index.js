@@ -35,7 +35,7 @@ export {
 } from './tiers.js';
 
 // ---- 排布：档位序列 → 归一化矩形（按行精确最优），以及拼图
-export { solve, toRects, bestPlan, rowOptions, precompute, bounds, UNIT, DEFAULT_GROW } from './pack.js';
+export { solve, toRects, bestPlan, rowOptions, precompute, bounds, UNIT, DEFAULT_GROW, DEFAULT_STRETCH } from './pack.js';
 export { composePacked, badgeScale, drawBadgePlain, drawGlyphsOutlined, blit } from './sheet.js';
 
 // ---- 取流：只读容器头，不花图片 token

@@ -56,7 +56,7 @@ export function storyboardToolSpec() {
       '',
       'COST — read before passing any size option. Images bill by PIXELS on a 42px grid: anything',
       'under 544×544 is charged as 544×544 (~192 tokens), one image tops out ~994. Default 800x450',
-      '= ~233 tokens, and the frame count does not change that. The text index is billed on top and',
+      '= ~222 tokens, and the frame count does not change that. The text index is billed on top and',
       'is often the bigger bill.',
       '- **Do not pass `strategy`** unless the user asked for a specific look: "auto" already picks',
       '  the cheapest readable policy and prints what the others would have cost. "full" means',
@@ -123,9 +123,15 @@ export function storyboardToolSpec() {
         enum: ['auto', 'compact', 'standard', 'skim', 'full', 'brief'],
         description: 'Size policy. Omit → auto picks the cheapest readable one.',
       },
+      cutFloor: {
+        type: 'integer',
+        description: 'Shot-change sensitivity, 0-255 (omit → 80). 80 suits documentary/film '
+          + '(long shots, sparse cuts); 60 suits short-form/fast-cut content (median shot < 3s). '
+          + 'Lower detects more shots: more images and tokens, but fewer torn-together scenes.',
+      },
       budget: {
         type: 'integer',
-        description: 'Pixels per image (default 360000 = 800x450 ≈233 tokens).',
+        description: 'Pixels per image (default 360000 = 798x449 ≈222 tokens).',
       },
       dryRun: {
         type: 'boolean',
@@ -290,6 +296,12 @@ export function zoomToolSpec() {
         type: 'string',
         enum: ['full', 'standard', 'compact', 'skim', 'brief'],
         description: 'Size policy, default full.',
+      },
+      // zoom 的窗口通常只有几十秒、格数很少，切点门槛对结果影响极小；
+      // 声明它纯粹是因为 boardOptions 共用了同一批参数（schema 审计要求两边一致）。
+      cutFloor: {
+        type: 'integer',
+        description: 'Shot-change sensitivity, 0-255 (omit → 80). Rarely matters for zoom.',
       },
       pick: {
         type: 'string',

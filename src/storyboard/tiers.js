@@ -140,24 +140,42 @@ export function imageTokens(w, h) {
 }
 
 /**
- * 画布尺寸：面积 <= budget，且**任一边不超过 800**（DS 的视觉上限）。
+ * 画布尺寸：面积 <= budget，且**任一边不超过 maxSide**。
  *
  * 16:9 + 640k 算出来是 1066×600，会被 800 卡成 800×450 —— 这正是用户实测的
  * "再大就没意义"：超过 800 的部分宿主会缩回去，而清单里的格子尺寸就成了假数。
+ *
+ * ## 为什么宽度要向下对齐到 42px
+ *
+ * 计费网格是 `ceil(ceil(px/14)/3)` 个 token 格，一格 42px，而每行还要多收 1 个
+ * 分隔 token。所以 **W 落在 42 的整数倍上时，一行才不多收那个 token**。
+ *
+ *   800×450 → 812 对齐 → 20 列 → 11×(20+1)+2 = 233
+ *   798×450 → 19 列       → 11×(19+1)+2 = 222   ← 面积只少 0.25%，便宜 4.7%
+ *
+ * 只对"对齐真能降价"的情况生效（656 行那个 if）：地板区（<544²）本来就按
+ * 544² 收费，对齐只会白掉像素，所以原样返回。高度不对齐 —— 450→420 会掉 7%
+ * 面积，向上到 462 又不降价，两头都不划算。
  */
 export function fitCanvas(aspect, { maxSide = MAX_CANVAS_SIDE, budget = DEFAULT_BUDGET } = {}) {
   const a = Math.max(0.2, Math.min(5, Number(aspect) || 16 / 9));
   // **地板**：计费时小于 544² 的图一律按 544² 收，所以画得比它小一分钱不省、只是更糊。
   // 这里直接把面积抬到地板（清单会说明"已抬升"），别让调用方以为自己省了钱。
   const area = Math.min(MAX_IMAGE_AREA, Math.max(IMAGE_UPSCALE_AREA, Number(budget) || DEFAULT_BUDGET));
-  let w = Math.sqrt(area * a);
-  let h = w / a;
+  const w = Math.sqrt(area * a);
+  const h = w / a;
   const shrink = Math.min(1, maxSide / w, maxSide / h);
-  return {
-    width: Math.max(64, Math.round(w * shrink)),
-    height: Math.max(36, Math.round(h * shrink)),
-    aspect: a,
-  };
+  const width = Math.max(64, Math.round(w * shrink));
+  const height = Math.max(36, Math.round(h * shrink));
+
+  const snapped = Math.floor(width / IMAGE_CELL) * IMAGE_CELL;
+  if (snapped >= 64) {
+    const snapH = Math.max(36, Math.round(snapped / a));
+    if (imageTokens(snapped, snapH) < imageTokens(width, height)) {
+      return { width: snapped, height: snapH, aspect: a };
+    }
+  }
+  return { width, height, aspect: a };
 }
 
 /**
