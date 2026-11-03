@@ -666,11 +666,11 @@ export function scanShots(opts) {
     zWindow = 300,
   } = opts;
 
-  // 判定下限随口径走：abs=12（历史值）、mc=80（占比 0.31，全 11 集 BBC 上实测最优）、z=10（10 倍噪声）。
+  // 判定下限随口径走：abs=12（历史值）、mc=按底噪自适应（见下）、z=10（10 倍噪声）。
   // 别照搬 abs 的量级：mc 是占比刻度，同一个"看着差不多"的数会让召回拉满、精度崩。
   // 全 11 集 BBC（照抄 pipeline 推导步骤）实测：40 → 79.8%、60 → 85.2%、**80 → 88.4%**、abs 基线 85.2%。
   // SHOT 27 段：60 → 77.8%、80 → 77.2%（略降 0.6，换 BBC +3.2，划算）。
-  const minCutScore = opts.minCutScore ?? (normalize === 'z' ? 10 : scoreMode === 'mc' ? 80 : MIN_CUT_SCORE);
+  let minCutScore = opts.minCutScore ?? (normalize === 'z' ? 10 : scoreMode === 'mc' ? 80 : MIN_CUT_SCORE);
   // 尖峰门默认跟着口径走：mc 下开（2.5×邻域），abs 下不开（abs 上它只值 +1.2，且要重标）。
   const spikeK = opts.spikeK ?? (scoreMode === 'mc' ? 2.5 : 0);
 
@@ -801,6 +801,14 @@ export function scanShots(opts) {
       const normMeans = bar > 0 ? means.map((m) => m / (1 - bar)) : means;
       const normStats = normalizeScores(stats, means, { barFrac: bar });
       const normLong = normalizeScores(longStats, means, { barFrac: bar, offset: lag });
+      // **下限跟着本片底噪走**：同样的 80，在安静素材上是"够高"，在颗粒/暗场/常运镜的素材上
+      // 就是"太低"（实测 BBC《Caves》那集 p75=19.7，用 80 时精度只有 62%）。
+      // 用 p75 线性映射（mc 刻度实测标定点：p75≈2.5 → 80；p75≈6.6 → 140），夹在 [80,150]。
+      // 只对 mc 生效；调用方显式传了 minCutScore 就尊重调用方。
+      if (opts.minCutScore == null && scoreMode === 'mc' && normalize !== 'z') {
+        const p75 = quantile(normStats.map((st) => st.score), 0.75);
+        minCutScore = Math.min(150, Math.max(80, Math.round(80 + 14.6 * (p75 - 2.5))));
+      }
       // 鲁棒归一化：换成"比本片噪声高几倍 σ"的口径（阈值/下限随之改成 σ 单位）
       if (normalize === 'z') {
         const z = zScores(normStats.map((st) => st.score), zWindow);
