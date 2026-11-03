@@ -80,6 +80,8 @@ export async function runStoryboard(opts) {
     // 例外：`thrifty`（恭喜发财档）自己带 `defaultScanGap: 0.35`，见下面 capGap。
     scanGap = 0,
     refineBursts = true,
+    // 打分口径：'mc'（默认，运动补偿占比）| 'abs'（历史整帧平均差）。见 scan.js 头注释。
+    scanMode = 'mc',
     // 取帧并发数：每路 ffmpeg 只解一帧，互不依赖。实测 154 帧（16 核 i9-12900HX）：
     // 4 路 9.65s / 8 路 6.58s / 12 路 5.68s / 16 路 5.56s / 24 路 6.44s（过了 16 就抢不到核）。
     // 取 0.75×核数：16 核 → 12，比 8 快 14%，又不像 24 那样把机械盘和内存带宽打满。
@@ -242,6 +244,10 @@ export async function runStoryboard(opts) {
       const s = await scanShots({
         input, fps: info.fps, threshold, start: winStart, end: winStart + winDur,
         minGap: capGap, ffmpegPath, hwaccel, onProgress,
+        // 运动补偿口径（见 scan.js 头注释与 docs/REFERENCES.md）：
+        // 短视频 69.8→74.4、纪录片 86.1→89.4；代价是每帧打分 0.04→0.155 ms（整段扫描 +5%）。
+        // 想回到旧口径：runStoryboard({ scanMode: 'abs' })。
+        scoreMode: scanMode,
       });
       scanMeans = s.means;
       scanPrints = s.prints;
@@ -269,8 +275,14 @@ export async function runStoryboard(opts) {
   // ---- 极静素材（PPT / 代码录屏 / 固定机位）：绝对阈值会漏掉"只改了几个像素"的翻页。
   if (!precomputed && scan.stats.length > 20) {
     const perSec = cuts.length / Math.max(1, winDur);
-    if (perSec < 0.25) {
-      const spikes = suppressClose(spikeCuts(scan.stats, { k: 4, minAbs: 4, halfWindow: 12 }), capGap);
+    // 门槛从 0.25 收到 0.1：纪录片/慢节奏长片也会落到 0.15–0.2，于是被误判成"极静素材"，
+    // 补刀结果（spikeCuts）动辄几千刀，而这里只用"比原来多"就替换 —— 实测 BBC 第一集
+    // 503 刀被换成 8792 刀，精度掉到 6%。真正的静态素材（PPT/代码录屏）每秒远不到 0.1 刀。
+    if (perSec < 0.1) {
+      // minAbs 是按分数刻度定的：abs 口径 4 分（≈1.6% 像素变化）就够；
+      // mc 口径下同理的"噪音地板"要高得多（占比 4% ≈ 10 分），4 分会让整片疯狂补刀（实测 BBC 精度 6%）。
+      const minAbs = scanMode === 'mc' ? 25 : 4;
+      const spikes = suppressClose(spikeCuts(scan.stats, { k: 4, minAbs, halfWindow: 12 }), capGap);
       if (spikes.length > cuts.length) cuts = spikes;
     }
   }
