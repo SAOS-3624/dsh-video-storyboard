@@ -29,7 +29,7 @@ button.primary{background:var(--accent);border-color:var(--accent);color:#fff}bu
 .copy{font-size:12px;padding:2px 7px;margin-left:6px;border-radius:6px}
 .help h3{font-size:14px;margin:14px 0 4px}.help ul{margin:6px 0 0;padding-left:20px}.help li{margin:5px 0;color:var(--muted)}
 code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--code);padding:2px 5px;border-radius:4px;color:var(--text)}
-.banner{padding:10px 12px;border-radius:8px;background:var(--code);font-size:12px;color:var(--muted);margin:10px 0}
+.banner{padding:10px 12px;border-radius:8px;background:var(--code);font-size:12px;color:var(--muted);margin:10px 0}.banner:empty{display:none}
 </style>
 </head>
 <body><main>
@@ -64,12 +64,18 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
 
 <div class="card">
   <h2>视频与浏览器</h2>
+  <div class="banner" id="videoSource"></div>
   <div class="grid">
     <label class="field">浏览器调试端口
       <input id="browserPort" type="number" min="1" max="65535" placeholder="9333；留空关闭">
       <span class="hint">给 Edge 加 --remote-debugging-port=9333 后，插件才能读真实播放位置。</span>
     </label>
     <label class="check" style="margin-top:22px"><input id="launchBrowser" type="checkbox"> 允许插件自己打开浏览器（默认关闭）</label>
+    <label class="field" style="grid-column:1/-1">Cookies 文件
+      <input id="cookies" type="text" placeholder="例如 C:\Users\me\.dsh\cookies.txt">
+      <span class="hint">Netscape cookies.txt，给需要登录的 B 站/YouTube 用；也可用 DSH_VIDEO_COOKIES 环境变量。</span>
+    </label>
+    <label class="check"><input id="storyboardAuto" type="checkbox"> 自动生成分镜（storyboard.auto）</label>
   </div>
 </div>
 
@@ -159,6 +165,11 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
     const v = state.video || {};
     $('browserPort').value = v.browserPort || '';
     $('launchBrowser').checked = v.launchBrowser === true;
+    $('cookies').value = v.cookies || '';
+    $('storyboardAuto').checked = v.storyboardAuto !== false;
+    $('videoSource').textContent = Array.isArray(v.envOverrides) && v.envOverrides.length
+      ? '环境变量优先：' + v.envOverrides.join('、') + '；这里的改动不会覆盖它们。'
+      : '';
     $('paths').innerHTML = '<div>asr.json：<code>' + escapeHtml(state.paths.asr || '') + '</code></div>'
       + '<div>video.json：<code>' + escapeHtml(state.paths.video || '') + '</code></div>';
   }
@@ -222,6 +233,8 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
       const video = {
         browserPort: $('browserPort').value === '' ? false : Number($('browserPort').value),
         launchBrowser: $('launchBrowser').checked,
+        cookies: $('cookies').value,
+        storyboardAuto: $('storyboardAuto').checked,
       };
       const data = await api('/save', { asr, video });
       state.asr = data.asr; state.video = data.video;
