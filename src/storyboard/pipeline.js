@@ -69,6 +69,28 @@ export const BURN_MODES = ['index', 'none'];
  * @param {'index'|'none'} [opts.burn]
  * @param {(p:object)=>void} [opts.onProgress]
  */
+/**
+ * 「极静素材补刀」的结果该不该顶掉粗扫 —— 抽成纯函数，好测也好读。
+ *
+ * 旧判据只有一条：`spikes.length > cuts.length`，即"补出来的更多就用它"。它错了两次：
+ *   1) 长纪录片每秒 0.15–0.2 刀，会被当成极静素材（入口门槛已收到 0.1 刀/秒）；
+ *   2) 即便进了这条路径，"更多"也不等于"更对"——BBC 第一集实测补出 8792 刀（真值 503），
+ *      精度从 82% 掉到 12%。
+ *
+ * 现在要求两条同时成立：
+ *   ① 确实补出了更多刀（这条路径的原始目的：粗扫漏掉"只改几个像素"的翻页）；
+ *   ② 补刀之后的密度仍在"静态素材"该有的范围内（≤0.3 刀/秒）。既然入口已经认定这是
+ *      PPT/代码录屏，它就不可能每秒换 3 次画面；密度超了说明补刀在制造噪声，宁可不要。
+ *
+ * 试过再加一条"补刀时刻是否成簇"（真翻页成簇、噪声均匀），用 IQR/中位数 做判据——
+ * 算下来均匀噪声和成簇分布都得到 ≈0，判据是反的，且没有素材能验证，故不采用。
+ */
+export function shouldTakeSpikes({ coarse = 0, spikes = 0, winDur = 0 } = {}) {
+  if (!(spikes > coarse)) return false;
+  if (spikes / Math.max(1e-6, winDur) > 0.3) return false;
+  return true;
+}
+
 export async function runStoryboard(opts) {
   const {
     input: inputRaw,
@@ -283,7 +305,7 @@ export async function runStoryboard(opts) {
       // mc 口径下同理的"噪音地板"要高得多（占比 4% ≈ 10 分），4 分会让整片疯狂补刀（实测 BBC 精度 6%）。
       const minAbs = scanMode === 'mc' ? 25 : 4;
       const spikes = suppressClose(spikeCuts(scan.stats, { k: 4, minAbs, halfWindow: 12 }), capGap);
-      if (spikes.length > cuts.length) cuts = spikes;
+      if (shouldTakeSpikes({ coarse: cuts.length, spikes: spikes.length, winDur })) cuts = spikes;
     }
   }
 
