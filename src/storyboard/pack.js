@@ -300,7 +300,7 @@ export function toRects(cells, { width, height, gutter = 0, bin = null } = {}) {
       const cur = row[i];
       const edge = prev.px + prev.pw;
       if (Math.abs(cur.px - edge) <= 2) {
-        cur.pw += cur.px - edge;
+        cur.pw = Math.max(1, cur.pw + cur.px - edge);
         cur.px = edge;
       }
     }
@@ -317,6 +317,16 @@ export function toRects(cells, { width, height, gutter = 0, bin = null } = {}) {
       }
     }
     prevBottom = Math.max(...line.map((c) => c.py + c.ph));
+  }
+  // 行高/取整修正之后，最后一行仍可能因为 Math.round 越过画布 1px；
+  // 渲染时这会把底边/右边裁掉。统一钳回画布内，保持至少 1px 宽高。
+  const maxW = Math.max(1, Math.floor(width));
+  const maxH = Math.max(1, Math.floor(height));
+  for (const c of out) {
+    c.px = Math.max(0, Math.min(maxW - 1, c.px));
+    c.py = Math.max(0, Math.min(maxH - 1, c.py));
+    c.pw = Math.max(1, Math.min(c.pw, maxW - c.px));
+    c.ph = Math.max(1, Math.min(c.ph, maxH - c.py));
   }
   return out;
 }

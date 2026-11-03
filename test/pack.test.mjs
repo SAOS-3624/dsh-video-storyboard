@@ -98,6 +98,17 @@ test('toRects: 混合档位同一行不能有 1px 重叠', () => {
   }
 });
 
+test('toRects: 最后一行取整后不能越过画布', () => {
+  // [5,1,0] 在 800x450 下最后一行 py+ph = 451，旧实现会多出 1px 底边。
+  const p = solve([5, 1, 0]);
+  const rects = toRects(p.cells, { width: 800, height: 450 });
+  for (const r of rects) {
+    assert.ok(r.px >= 0 && r.py >= 0, `${r.index} 左上越界`);
+    assert.ok(r.px + r.pw <= 800, `${r.index} 右边越界`);
+    assert.ok(r.py + r.ph <= 450, `${r.index} 底边越界`);
+  }
+});
+
 test('rowOptions: 一行填满宽度，行高取最高那格', () => {
   const opts = rowOptions([4, 4, 4]);
   assert.ok(opts.length >= 1);
