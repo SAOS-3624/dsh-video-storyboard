@@ -85,9 +85,29 @@ export const BURN_MODES = ['index', 'none'];
  * 试过再加一条"补刀时刻是否成簇"（真翻页成簇、噪声均匀），用 IQR/中位数 做判据——
  * 算下来均匀噪声和成簇分布都得到 ≈0，判据是反的，且没有素材能验证，故不采用。
  */
-export function shouldTakeSpikes({ coarse = 0, spikes = 0, winDur = 0 } = {}) {
+export function shouldTakeSpikes({
+  coarse = 0, spikes = 0, winDur = 0, spikeTimes = null, coarseTimes = null,
+  novelGap = 2.0, minNovel = 0.4,
+} = {}) {
   if (!(spikes > coarse)) return false;
   if (spikes / Math.max(1e-6, winDur) > 0.3) return false;
+  // ③ 新颖度检验：补刀的意义是"找到粗扫漏掉的"，所以要求补出来的刀里，
+  //    有相当一部分**离任何粗扫刀都远**（>novelGap 秒）。全是已有刀的重复检测就没意义。
+  //    取 2 秒：同一刀的重复检测会差 1 秒左右（实测静态录屏 65.1/65.2 vs 粗扫 66.1），
+  //    而真漏掉的翻页离最近的粗扫刀通常好几秒。
+  //    实测一段静态屏幕录像：10 刀全部贴着粗扫的 6 刀（新颖度 0），拒绝；
+  //    一段游戏录像：密度 0.87 刀/秒，被 ② 挡下。
+  if (Array.isArray(spikeTimes) && Array.isArray(coarseTimes) && spikeTimes.length >= 4) {
+    let novel = 0;
+    for (const t of spikeTimes) {
+      let near = false;
+      for (const c of coarseTimes) {
+        if (Math.abs(t - c) <= novelGap) { near = true; break; }
+      }
+      if (!near) novel += 1;
+    }
+    if (novel / spikeTimes.length < minNovel) return false;
+  }
   return true;
 }
 
@@ -305,7 +325,10 @@ export async function runStoryboard(opts) {
       // mc 口径下同理的"噪音地板"要高得多（占比 4% ≈ 10 分），4 分会让整片疯狂补刀（实测 BBC 精度 6%）。
       const minAbs = scanMode === 'mc' ? 25 : 4;
       const spikes = suppressClose(spikeCuts(scan.stats, { k: 4, minAbs, halfWindow: 12 }), capGap);
-      if (shouldTakeSpikes({ coarse: cuts.length, spikes: spikes.length, winDur })) cuts = spikes;
+      if (shouldTakeSpikes({
+        coarse: cuts.length, spikes: spikes.length, winDur,
+        spikeTimes: spikes.map((c) => c.t), coarseTimes: cuts.map((c) => c.t),
+      })) cuts = spikes;
     }
   }
 

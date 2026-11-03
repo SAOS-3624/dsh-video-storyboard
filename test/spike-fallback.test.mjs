@@ -31,3 +31,25 @@ test('winDur 缺失/为 0 时不炸（按极短处理，一律拒绝超密的）
   assert.equal(shouldTakeSpikes({ coarse: 1, spikes: 10, winDur: 0 }), false);
   assert.equal(shouldTakeSpikes({}), false);
 });
+
+test('新颖度：补刀全是已有刀的重复 → 拒绝；真漏掉的 → 采纳', () => {
+  // 实测一段静态屏幕录像：粗扫 6 刀，补刀 10 刀全部贴着粗扫（新颖度 0）
+  const coarse = [63.5, 66.1, 70.2, 78.3, 122.0, 149.8];
+  const dup = [65.1, 65.2, 65.2, 65.2, 66.6, 78.3, 121.9, 122.0, 149.7, 149.8];
+  assert.equal(
+    shouldTakeSpikes({ coarse: 6, spikes: 10, winDur: 151.2, spikeTimes: dup, coarseTimes: coarse }),
+    false,
+    '重复检测不该顶掉粗扫',
+  );
+  // 真正的"粗扫漏了翻页"：粗扫 2 刀，补刀 20 刀散布其间
+  const few = [10, 90];
+  const missed = [];
+  for (let i = 0; i < 20; i += 1) missed.push(3 + i * 7.5);
+  assert.equal(
+    shouldTakeSpikes({ coarse: 2, spikes: 20, winDur: 200, spikeTimes: missed, coarseTimes: few }),
+    true,
+    '找到了新刀就该采纳',
+  );
+  // 不给时刻时跳过第 ③ 条（向后兼容）
+  assert.equal(shouldTakeSpikes({ coarse: 2, spikes: 20, winDur: 200 }), true);
+});
