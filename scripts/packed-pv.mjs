@@ -2,7 +2,7 @@
  * packed-pv.mjs — 用真实 PV 关键帧拼一张打包分镜图（档位随机）。
  *
  * 用法：node scripts/packed-pv.mjs [n] [dir] [budget]
- *   默认 N=10，dir=D:/deepseek/3-Life/20.2_关键帧
+ *   默认 N=10，dir 取 $DSH_KEYFRAME_DIR 或相对路径 20.2_关键帧
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -17,7 +17,7 @@ import {
 const FF = process.env.DSH_FFMPEG_PATH || 'ffmpeg';
 const OUT = join(process.cwd(), 'out-packed');
 const N = Number(process.argv[2] || 10);
-const DIR = process.argv[3] || 'D:/deepseek/3-Life/20.2_关键帧';
+const DIR = process.argv[3] || process.env.DSH_KEYFRAME_DIR || '20.2_关键帧';
 const BUDGET = Number(process.argv[4] || 1_200_000);
 const ASPECT = 16 / 9;
 

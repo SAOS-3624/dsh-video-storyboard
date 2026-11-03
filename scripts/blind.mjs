@@ -13,7 +13,7 @@ import { BACKGROUND, blit, drawBadge, drawBadgePlain, fillRect } from '../src/st
 
 const FF = process.env.DSH_FFMPEG_PATH || 'ffmpeg';
 const OUT = join(process.cwd(), 'out-packed');
-const DIR = 'D:/deepseek/3-Life/20.2_关键帧';
+const DIR = process.env.DSH_KEYFRAME_DIR || '20.2_关键帧';
 const ASPECT = 16 / 9;
 
 const N = Number(process.argv[2] || 16);
