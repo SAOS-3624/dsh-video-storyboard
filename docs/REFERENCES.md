@@ -33,6 +33,30 @@ denominator, which quietly depresses every score on a 2.39:1 film).
 No PySceneDetect code is copied. If we ever lift a module wholesale (`FlashFilter` is the obvious
 candidate), its BSD-3 notice and full licence text have to move into `NOTICE` first.
 
+**A. Nagasaka, Y. Tanaka, "Automatic Video Indexing and Full-Video Search for Object Appearances",
+Visual Database Systems II, 1992.**
+The origin of the "count how many pixels changed by more than T, then threshold that ratio" formulation —
+`scoreMode: 'mc'` is the same idea, with a per-cell tolerance for local motion and a mean-difference mode
+kept as the default.
+
+**H. J. Zhang, A. Kankanhalli, S. W. Smoliar, "Automatic Partitioning of Full-Motion Video",
+Multimedia Systems 1(1), 1993.**
+Region-based comparison instead of per-pixel, plus the two-threshold (dual-threshold) scheme for gradual
+transitions. We tested the hysteresis variant on our two benchmarks: no net gain (SHOT 74.3 / BBC 89.2
+vs 74.4 / 89.4), so it is not shipped — the numbers are in `bench/signal-processing.md`.
+
+**B. Shahraray, "Scene Change Detection and Content-Based Sampling of Video Sequences", SPIE 2419, 1995.**
+For each region, search a neighbourhood in the next frame for the best match *before* comparing — i.e.
+motion compensation ahead of the difference. Our `mcRatioScore` is a simplified, downscaled version
+(single-cell search within ±2 cells at 64×36, early exit on the first match under τ), not a port of it.
+
+**Robust normalisation (median / IQR).** `normalize: 'z'` scales the per-frame score by
+"how many times the local noise level" instead of an absolute number: `z = (s − rolling median) / (IQR/1.349)`,
+where `IQR/1.349` is the normal-consistent σ estimate. Median and IQR are chosen over mean/σ because a
+flash is an outlier and would inflate a standard deviation. Standard robust statistics (see
+P. J. Rousseeuw, C. Croux, "Alternatives to the Median Absolute Deviation", JASA 88(424), 1993);
+the implementation here is 20 lines of histogram quantiles, no external code.
+
 **FFmpeg `scdet` filter** <https://ffmpeg.org/ffmpeg-filters.html#scdet>
 The baseline we benchmark against in the README: 4/9 hard cuts on our fixture versus our 9/9. `scdet`
 scores mean absolute frame difference, so a cut that swaps hue at equal luma is invisible to it.
