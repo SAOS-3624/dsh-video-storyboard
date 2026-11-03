@@ -7,10 +7,10 @@
  */
 
 import { createHash } from 'node:crypto';
-import { access, readdir, rm, stat } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { access, readdir, rm, stat, statfs } from 'node:fs/promises';
+import { constants, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 /** 文件在不在、可不可读。**一行一个坑**：裸 access() 抛异常，用 try 包住才是判断而不是报错。 */
 export async function fileExists(path) {
@@ -94,11 +94,22 @@ export async function pruneMedia({ dir = mediaDir(), maxBytes = mediaMaxBytes() 
   return { removed, bytes: total };
 }
 
-/** 磁盘剩余空间（字节）。拿不到就返回 null，由调用方决定是否放行。 */
-export async function freeBytes() {
+/** 找到第一个存在的祖先目录：媒体目录还没建时，statfs 也要落在那块盘上。 */
+function existingAncestor(path) {
+  let probe = path;
+  while (probe) {
+    if (existsSync(probe)) return probe;
+    const parent = dirname(probe);
+    if (parent === probe) break;
+    probe = parent;
+  }
+  return null;
+}
+
+/** 磁盘剩余空间（字节）。**按目标目录所在的盘**算，不是系统临时目录。 */
+export async function freeBytes(dir = mediaDir(), { statfs: statfsFn = statfs } = {}) {
   try {
-    const { statfs } = await import('node:fs/promises');
-    const s = await statfs(tmpdir());
+    const s = await statfsFn(existingAncestor(dir) ?? tmpdir());
     return Number(s.bavail) * Number(s.bsize);
   } catch {
     return null;

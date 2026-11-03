@@ -331,7 +331,7 @@ export async function fetchMedia(input, opts = {}) {
     ? Number(info.filesize_approx)
     : null;
   if (wanted) {
-    const free = await freeBytes();
+    const free = await freeBytes(dir);
     if (free !== null && wanted * 1.5 > free) {
       throw new Error(
         `not enough disk space: need about ${(wanted / 1048576).toFixed(0)} MB ` +
