@@ -68,3 +68,35 @@ test('zScores：全零序列不产生 NaN/Infinity', () => {
   const z = zScores(new Array(50).fill(0), 10);
   for (const v of z) assert.ok(Number.isFinite(v), `出现非有限值 ${v}`);
 });
+
+// ---- 尖峰门（decideCuts 用，按密度门控） ----
+import { applySpikeGate } from '../src/storyboard/scan.js';
+
+const flat = (n, v = 5, dt = 0.04) => Array.from({ length: n }, (_, i) => ({ t: i * dt, score: v }));
+
+test('尖峰门：孤立尖峰保留，运动平台被砍掉', () => {
+  const dt = 0.04;
+  // ① 孤立尖峰：第 100 帧 200 分，左右都是 5
+  const a = flat(200);
+  a[100].score = 200;
+  const cuts = [{ t: a[100].t, score: 200 }];
+  assert.equal(applySpikeGate(cuts, a, dt).length, 1, '孤立尖峰应保留');
+
+  // ② 运动平台：连续 10 帧都是 60，代表帧的邻域一样高
+  const b = flat(200);
+  for (let i = 95; i < 105; i += 1) b[i].score = 60;
+  const motion = [{ t: b[100].t, score: 60 }];
+  assert.equal(applySpikeGate(motion, b, dt).length, 0, '运动平台应被砍掉');
+
+  // ③ 邻域全 0 时不能"因为分母是 0 就全放过"——floor 兜住
+  const c = flat(200, 0);
+  c[100].score = 3;
+  assert.equal(applySpikeGate([{ t: c[100].t, score: 3 }], c, dt).length, 0, '低于 floor 的弱尖峰不放行');
+});
+
+test('尖峰门：空输入不炸；k=0 等于不设比值门槛（任何正分都过）', () => {
+  assert.deepEqual(applySpikeGate([], [], 0.04), []);
+  const s = flat(10);
+  assert.equal(applySpikeGate([{ t: 0.2, score: 5 }], s, 0.04, { k: 0 }).length, 1);
+  // 关掉整道门由调用方负责（decideCuts 的 spikeK=0 直接不调用），这里只守函数本身
+});

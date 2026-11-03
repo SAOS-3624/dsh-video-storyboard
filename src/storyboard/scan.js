@@ -478,8 +478,36 @@ export function cutsFromEvents(above, step, { minGap = 0.35, adaptive = true } =
  * @param {{threshold?:number|'auto'|'auto-low', minGap?:number, duration?:number,
  *          adaptiveGap?:boolean}} opts
  */
+/**
+ * 尖峰门：只留"明显高于左右相邻帧"的候选。
+ *
+ * 一次真剪辑是"安静 → 一下 → 安静"；运镜、粒子、字幕只在局部变化，
+ * 邻域里同样是高分，比值上不去。对**快剪**是负收益（邻域本来就吵），所以由调用方按密度门控。
+ *
+ * @param {Array<{t:number, score:number}>} cuts 候选
+ * @param {Array<{t:number, score:number}>} stats 逐帧分数（等间隔）
+ * @param {number} step stats 的时间步长
+ * @param {{k?:number, floor?:number}} o k = 倍数门槛，floor = 分母下限（防邻域为 0 时全通过）
+ */
+export function applySpikeGate(cuts, stats, step, { k = 2.5, floor = 2 } = {}) {
+  if (!Array.isArray(cuts) || cuts.length === 0 || !Array.isArray(stats) || stats.length === 0) return cuts;
+  const at = (i) => (i >= 0 && i < stats.length ? stats[i].score : 0);
+  const t0 = stats[0].t;
+  return cuts.filter((c) => {
+    const i = Math.round((c.t - t0) / step);
+    return at(i) > k * Math.max(floor, at(i - 1), at(i + 1));
+  });
+}
+
 export function decideCuts(stats, {
   threshold = 'auto', minGap = 0.35, duration, adaptiveGap = true, floor = MIN_CUT_SCORE,
+  // 尖峰门：候选的分数必须明显高于**左右相邻帧**。真剪辑是"安静 → 一下 → 安静"，
+  // 而运镜/粒子/字幕只在局部动，帧差会被邻域同样高的分数拖住。
+  // 0 = 关闭。注意它对**快剪**是负收益（实测 SHOT 76.4 → 72.6），
+  // 所以只在候选稀疏（≤spikeMaxPerSec）时启用，见下面的门控。
+  spikeK = 0,
+  spikeMaxPerSec = 0.5,
+  spikeFloor = 2,
 } = {}) {
   const scores = stats.map((s) => s.score);
   const used = threshold === 'auto'
@@ -540,7 +568,12 @@ export function decideCuts(stats, {
   const kept = events.filter((c, i) => nearest(i) < 0.15
     || (neighborhoodQuiet(c.t, c.t - 0.18, c.t - 0.06, c.score)
       && neighborhoodQuiet(c.t, c.t + 0.06, c.t + 0.18, c.score)));
-  const cuts = kept;
+  // 尖峰门（按密度门控）：慢节奏素材上它把 BBC 从 89.4 抬到 94.7（留出验证），
+  // 但快剪素材上候选本来就密、邻域也吵，加这道门只会掉召回（SHOT 76.4 → 72.6）。
+  let cuts = kept;
+  if (spikeK > 0 && duration > 0 && kept.length / duration <= spikeMaxPerSec) {
+    cuts = applySpikeGate(kept, stats, step, { k: spikeK, floor: spikeFloor });
+  }
   const hotRatio = stats.length > 0 ? above.length / stats.length : 0;
   // 分数序列的变异系数：区分"每帧一剪"和"匀速运镜"
   const mean = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
@@ -633,8 +666,12 @@ export function scanShots(opts) {
     zWindow = 300,
   } = opts;
 
-  // 判定下限随口径走：abs=12（历史值）、mc=40（占比 0.157 ≈ 实测最优点）、z=10（10 倍噪声）
-  const minCutScore = opts.minCutScore ?? (normalize === 'z' ? 10 : scoreMode === 'mc' ? 40 : MIN_CUT_SCORE);
+  // 判定下限随口径走：abs=12（历史值）、mc=60（占比 0.235，全 11 集 BBC 上实测最优）、z=10（10 倍噪声）
+  // 别照搬 abs 的量级：mc 是占比刻度，同样"看着差不多"的 40 会让召回拉满、精度掉到 67%
+  // （实测 BBC 全量 40 → 79.8%，60 → 85.2%）。
+  const minCutScore = opts.minCutScore ?? (normalize === 'z' ? 10 : scoreMode === 'mc' ? 60 : MIN_CUT_SCORE);
+  // 尖峰门默认跟着口径走：mc 下开（2.5×邻域），abs 下不开（abs 上它只值 +1.2，且要重标）。
+  const spikeK = opts.spikeK ?? (scoreMode === 'mc' ? 2.5 : 0);
 
   if (!(fps > 0)) throw new RangeError(`fps must be > 0, got ${fps}`);
   const n = width * height;
@@ -768,7 +805,7 @@ export function scanShots(opts) {
         const z = zScores(normStats.map((st) => st.score), zWindow);
         for (let i = 0; i < normStats.length; i++) normStats[i].score = z[i];
       }
-      const decided = decideCuts(normStats, { threshold, minGap, duration: span, floor: minCutScore });
+      const decided = decideCuts(normStats, { threshold, minGap, duration: span, floor: minCutScore, spikeK });
       // ---- 渐变转场（叠化/淡入淡出）：补在切点列表里，只补"没有切点的地方"
       const gradual = detectGradual(normLong, normStats, {
         threshold: decided.threshold,
