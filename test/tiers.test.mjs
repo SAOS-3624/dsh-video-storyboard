@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 import {
   DEFAULT_STRATEGY, LEVEL_THRESHOLDS, MARK_BOOST, STRATEGIES, TIER_MAX, TIER_MIN,
-  applyMarkBoost, applyStrategy, applyTierMap, autoSheetCap,
+  applyMarkBoost, applyStrategy, applyTierMap, autoSheetCap, shouldForceSheetCap,
   IMAGE_UPSCALE_AREA, INTEGRAL_REF_SCORE, MAX_CANVAS_SIDE, fitCanvas, framesFromBounds, headerHeight, imageTokens, integralMarks, levelAt,
   levelCurve,
   pickAutoStrategy,
@@ -344,4 +344,14 @@ test('fitCanvas: 预算低于 544² 地板时抬到地板（画小不省钱，�
   // 上限仍然生效
   const big = fitCanvas(16 / 9, { budget: 99_999_999 });
   assert.ok(Math.max(big.width, big.height) <= MAX_CANVAS_SIDE);
+});
+
+test('shouldForceSheetCap: 344 张算失控，60 张不算', () => {
+  assert.equal(shouldForceSheetCap(344, 12), true, '49 分钟纪录片不封顶 344 张 → 必须压');
+  assert.equal(shouldForceSheetCap(100, 12), true, '超过 max(64, 8x12)=96');
+  assert.equal(shouldForceSheetCap(60, 12), false, '5 分钟 PV 要 60 张是真实的镜头数，不算失控');
+  assert.equal(shouldForceSheetCap(44, 12), false);
+  assert.equal(shouldForceSheetCap(0, 12), false);
+  assert.equal(shouldForceSheetCap(344, 0), false, '没有预算就不判');
+  assert.equal(shouldForceSheetCap(NaN, 12), false);
 });

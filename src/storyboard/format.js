@@ -467,7 +467,11 @@ export function formatPlanPreview(result) {
     ? ` If you only need the gist, strategy:"skim" is ≤${auto.relaxed.skimBins} image(s) (1/8 cells).`
     : '';
   if (win.duration < 90) {
-    if (auto?.relaxed) {
+    if (auto?.relaxed?.overBudget) {
+      lines.push(`duration budget: ${win.duration.toFixed(0)} s window → uncapped this needs `
+        + `**${auto.relaxed.overBudget} images**; capped to **${auto.relaxed.keptBins}** at the cost of `
+        + `cell size. Pass maxSheets to change the cap.${skimHint}`);
+    } else if (auto?.relaxed) {
       lines.push(`duration budget: ${win.duration.toFixed(0)} s window → auto aimed at 1 image, but `
         + `${auto.relaxed.cuts} cuts is ${(win.duration / auto.relaxed.cuts).toFixed(1)} s per shot — `
         + `packing it into ${auto.relaxed.triedBins} sheet(s) left cells too small to tell shots apart, `
@@ -479,7 +483,12 @@ export function formatPlanPreview(result) {
   } else {
     const aim = `this window is ${(win.duration / 60).toFixed(1)} min, so auto aims at `
       + `**≤${cap} image(s)** (≈${minsPer} min of video each)`;
-    if (auto?.relaxed) {
+    if (auto?.relaxed?.overBudget) {
+      lines.push(`duration budget: ${aim} — but uncapped this needs **${auto.relaxed.overBudget} images** `
+        + `(≈${auto.relaxed.overBudget * imageTokens(canvas.width, canvas.height)} vision tokens). Capped to `
+        + `**${auto.relaxed.keptBins}** at the cost of cell size. Pass maxSheets to change the cap, `
+        + `or read shorter windows.${skimHint}`);
+    } else if (auto?.relaxed) {
       // 说了 aims at N 就必须解释为什么最后不是 N，否则模型会以为工具算错了
       lines.push(`duration budget: ${aim} — but ${auto.relaxed.cuts} cuts in this window is `
         + `${(win.duration / auto.relaxed.cuts).toFixed(1)} s per shot, and squeezing it into `
@@ -678,10 +687,16 @@ export function formatManifest(result, {
       // 压不出可读的格子时预算主动让步：钱多花了一点，但画面不是色块 —— 必须说出来，
       // 否则用户会以为"预算没生效"。
       const relaxed = auto.relaxed
-        ? ` Budget relaxed: ${auto.relaxed.cuts} cuts cannot fit ${auto.relaxed.targetCap} readable`
-          + ` image(s) (${auto.relaxed.triedBins} would be colour blocks), so this kept`
-          + ` ${auto.relaxed.keptBins} — legibility over the per-minute target. Narrow the window`
-          + ' (`from` + `segment`) if the bill matters more.' : '';
+        ? (auto.relaxed.overBudget
+          ? ` Uncapped this window would need **${auto.relaxed.overBudget} images**`
+            + `${plan.canvas ? ` (≈${auto.relaxed.overBudget * imageTokens(plan.canvas.width, plan.canvas.height)} vision tokens)` : ''}`
+            + `, so it was capped to ${auto.relaxed.keptBins} — small cells, but a sane bill.`
+            + ' Narrow the window or pass maxSheets to change the cap.'
+          : ` Budget relaxed: ${auto.relaxed.cuts} cuts cannot fit ${auto.relaxed.targetCap} readable`
+            + ` image(s) (${auto.relaxed.triedBins} would be colour blocks), so this kept`
+            + ` ${auto.relaxed.keptBins} — legibility over the per-minute target. Narrow the window`
+            + ' (`from` + `segment`) if the bill matters more.')
+        : '';
       lines.push(`size policy: auto chose **${auto.chosen}**`
         + `${chosen ? ` — smallest cell ${chosen.minW}x${chosen.minH} (${chosen.readability})` : ''}`
         + `${minsPerImage ? `, ≈${minsPerImage} min of video per image` : ''}${capped}.${relaxed}`);

@@ -33,7 +33,7 @@ import { rememberSegments } from './locate.js';
 import { isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import {
   AUTO_CANDIDATES, AUTO_STRATEGY, BIN_COST, DEFAULT_STRATEGY, MARK_BOOST, READABILITY_ORDER, STRATEGIES,
-  applyMarkBoost, applyStrategy, applyTierMap, autoSheetCap,
+  applyMarkBoost, applyStrategy, applyTierMap, autoSheetCap, shouldForceSheetCap,
   fitCanvas, pickAutoStrategy, resolveStrategy,
   framesFromBounds, integralMarks, levelAt, levelCurve, readabilityOf, tierHistogram,
 } from './tiers.js';
@@ -759,21 +759,32 @@ export async function runStoryboard(opts) {
         built = capped;
         autoPlan = { ...autoPlan, capSheets: capUsed };
       } else if (capped && capped.plan.bins < built.plan.bins) {
-        // 压不出可读的最小格 → 退回不封顶（钱让位给可读性），但要留下原因。
-        // 同时算一下 skim 的张数：那是另一条路（全 1/8、不要假切点、切点按 0.35s 合并），
-        // 张数最少但最糊。不替调用方做决定，只把价码摆出来让它自己选。
+        // 压不出可读的最小格。**默认**退回不封顶（钱让位给可读性），但要留下原因。
+        //
+        // 例外：不封顶到了荒唐的量级。bbc_02（49 分钟纪录片、316 刀、305 帧是 1 档大格）
+        // 不封顶要 **344 张图 ≈ 8 万 token**——那不是"多花一张"，是失控。
+        // 这种情况下宁可交小格子：把压到 4× 预算的那一版留下，并在清单里说清楚。
         const skimTiers = applyStrategy(built.raw, 'skim');
-        autoPlan = {
-          ...autoPlan,
-          relaxed: {
-            targetCap: autoTargetCap,
-            triedBins: capped.plan.bins,
-            keptBins: built.plan.bins,
-            cuts: absCuts.length,
-            // 上限：skim 还会丢积分帧 + 合并切点，真实张数只会更少
-            skimBins: solve(skimTiers, packFor('skim')).bins,
-          },
+        const runaway = shouldForceSheetCap(built.plan.bins, limit);
+        const note = {
+          targetCap: autoTargetCap,
+          triedBins: capped.plan.bins,
+          keptBins: built.plan.bins,
+          cuts: absCuts.length,
+          // 上限：skim 还会丢积分帧 + 合并切点，真实张数只会更少
+          skimBins: solve(skimTiers, packFor('skim')).bins,
         };
+        if (runaway) {
+          built = capped;
+          autoPlan = {
+            ...autoPlan,
+            capSheets: capUsed,
+            forced: true,
+            relaxed: { ...note, keptBins: capped.plan.bins, overBudget: note.keptBins },
+          };
+        } else {
+          autoPlan = { ...autoPlan, relaxed: note };
+        }
       }
     }
   }

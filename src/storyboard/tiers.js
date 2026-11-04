@@ -424,6 +424,22 @@ export function autoSheetCap(duration, { secondsPerImage = AUTO_SECONDS_PER_IMAG
 }
 
 /**
+ * 不封顶的张数是不是已经**失控**了（该强行兑现预算，哪怕格子变小）。
+ *
+ * 正常逻辑是"可读性优先"：压不进预算就退回不封顶。但有些片子（BBC《Mountains》：
+ * 49 分钟、316 刀、其中 305 帧是 1 档大格）不封顶要 **344 张图 ≈ 8 万 token** ——
+ * 那不是"多花一张"，是失控。超过 `max(64, 8×预算)` 就认定为失控。
+ *
+ * 64 是绝对下限：5 分钟的 PV 就算要 60 张也不算失控（那是它真实的镜头数）。
+ */
+export function shouldForceSheetCap(naturalBins, targetCap) {
+  const n = Number(naturalBins);
+  const l = Number(targetCap);
+  if (!(n > 0) || !(l > 0)) return false;
+  return n > Math.max(64, l * 8);
+}
+
+/**
  * 从若干候选里挑一个。纯函数，便于单测。
  *
  * 排序口径（**钱优先，信息量其次**）：
