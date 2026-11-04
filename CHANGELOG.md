@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.7] - 2026-11-04
 
 ### Fixed
 
@@ -11,6 +11,20 @@
   （同片 39 张、114×74 的格子），并在清单里写明 `uncapped … 344 images … capped to 39`。
   阈值收在 `tiers.shouldForceSheetCap()`（纯函数，带单测）；正常片子（5 分钟 PV 要
   60 张那种）不受影响。
+
+- **`ffmpeg` 明明在、却报"不存在"**：`binaries.js` 用 `existsSync`，把权限错误一起吞成 `false`，
+  沙箱里文件就在那儿也报 not found。改用 `statSync` 保留 errno，报错区分 `ENOENT` / `EACCES`，
+  候选里补上会话工作区的 `tools/ffmpeg/bin`（#76）。
+  顺手把 ASR 免费路线的说法统一了：`INSTALL.zh.md` 第 3 步写清两条路（sherpa-onnx 体积小、
+  FunASR 生态成熟）和 cookie 读 CC 字幕的完整步骤（#77），设置页依赖区也给免费路线入口，
+  不再只显示"未配置"。
+
+- **dry-run 在"失控被压过"时仍推荐 `full`**：344 张被护栏压到 39 张之后，dry-run 还按
+  "最省的可读档"推荐 full —— 用户照着调一次又回到 344 张。现在只要发生过 `overBudget`
+  就推荐 `auto`，并在推荐行里写明"别传 full，那就是不封顶的那一版"。
+
+- **清单把"没有台词"说清楚**：交付文案前置「画面正常，只是没有台词」，
+  cookie 落到 `video.json`，不再让人以为整次提取失败了（#77）。
 
 ## [0.6.6] - 2026-11-04
 
