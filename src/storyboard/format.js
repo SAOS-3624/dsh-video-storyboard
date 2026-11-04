@@ -16,7 +16,7 @@ import { charsForDetail, DETAIL_CHARS } from './board.js';
 import { describeMemory } from './memory.js';
 import { canTranscribe, resolveAsrConfig } from './asr.js';
 import {
-  AUTO_CANDIDATES, DEFAULT_STRATEGY, autoSheetCap, fitCanvas, imageTokens, pickAutoStrategy,
+  AUTO_CANDIDATES, AUTO_STRATEGY, DEFAULT_STRATEGY, autoSheetCap, fitCanvas, imageTokens, pickAutoStrategy,
   readabilityOf,
 } from './tiers.js';
 
@@ -436,9 +436,13 @@ export function formatPlanPreview(result) {
     ? `cuts="${cuts} (avg ${(win.duration / cuts).toFixed(1)}s)"` : 'cuts="0 (no cut detected)"';
   const canvas = plan.canvas ?? { width: 0, height: 0 };
   const variants = Array.isArray(result.variants) ? result.variants : [];
-  const rec = pickAutoStrategy(variants)
-    ?? variants.find((v) => v.name === AUTO_CANDIDATES[0])?.name
-    ?? DEFAULT_STRATEGY;
+  // 失控被强行压过时，别推荐 full —— 那正是 344 张的那一版；推荐 auto 才会再走一次护栏。
+  const overBudget = plan.auto?.relaxed?.overBudget;
+  const rec = overBudget
+    ? AUTO_STRATEGY
+    : (pickAutoStrategy(variants)
+      ?? variants.find((v) => v.name === AUTO_CANDIDATES[0])?.name
+      ?? DEFAULT_STRATEGY);
   const lines = [
     `<storyboard-plan path="${info.path ?? 'video'}" duration="${info.duration.toFixed(2)}" ` +
       `window="${win.from.toFixed(2)}-${win.to.toFixed(2)}" ${cutsAttr} ` +
@@ -454,8 +458,11 @@ export function formatPlanPreview(result) {
     lines.push(`  ${String(v.name).padEnd(9)} ${bins.padEnd(9)} smallest ${v.minW}x${v.minH} (${v.readability})`
       + (v.approx ? '   — also drops integral frames and merges cuts, so it can be fewer' : ''));
   }
-  lines.push(`recommended: **${rec}** — the cheapest policy that still keeps every cell readable ` +
-    '(>= "shot": you can tell whether two frames are the same shot).');
+  lines.push(overBudget
+    ? `recommended: **auto** — it caps the runaway ${overBudget}-image layout down to a sane bill `
+      + '(cells get smaller, but you still see every shot). Do NOT pass "full": that is the uncapped one.'
+    : `recommended: **${rec}** — the cheapest policy that still keeps every cell readable `
+      + '(>= "shot": you can tell whether two frames are the same shot).');
   // 张数预算是"按时长"算的（见 tiers.autoSheetCap）：三行张数是"不封顶"的代价，
   // 实际交付会先压到这段时长该有的张数，压到看不清才往回退。
   const cap = autoSheetCap(win.duration);
