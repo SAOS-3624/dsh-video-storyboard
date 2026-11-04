@@ -76,3 +76,38 @@ test('binaries: 找不到时回退裸命令，并在描述里列出搜索路径'
   assert.match(text, /ffprobe not found; tried:/);
   assert.match(text, /tools\/ffmpeg\/bin/);
 });
+
+// issue #76：沙箱里 existsSync 会把 EACCES 吞成 false，报"not found"。
+// 这两种情况必须能分开说，否则用户会一直重装 ffmpeg。
+test('binaries: 读不到（EACCES）和不存在要分开报', (t) => {
+  const home = fixture(t);
+  const opts = {
+    env: { DSH_HOME: home },
+    platform: 'linux',
+    probe: () => ({ ok: false, code: 'EACCES' }),
+  };
+  const text = describeMediaSearch('ffprobe', opts);
+  assert.match(text, /cannot read it: EACCES/);
+  assert.match(text, /sandbox/);
+  assert.match(text, /DSH_FFPROBE_PATH/);
+});
+
+test('binaries: 全部 ENOENT 时不出现"读不到"的提示', (t) => {
+  const home = fixture(t);
+  const text = describeMediaSearch('ffprobe', {
+    env: { DSH_HOME: home },
+    platform: 'linux',
+    probe: () => ({ ok: false, code: 'ENOENT' }),
+  });
+  assert.doesNotMatch(text, /cannot read/);
+});
+
+test('binaries: 会话工作区里的 tools/ffmpeg/bin 也在候选里', (t) => {
+  const home = fixture(t);
+  const workspace = join(home, 'ws');
+  const path = join(workspace, 'tools', 'ffmpeg', 'bin', 'ffmpeg');
+  touch(path);
+  assert.equal(resolveMediaBinary('ffmpeg', {
+    env: { DSH_HOME: home }, platform: 'linux', cwd: workspace,
+  }), path);
+});

@@ -62,6 +62,30 @@ ffprobe -version | head -1
 
 **两条都要有输出。** 只有 `ffmpeg` 没有 `ffprobe` 的情况真实存在（某些精简包），插件会明确报出来。
 
+### 装了却报 "not found"？先分清是哪一种
+
+插件按这个顺序找：`DSH_FFMPEG_PATH` / `FFMPEG_PATH` → `DSH_FFMPEG_DIR` →
+`$DSH_HOME/tools/ffmpeg/bin` → `$DSH_HOME/bin` → `$DSH_HOME` 的上一级 → **会话工作区** →
+`PATH`。报错信息现在会区分两种情况：
+
+| 报错里写的是什么 | 意思 | 怎么办 |
+|---|---|---|
+| 只列路径，没有附注 | 这些位置都没有这个文件 | 装 ffmpeg，或设 `DSH_FFMPEG_PATH` |
+| `(exists but this process cannot read it: EACCES)` | **文件在，但插件进程读不到** —— DSH 桌面版的 `workspace-write` 沙箱只放行会话工作区 | 把 `ffmpeg.exe` / `ffprobe.exe` 拷进会话工作区的 `tools/ffmpeg/bin/`，或设 `DSH_FFMPEG_PATH` 指到能读的位置 |
+
+沙箱受限时（Windows 桌面版 `workspace-write`）这些也可能一起被挡，需要一并指到工作区：
+
+```powershell
+setx DSH_FFMPEG_PATH     "C:\...\default-workspace\tools\ffmpeg\bin\ffmpeg.exe"
+setx DSH_FFPROBE_PATH    "C:\...\default-workspace\tools\ffmpeg\bin\ffprobe.exe"
+setx DSH_VIDEO_CACHE_DIR "C:\...\default-workspace\.video-cache"
+setx DSH_VIDEO_MEDIA_DIR "C:\...\default-workspace\.video-media"
+```
+
+> `setx` 写的是用户环境变量，**桌面版进程可能读不到**（它继承了启动时的环境）。
+> 改完要彻底退出 DSH 再启动（托盘也要退）。实在不行把二进制直接放到会话工作区的
+> `tools/ffmpeg/bin/` 下 —— 那个位置默认就在搜索顺序里，不用设任何变量。
+
 ---
 
 ## 2. 装 yt-dlp（只有贴链接才需要）
@@ -93,16 +117,36 @@ python -m yt_dlp --version      # 走模块，不依赖 PATH
 
 ## 3. 装 ASR 服务（可选，但只要台词就得配）
 
-插件支持两种：
+> **不配也能跑**：清单里会写 `transcript: none`，图照出，只是没有台词。
+> 这**不是**"这条片子没声音"，也不是画质/分镜出了问题。
 
-**A. 本地 FunASR（推荐，免费、不联网）**
+免费路线有两条，**选一条就行**，都是不联网、约 15 分钟。两条都只提供"模型 + 推理库"，
+那个 OpenAI 兼容的 HTTP 服务要你自己起（契约见 [`asr-contract.md`](./asr-contract.md)）。
+
+**A. sherpa-onnx（体积小、冷启动快，推荐）**
 
 ```bash
-# 需要 Python 3.9+ 和一个能跑得动模型的机器
+# 需要 Python 3.9+
+pip install sherpa-onnx
+```
+
+模型从 sherpa-onnx 官方模型库下两个就够：
+
+- `paraformer-zh-2024-03-09`（约 217 MB，中文识别 + `tokens.txt`）
+- `silero_vad.onnx`（约 629 KB，断句）
+
+地址在 <https://k2-fsa.github.io/sherpa/onnx/pretrained_models/index.html>。
+标点模型可选（`ct-transformer`，281 MB），不加就只有裸文本。
+
+**B. FunASR（生态成熟，模型大一些，约 2.1 GB）**
+
+```bash
 pip install funasr modelscope
 ```
 
-起一个 OpenAI 兼容的 `/audio/transcriptions` 服务，然后在 `~/.dsh/asr.json` 里写：
+它自带的 `funasr-server` 就是 OpenAI 兼容的 `/audio/transcriptions`，不用自己写。
+
+**两条路线落地方式一样** —— 服务起好后写 `~/.dsh/asr.json`：
 
 ```json
 {
@@ -113,7 +157,11 @@ pip install funasr modelscope
 }
 ```
 
-**B. 任何 OpenAI 兼容的转写 API**
+指到 `127.0.0.1` / `localhost` 时 `key` 随便填，插件不会用它。
+想让插件顺手帮你启停服务（冷启动约 2 秒），加 `manage.start`，见
+[`CONFIG.zh.md`](./CONFIG.zh.md) §2。**实测体积与冷启动时间也在那份文档里**（§7）。
+
+**C. 云端 / 现成的 OpenAI 兼容 API（要 key）**
 
 ```json
 {
@@ -123,7 +171,21 @@ pip install funasr modelscope
 }
 ```
 
-**不配也能跑**：清单里会写 `transcript: none`，图照出。
+**D. 不装 ASR 也能有台词：读站点的 CC 字幕**
+
+B 站这类站点本身就带字幕，给它一份 cookies 就不用装 ASR，也不用花 token：
+
+1. 浏览器装 **Cookie-Editor**（Chrome / Edge 都有），登录 B 站；
+2. 点扩展 → **Export** → 选 **Netscape** → 存成 `bili-cookies.txt`（放仓库外，比如 `~/.secrets/`）；
+3. 写进 `~/.dsh/video.json`：
+
+```json
+{ "cookies": "C:/Users/<你>/.secrets/bili-cookies.txt" }
+```
+
+验证：跑一次 B 站链接的 `video_storyboard`，清单里出现 `transcript: site-cc:zh-CN`
+（或 `site-cc`）就说明读到了。**cookie 等同于登录凭证，别提交进任何仓库**；
+Chromium 127+ 有 App-Bound Encryption，`--cookies-from-browser` 会失败，必须导出文件。
 
 > 已经有字幕文件？不用 ASR —— 用 `transcriptFile` 直接喂 SRT/JSON，见 [USAGE.zh.md](USAGE.zh.md)。
 
@@ -246,7 +308,7 @@ node bin/storyboard.mjs 你的视频.mp4 --dry-run
 
 | 报错 | 原因 | 怎么办 |
 |---|---|---|
-| `ffmpeg not found` | 没装，或装了没进 PATH | 重开终端；仍不行就写绝对路径到 `~/.dsh/video.json` 的 `ffmpeg` |
+| `ffmpeg not found` | 没装，或装了但进程读不到（沙箱） | 按第 1 节的表分清属于哪种；要么设 `DSH_FFMPEG_PATH` 指到绝对路径，要么把二进制拷进会话工作区 |
 | `ffprobe not found` | 只装了 ffmpeg 主程序 | 装完整包（gyan.dev 的 essentials 版含 ffprobe） |
 | `yt-dlp not found` | 没装 yt-dlp，或在 PATH 之外且没扫到 | `pip install --user -U yt-dlp`；或设 `DSH_YTDLP_PATH` 指向 exe |
 | `Requested format is not available` | 视频只有 DASH 流 | 0.4.0 已修；旧版本升级即可 |

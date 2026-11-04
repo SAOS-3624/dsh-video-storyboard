@@ -1033,9 +1033,13 @@ export function formatManifest(result, {
       'a video with an embedded subtitle track.');
     // **必须让用户听到这句话，而不是让模型自己消化。** 否则模型只会说"我听不到声音"，
     // 用户以为插件坏了 —— 2026-11-01 评论区被问了十几遍的就是这件事。
-    lines.push('  → 先用一句中文告诉用户：这台机器没装听音（ASR），我只能看画面，听不到人声；'
-      + '装一次 sherpa-onnx 就永久解决（免费、不联网，约 15 分钟，docs/INSTALL.zh.md 第 3 步），'
-      + '或者给 B 站 cookie 让我读 CC 字幕。**不要**只说"我听不到"。');
+    // 三件事必须一次说清：①画面没问题，缺的只是台词；②免费路线到底是哪两条（历史上提示说
+    // sherpa-onnx、INSTALL 第 3 步却只写 FunASR，用户照着搜不到）；③cookie 那条路怎么落地。
+    lines.push('  → 先用一句中文告诉用户：**画面正常，只是没有台词** —— 这台机器没配听音（ASR），'
+      + '我只能看画面，没听声音。想让它有词，两条免费路线二选一（都不联网，约 15 分钟）：'
+      + 'sherpa-onnx（体积小、冷启动快）或 FunASR，两条的操作步骤都在 docs/INSTALL.zh.md 第 3 步；'
+      + '也可以给 B 站 cookie 让我直接读它的 CC 字幕（写进 ~/.dsh/video.json 的 cookies 字段，'
+      + '导出方式见 docs/CONFIG.zh.md §3，不需要装 ASR）。**不要**只说"我听不到"。');
   }
   if (result.transcript?.source === 'asr-empty') {
     lines.push('transcript: ASR ran and found no speech here — treat this as a video with no dialogue ' +

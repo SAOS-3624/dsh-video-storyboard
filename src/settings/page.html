@@ -92,6 +92,13 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
   <p>缺少的依赖会出现官方下载按钮；插件只打开官方来源，不静默安装、不执行下载的文件。装好后回到本页点“重新检查”。</p>
   <div id="deps"></div>
   <div class="help">
+    <h3>没有台词 ≠ 画面有问题</h3>
+    <p>“本地 ASR”那一行只是<strong>宿主内置语音</strong>的状态。没配也能出图，只是清单里没有台词。
+    想要台词有两条免费路线（不联网、约 15 分钟）：<strong>sherpa-onnx</strong>（体积小、冷启动快）
+    或 <strong>FunASR</strong>；也可以给 B 站 cookie 直接读站点 CC 字幕，不用装 ASR。
+    两种都写在 <a href="https://github.com/SAOS-3624/dsh-video-storyboard/blob/main/docs/INSTALL.zh.md" target="_blank" rel="noopener noreferrer">docs/INSTALL.zh.md 第 3 步</a>。</p>
+  </div>
+  <div class="help">
     <h3>ffmpeg / ffprobe</h3>
     <ul>
       <li>Windows：<a href="https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" target="_blank" rel="noopener noreferrer">下载官方 FFmpeg zip</a>，解压后把里面的 <code>bin</code> 目录加进 PATH；或用 <code>winget install Gyan.FFmpeg</code><button class="copy" data-copy="winget install Gyan.FFmpeg">复制</button>。</li>
