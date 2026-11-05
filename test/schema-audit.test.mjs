@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  locateToolSpec, probeToolSpec, storyboardToolSpec, zoomToolSpec,
+  helpToolSpec, locateToolSpec, probeToolSpec, storyboardToolSpec, zoomToolSpec,
 } from '../src/tool-spec.js';
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -43,6 +43,7 @@ const HANDLER_MODULES = {
   video_zoom: ['tools/zoom.js', 'tools/shared.js', 'storyboard/board.js'],
   video_probe: ['tools/probe.js'],
   video_locate: ['tools/locate.js'],
+  video_help: ['tools/help.js'],
 };
 
 /**
@@ -76,6 +77,7 @@ const SPECS = {
   video_zoom: zoomToolSpec,
   video_probe: probeToolSpec,
   video_locate: locateToolSpec,
+  video_help: helpToolSpec,
 };
 
 test('schema 审计：每个工具 handler 读的 args 都在它的 schema 里', () => {

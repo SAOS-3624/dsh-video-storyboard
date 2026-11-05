@@ -69,6 +69,15 @@ test('contract: 宿主 validateArgs 认这份参数（合法通过、缺参报�
     host.validateArgs(spec.parameters, { input: 'a', pick: 'blurry' }).length > 0,
     'enum 外的值应报错',
   );
+  // `tierMap` 故意不声明 8 个子属性（省 480 字符常驻 JSON），所以这里钉住两件事：
+  // 正常的映射必须过，非对象必须在这里就被挡；键/值的 1..8 由 validateToolArgs 兜。
+  assert.deepEqual(host.validateArgs(spec.parameters, { input: 'a', tierMap: { 1: 3, 5: 4 } }), []);
+  assert.ok(
+    host.validateArgs(spec.parameters, { input: 'a', tierMap: 'nope' }).length > 0,
+    'tierMap 不是对象时应报错',
+  );
+  assert.ok(validateToolArgs({ input: 'a', tierMap: { 9: 3 } }).length > 0, 'tier 越界要由 execute 挡住');
+  assert.ok(validateToolArgs({ input: 'a', tierMap: { 1: 'x' } }).length > 0, '值不是整数也要挡住');
 });
 
 test('contract: 渲染产出 image + text 两种内容块', async (t) => {

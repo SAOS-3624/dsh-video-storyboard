@@ -193,10 +193,19 @@ test('插件接线: apply() 注册一个叫 video_storyboard 的工具', async (
   try {
     const disposer = await apply(ctx);
     assert.deepEqual(registered.map((t) => t.name).sort(),
-      ['video_locate', 'video_probe', 'video_storyboard', 'video_subtitles', 'video_zoom']);
+      ['video_help', 'video_locate', 'video_probe', 'video_storyboard', 'video_subtitles', 'video_zoom']);
     assert.equal(typeof disposer, 'function', 'apply 必须返回 disposer');
     disposer();
-    assert.equal(disposed, 5, '五个工具都应被释放');
+    assert.equal(disposed, 6, '六个工具都应被释放');
+    // help 不碰视频也不出图：它是"常驻文案瘦身"的那一半，一调必须立刻有字
+    const help = registered.find((t) => t.name === 'video_help');
+    const h1 = await help.execute({});
+    assert.match(h1.text, /VIDEO TOOLS MANUAL/);
+    assert.match(h1.text, /## tiers/, '整本手册要含档位那一节');
+    const h2 = await help.execute({ topic: 'cost' });
+    assert.match(h2.text, /## cost/);
+    assert.doesNotMatch(h2.text, /## tiers/, '给了 topic 就只回那一节');
+    assert.equal(saved.length, 0, 'help 绝不能提交图片');
     // 真跑一次 execute，确保交给附件的是真 PNG（这一条能抓住线上那个 malformed 事故）
     const dir2 = await mkdtemp(join(tmpdir(), 'dsh-exec-'));
     t.after(() => rm(dir2, { recursive: true, force: true }));

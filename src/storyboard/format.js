@@ -15,6 +15,7 @@ import { encodeRaw } from './sheet.js';
 import { charsForDetail, DETAIL_CHARS } from './board.js';
 import { describeMemory } from './memory.js';
 import { canTranscribe, resolveAsrConfig } from './asr.js';
+import { videoHelp } from './help.js';
 import {
   AUTO_CANDIDATES, AUTO_STRATEGY, DEFAULT_STRATEGY, autoSheetCap, fitCanvas, imageTokens, pickAutoStrategy,
   readabilityOf,
@@ -523,52 +524,21 @@ export function formatPlanPreview(result) {
 }
 
 /**
- * 完整说明书：**只在扫描是新鲜的时候印一次**（`!result.cached`）。
+ * 干跑时印一次说明书：**只在扫描是新鲜的时候**（`!result.cached`）。
  *
- * 为什么搬到这里：五个工具的 schema 每轮 API 请求都要重发一次，把调优细节写在参数描述里
+ * **正文不在这里** —— 在 `./help.js`，`video_help` 读的是同一份。以前这里另抄了一份，
+ * 改档位只改了一处，两份就开始说不同的话。
+ *
+ * 为什么只在干跑时印：五个工具的 schema 每轮 API 请求都要重发一次，把调优细节写在参数描述里
  * 等于按"轮数"收费（实测 22,855 字符 ≈ 14.9k token/轮）。挪进干跑结果只收一次钱，
  * 而且模型真要动手之前本来就会先干跑一次 —— 那时候它最需要这些数字。
- *
- * schema 里因此只留"调用前必须知道"的：类型、默认值、枚举。细节全在这里。
+ * schema 里因此只留"调用前必须知道"的：类型、默认值、枚举。
  */
 const DRY_RUN_MANUAL = [
   '',
   '── full manual (printed once, while the scan is fresh) ──',
   '',
-  'COST. Images bill by PIXELS on a 42px token grid, not by frame count: 798x449 = 222 tokens,',
-  'anything under 544x544 = 192 (the floor — drawing smaller saves nothing), 1300x1300 = 994',
-  '(the ceiling). A window costs ≈ Σ(cell pixel area) ÷ fill, so packing MORE frames into the',
-  'SAME canvas is nearly free, while opening one more image is not. The text index is billed on',
-  'top and is often the bigger bill: detail=med gives 120 chars per cell, low 60, high 400.',
-  '',
-  'STRATEGY, cheapest first: skim (all cells 1/8, no integral frames, cuts merged) · brief (skim',
-  'widened until the window fits ONE image) · compact (one tier smaller per frame) · standard',
-  '(1/1 frames shrunk to 1/2) · full (one tier BIGGER = more images AND more tokens).',
-  '"auto" (default) tries compact/standard/full on the same frames and keeps the cheapest whose',
-  'smallest cell is still readable, then prints what the others would have cost.',
-  '**Never pass "full" as a safe default** — it is the most expensive setting, not the most',
-  'complete; on a 191-cut 5-minute window it wants 59 images where compact wants 8.',
-  '',
-  'LONG FILM / EPISODE. Read in windows with `from` + `segment` (default 300 s): call once with',
-  'from:0, segment:300, then follow the `next: from=...` printed at the end of each result. A',
-  'one-shot overview of a 2-hour film shrinks every cell to 1/8 and still spoils the pacing.',
-  'Frames are what cost money, not window width — a long window does not cost more per frame.',
-  '',
-  'TUNING',
-  '  budget      pixels per image; below ~296000 saves nothing (the API upscales to the 544² floor).',
-  '  maxFrames   default 0 = no cap; a number merges the shortest segments first (fast-cut coverage).',
-  '  maxSheets   default 0 = no cap; a number caps the bill but merges segments into longer frames.',
-  '  detail      chars per cell in the text index — the real lever on token cost.',
-  '  integralSeconds  accumulated change one sampled frame stands for (default 6), measured',
-  '              against a FIXED reference level: busy footage yields more frames, slow footage',
-  '              fewer. It is NOT "one frame every N seconds".',
-  '  cellRange + textOnly   page through a long index without paying for the pictures again.',
-  '',
-  'WHAT YOU GET PER CALL. One frame per shot: cuts are detected first, an integral sampler adds',
-  'frames inside long moving shots, then a row-packing solver fills each image. Cells are numbered',
-  'across images — cite "cell 7" and call video_zoom({cellId:7}) for a close-up. The index never',
-  'prints the same sentence twice (a line shared by many cells is listed once and referenced as',
-  '"→ L1").',
+  videoHelp(),
 ].join('\n');
 
 /**

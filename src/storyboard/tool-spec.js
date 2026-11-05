@@ -32,6 +32,45 @@ export const TOOL_NAME = 'video_storyboard';
 export const ZOOM_TOOL_NAME = 'video_zoom';
 export const PROBE_TOOL_NAME = 'video_probe';
 export const LOCATE_TOOL_NAME = 'video_locate';
+export const HELP_TOOL_NAME = 'video_help';
+
+/**
+ * `video_help` —— 手册按需取（正文在 `./help.js`）。
+ *
+ * 工具契约是**每一轮都要重发**的常驻文案，所以"为什么 / 多少 token / 6 个策略各是什么"
+ * 这类一问不到两次的东西不写在 description 里，交给这个工具现取。
+ * 它自己必须极短：这个工具存在的唯一理由就是省常驻 token。
+ */
+export function helpToolSpec() {
+  return {
+    name: HELP_TOOL_NAME,
+    description: 'Manual for the video_* tools: token cost, strategies, tiers/tierMap, cutFloor, text '
+      + 'index. Free — no image tokens, no video needed. Read it when an option or its price is '
+      + 'unclear ("6格 / 12格?").',
+    parameters: {
+      topic: {
+        type: 'string',
+        description: 'cost | strategy | tiers | cuts | text | links | order | subtitles — omit for all.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string', required: true, description: 'The manual (all topics or the one asked).' },
+        },
+      },
+      render(args, value) {
+        return [{ type: 'text', text: value.text }];
+      },
+    },
+    timeoutMs: 5_000,
+    isConcurrencySafe() {
+      return true;
+    },
+  };
+}
 
 /* ---- 多个工具共用的参数文案 ----------------------------------------------
  *
@@ -43,7 +82,17 @@ export const LOCATE_TOOL_NAME = 'video_locate';
 const DESC_SCAN_GAP = 'Min seconds between cuts (0 = merge none).';
 const DESC_INTEGRAL = 'Add frames inside long takes (default true).';
 const DESC_INTEGRAL_SECONDS = 'Change per sampled frame, 1-30 (default 6); NOT "N s per frame".';
-const DESC_TIER_MAP = 'Override tiers: {"1":3,"5":4} → tier 1..8.';
+/**
+ * 逐档覆盖（`tierMap`）的 schema。**故意不写 8 个子属性**：那样每个工具多 8 行
+ * `"1":{"type":"integer"}`，两个工具就是 480 字符的常驻 JSON —— 而它约束的只是"值是不是
+ * 整数"，键（`"1".."8"`）本来也只能靠 `validateToolArgs` 挡。现在由 execute 兜底，
+ * 报错还更清楚（会指出哪个键错、合法范围是多少）。
+ */
+const TIER_MAP_SCHEMA = {
+  type: 'object',
+  description: 'Override tiers after the policy: {"1":3,"5":4} → tier 1..8 (keys and values both 1..8).',
+  additionalProperties: true,
+};
 // probe / locate / 段图那三个工具都只做"读"，cookies 只用来取流，一句话就够。
 const DESC_COOKIES_SHORT = 'cookies.txt for links (or DSH_VIDEO_COOKIES).';
 
@@ -52,22 +101,18 @@ export function storyboardToolSpec() {
     name: TOOL_NAME,
     description: [
       'Turn a video into storyboard images you can cite (cell 7 = 00:12.76-00:31.40), instead of',
-      'guessing what is in it.',
+      'guessing what is in it. One frame per shot — a 20 s take gets a full-width cell, a machine-gun',
+      'montage gets 1/8 cells — and cells are numbered across images, so you can cite a moment or',
+      're-read one with video_zoom({ cellId: 7 }).',
       '',
-      'COST — read before passing any size option. Images bill by PIXELS on a 42px grid: anything',
-      'under 544×544 is charged as 544×544 (~192 tokens), one image tops out ~994. Default 800x450',
-      '= ~222 tokens, and the frame count does not change that. The text index is billed on top and',
-      'is often the bigger bill.',
-      '- **Do not pass `strategy`** unless the user asked for a specific look: "auto" already picks',
-      '  the cheapest readable policy and prints what the others would have cost. "full" means',
-      '  BIGGER cells = MORE images, never a safe default.',
-      '- Unknown cost? `dryRun: true` returns the cut count plus each policy\'s image count for zero',
-      '  image tokens — then call again with your choice.',
-      '- Long film / episode: read it in windows (`from` + `segment`), not in one overview.',
+      '**Do not pass `strategy`** unless the user asked for a specific look: "full" means BIGGER cells',
+      '= MORE images, never a safe default, while "auto" (the default) already picks the cheapest',
+      'readable policy. Images bill by PIXELS on a 42px grid (~222 tokens at the default 800x450',
+      'whatever the frame count) and the text index on top is often the bigger bill — `dryRun: true`',
+      'prices a run before you spend an image token.',
       '',
-      'WHAT YOU GET: one frame per shot — a 20 s take gets a full-width cell, a machine-gun montage',
-      'gets 1/8 cells. Cells are numbered across images, so you can cite a moment or ask for a',
-      'close-up with video_zoom({ cellId: 7 }). The index never repeats the same sentence twice.',
+      'Long film / episode: read it in windows (`from` + `segment`), not in one overview.',
+      'Cost table, strategies, tiers/tierMap, cutFloor: video_help.',
     ].join('\n'),
     parameters: {
       input: {
@@ -99,21 +144,7 @@ export function storyboardToolSpec() {
         type: 'integer',
         description: 'Cap on frames (0 = no cap).',
       },
-      tierMap: {
-        type: 'object',
-        description: 'Override tiers: {"1":3,"5":4} → tier 1..8.',
-        properties: {
-          '1': { type: 'integer' },
-          '2': { type: 'integer' },
-          '3': { type: 'integer' },
-          '4': { type: 'integer' },
-          '5': { type: 'integer' },
-          '6': { type: 'integer' },
-          '7': { type: 'integer' },
-          '8': { type: 'integer' },
-        },
-        additionalProperties: false,
-      },
+      tierMap: { ...TIER_MAP_SCHEMA },
       maxSheets: {
         type: 'integer',
         description: 'Cap on images (0 = no cap).',
@@ -125,9 +156,8 @@ export function storyboardToolSpec() {
       },
       cutFloor: {
         type: 'integer',
-        description: 'Shot-change sensitivity, 0-255 (omit → 80). 80 suits documentary/film '
-          + '(long shots, sparse cuts); 60 suits short-form/fast-cut content (median shot < 3s). '
-          + 'Lower detects more shots: more images and tokens, but fewer torn-together scenes.',
+        description: 'Shot-change sensitivity, 0-255 (omit → 80: film/documentary; 60: fast-cut '
+          + 'short-form). Lower = more shots, more images.',
       },
       budget: {
         type: 'integer',
@@ -135,7 +165,7 @@ export function storyboardToolSpec() {
       },
       dryRun: {
         type: 'boolean',
-        description: 'Plan only: cut count + per-policy image counts, no image. Also returns the manual.',
+        description: 'Plan only: cut count + per-policy image counts, no image.',
       },
       segment: {
         type: 'integer',
@@ -243,11 +273,9 @@ export function zoomToolSpec() {
       'Re-read a short window at higher per-cell resolution.',
       '',
       'Use it after video_storyboard when one cell needs a closer look ("what is on screen at',
-      '01:12-01:20?"). Returns ONE image with few large cells (default 6), so faces, subtitles and',
-      'on-screen text become legible where a 16-cell overview cannot.',
-      '',
-      'Keep the window short. For another wide pass use video_storyboard. Costs one image (~233',
-      'tokens at the default canvas).',
+      '01:12-01:20?"), or pass the `cellId` storyboard printed. Returns ONE image with few large cells',
+      '(default 6), so faces, subtitles and on-screen text become legible where a 16-cell overview',
+      'cannot. Costs one image (~233 tokens). For another wide pass use video_storyboard.',
     ].join('\n'),
     parameters: {
       input: {
@@ -273,21 +301,7 @@ export function zoomToolSpec() {
         type: 'integer',
         description: 'Frames in this window (default 9, max 48).',
       },
-      tierMap: {
-        type: 'object',
-        description: 'Override tiers: {"1":3,"5":4} → tier 1..8.',
-        properties: {
-          '1': { type: 'integer' },
-          '2': { type: 'integer' },
-          '3': { type: 'integer' },
-          '4': { type: 'integer' },
-          '5': { type: 'integer' },
-          '6': { type: 'integer' },
-          '7': { type: 'integer' },
-          '8': { type: 'integer' },
-        },
-        additionalProperties: false,
-      },
+      tierMap: { ...TIER_MAP_SCHEMA },
       maxSheets: {
         type: 'integer',
         description: 'Cap on images (default 1).',
@@ -397,8 +411,6 @@ export function probeToolSpec() {
       '',
       'Call this FIRST when you do not know how long the file is. Then read it as a SEQUENCE:',
       'video_storyboard({ input, from: 0, segment: 300 }) and follow the "next: from=..." it prints.',
-      'A one-shot overview of the whole file only identifies what it is — it spoils the ending and',
-      'shrinks every cell.',
     ].join('\n'),
     parameters: {
       input: {
@@ -455,8 +467,7 @@ export function subtitlesToolSpec() {
       '',
       'Each strip is one moment ~stepSec apart, top to bottom; a blank strip means "no subtitle',
       'here", which is also information. The returned text lists every strip\'s timestamp. Cost: one',
-      'image. Strips are cut **sequentially** — parallel cropping on a memory-tight machine dies with',
-      '0xC000012D.',
+      'image.',
     ].join('\n'),
     parameters: {
       input: {
