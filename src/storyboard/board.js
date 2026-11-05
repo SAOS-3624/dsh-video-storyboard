@@ -148,11 +148,23 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
   const detail = args.detail ?? 'med';
   const geom = boardGeometry(args);
   // 旧名在这里就归一化（quality→full / frugal→compact…），下层的日志和清单只认新名
+  /**
+   * 用户级配置（`~/.dsh/video.json`）读一次，下面 strategy 和 tierMap 共用。
+   *
+   * 读一次而不是各读各的：这个函数在每次调用都会跑，多读一遍盘只为了省一行代码不划算。
+   */
+  const userCfg = readVideoFile();
+  const sbCfg = userCfg && typeof userCfg.storyboard === 'object' && !Array.isArray(userCfg.storyboard)
+    ? userCfg.storyboard
+    : {};
   const wanted = resolveStrategy(args.strategy);
-  // 不点名 → auto（可被关掉，见 autoStrategyEnabled）；点名就照办，`auto` 也是合法值
-  const strategy = wanted === AUTO_STRATEGY
+  const configuredStrategy = resolveStrategy(sbCfg.strategy);
+  // 不点名 → auto（可被关掉，见 autoStrategyEnabled）；点名就照办，`auto` 也是合法值。
+  // 调用方没传才看配置 —— 设置页写的默认值不该压掉某一次调用的显式指定。
+  const picked = wanted || configuredStrategy;
+  const strategy = picked === AUTO_STRATEGY
     ? AUTO_STRATEGY
-    : (STRATEGIES[wanted] ? wanted : defaultBoardStrategy());
+    : (STRATEGIES[picked] ? picked : defaultBoardStrategy());
   const base = {
     input: args.input,
     from: args.from ?? 0,
@@ -169,8 +181,20 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
     detail,
     ocr: ocrFor(args, detail),
     fetchOptions: fetchOptionsFor(args, kind, geom),
-    // 档位映射表原样透传（pipeline 在策略之后应用）
-    ...(args.tierMap && typeof args.tierMap === 'object' ? { tierMap: args.tierMap } : {}),
+    /**
+     * 档位映射表（pipeline 在策略之后应用）。
+     *
+     * 三层优先序，和 `cutFloor` 一致：本次调用显式传的 > `video.json` 的
+     * `storyboard.tierMap`（设置页写的默认值）> 不传（不做映射）。
+     */
+    ...(() => {
+      const explicit = args.tierMap && typeof args.tierMap === 'object' && !Array.isArray(args.tierMap)
+        ? args.tierMap : null;
+      const configured = sbCfg.tierMap && typeof sbCfg.tierMap === 'object' && !Array.isArray(sbCfg.tierMap)
+        ? sbCfg.tierMap : null;
+      const m = explicit ?? configured;
+      return m && Object.keys(m).length ? { tierMap: m } : {};
+    })(),
     ...(typeof args.hotwords === 'string' ? { hotwords: args.hotwords } : {}),
   };
 
@@ -217,7 +241,7 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
       const explicit = Number(args.cutFloor);
       const v = Number.isFinite(explicit) && explicit > 0
         ? explicit
-        : configuredNumber(readVideoFile(), 'storyboard.cutFloor', { min: 1, max: 255 });
+        : configuredNumber(userCfg, 'storyboard.cutFloor', { min: 1, max: 255 });
       return v ? { cutFloor: Math.min(255, Math.round(v)) } : {};
     })(),
     // **默认不封顶**：帧数由切点决定，张数由排布决定，用户要看多少就给多少

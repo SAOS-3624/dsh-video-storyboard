@@ -142,6 +142,30 @@ export function readVideoSettings(env = process.env) {
       const n = Number(storyboard && typeof storyboard === 'object' ? storyboard.cutFloor : NaN);
       return Number.isInteger(n) && n >= 1 && n <= 255 ? n : null;
     })(),
+    /** 默认档位策略；null = 没设，走内核默认（自动选档或 compact）。 */
+    strategy: (() => {
+      const v = storyboard && typeof storyboard === 'object' ? String(storyboard.strategy ?? '').trim() : '';
+      return v || null;
+    })(),
+    /**
+     * 逐档映射：`{ 1: 3, 5: 4 }` 这种**只写非恒等项**的对象。
+     *
+     * 恒等（`3: 3`）不写进文件 —— 写了也没用，只是让用户下次打开看不懂自己上次改了什么。
+     */
+    tierMap: (() => {
+      const m = storyboard && typeof storyboard === 'object' ? storyboard.tierMap : null;
+      if (!m || typeof m !== 'object' || Array.isArray(m)) return {};
+      const out = {};
+      for (const [k, v] of Object.entries(m)) {
+        const from = Number(k);
+        const to = Number(v);
+        if (Number.isInteger(from) && from >= 1 && from <= 8
+          && Number.isInteger(to) && to >= 1 && to <= 8 && from !== to) {
+          out[from] = to;
+        }
+      }
+      return out;
+    })(),
     envOverrides: ['DSH_VIDEO_COOKIES', 'DSH_STORYBOARD_AUTO']
       .filter((k) => env[k] !== undefined && env[k] !== ''),
   };
@@ -186,6 +210,45 @@ export function writeVideoSettings(patch = {}, env = process.env) {
       next.storyboard = { ...base, cutFloor: n };
     }
   }
+  /**
+   * 默认档位策略 / 逐档映射。
+   *
+   * 空值（`''` / `{}`）是**清掉这一项**：设置页把它切回"不指定"时要能真的删掉，
+   * 否则文件里留一个空对象，下次读出来还得再判一次。
+   */
+  if (patch.strategy !== undefined) {
+    const base = next.storyboard && typeof next.storyboard === 'object' && !Array.isArray(next.storyboard)
+      ? next.storyboard : {};
+    const v = String(patch.strategy ?? '').trim();
+    if (!v) {
+      const { strategy: _drop, ...rest } = base;
+      next.storyboard = rest;
+    } else {
+      next.storyboard = { ...base, strategy: v };
+    }
+  }
+  if (patch.tierMap !== undefined) {
+    const base = next.storyboard && typeof next.storyboard === 'object' && !Array.isArray(next.storyboard)
+      ? next.storyboard : {};
+    const raw = patch.tierMap;
+    const clean = {};
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      for (const [k, v] of Object.entries(raw)) {
+        const from = Math.round(Number(k));
+        const to = Math.round(Number(v));
+        if (from < 1 || from > 8) throw new Error(`tierMap 的档位必须是 1-8（收到 ${k}）`);
+        if (to < 1 || to > 8) throw new Error(`tierMap 的目标档位必须是 1-8（收到 ${v}）`);
+        if (from !== to) clean[from] = to;
+      }
+    }
+    if (Object.keys(clean).length === 0) {
+      const { tierMap: _drop, ...rest } = base;
+      next.storyboard = rest;
+    } else {
+      next.storyboard = { ...base, tierMap: clean };
+    }
+  }
+
   writeObject(path, next);
   return readVideoSettings(env);
 }

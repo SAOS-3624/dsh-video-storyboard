@@ -322,6 +322,14 @@ export const STRATEGIES = Object.freeze({
   full: { bump: -1, floor: 1, label: '全尺寸', note: '每帧尺寸升一档（1 档不再升）' },
   standard: { bump: 0, floor: 2, label: '标准', note: '1 档压成 1/2 尺寸' },
   compact: { bump: 1, label: '紧凑', note: '每帧尺寸降一档' },
+  /**
+   * 原生：**什么都不挪**，按密度算出来几档就是几档。
+   *
+   * 它和 `standard` 的区别只在 floor —— standard 把 1 档压成 1/2（`floor: 2`），
+   * native 保留 1 档满格。存在的理由是**给"逐档自定义"当底座**：自定义映射表
+   * 接在策略之后，底座必须是"原样"，否则用户设的 `1→3` 是在一个已经被挪过的档位上再挪。
+   */
+  native: { bump: 0, label: '原生', note: '按密度算出来的档位原样使用' },
   // 速览：**全部 1/8 档 + 不要假切点 + 扫描期按最小间隔合并切点**。
   // 目标不是"看清"，是"用最少的 token 知道这 90 秒大概发生了什么"。
   skim: {

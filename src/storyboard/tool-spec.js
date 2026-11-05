@@ -530,9 +530,9 @@ export function validateToolArgs(args) {
     problems.push('maxFrames must be an integer 0..10000 (0 = no cap)');
   }
   if (args.strategy !== undefined
-    && !['auto', 'full', 'standard', 'compact', 'skim', 'brief',
+    && !['auto', 'full', 'standard', 'compact', 'native', 'skim', 'brief',
       'quality', 'balanced', 'saver', 'frugal', 'thrifty', 'ultra'].includes(args.strategy)) {
-    problems.push("strategy must be 'auto' | 'compact' | 'standard' | 'skim' | 'full' | 'brief'"
+    problems.push("strategy must be 'auto' | 'compact' | 'standard' | 'native' | 'skim' | 'full' | 'brief'"
       + ' (old names quality/balanced/saver/frugal/thrifty/ultra are still accepted)');
   }
   if (args.dryRun !== undefined && typeof args.dryRun !== 'boolean') {
@@ -656,9 +656,9 @@ export function validateZoomArgs(args) {
     problems.push('maxFrames must be an integer 0..200 (0 = no cap)');
   }
   if (args.strategy !== undefined
-    && !['full', 'standard', 'compact', 'skim', 'brief',
+    && !['full', 'standard', 'compact', 'native', 'skim', 'brief',
       'quality', 'balanced', 'saver', 'frugal', 'thrifty', 'ultra'].includes(args.strategy)) {
-    problems.push("strategy must be 'full' | 'standard' | 'compact' | 'skim' | 'brief'");
+    problems.push("strategy must be 'full' | 'standard' | 'compact' | 'native' | 'skim' | 'brief'");
   }
   if (args.zoomHeight !== undefined
     && (!Number.isInteger(args.zoomHeight) || args.zoomHeight < 120 || args.zoomHeight > 2160)) {

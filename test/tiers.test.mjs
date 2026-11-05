@@ -159,7 +159,7 @@ test('integralMarks: 真切点附近不补点（那里已经是边界）', () =>
 
 /* ---------------------------------------------------------------- 策略 / 几何 */
 
-test('applyStrategy: 五个档位的映射（旧名仍然认）', () => {
+test('applyStrategy: 六个档位的映射（旧名仍然认）', () => {
   const base = [1, 2, 3, 8];
   assert.deepEqual(applyStrategy(base, 'full'), [1, 1, 2, 7], '全尺寸：升一档，1 仍是 1');
   assert.deepEqual(applyStrategy(base, 'standard'), [2, 2, 3, 8], '标准：1 档压成 1/2');
@@ -176,7 +176,10 @@ test('applyStrategy: 五个档位的映射（旧名仍然认）', () => {
   assert.deepEqual(applyStrategy(base, 'thrifty'), applyStrategy(base, 'skim'));
   assert.deepEqual(applyStrategy(base, 'ultra'), applyStrategy(base, 'brief'));
   assert.deepEqual(applyStrategy(base, 'nope'), applyStrategy(base, DEFAULT_STRATEGY), '未知策略退回默认');
-  assert.equal(Object.keys(STRATEGIES).length, 5);
+  // 0.6.7 起多一个 `native`：**只给「逐档自定义」当底座**（bump 0、无 floor）。
+  // 没有它的话，用户设的 tierMap `1→3` 是在一个已经被策略 bump 过的档位上再挪。
+  // 数量这条断言是防误加/误删的 —— 策略名会进工具 schema，每多一个都要占 token。
+  assert.equal(Object.keys(STRATEGIES).length, 6);
   assert.equal(DEFAULT_STRATEGY, 'compact', '默认是紧凑档（性价比最高）');
 });
 
