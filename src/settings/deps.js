@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { DEFAULT_FFMPEG, DEFAULT_FFPROBE } from '../storyboard/probe.js';
+import { discoverYtdlp } from '../storyboard/ytdlp.js';
 import { dshHome, readVideoSettings } from './config.js';
 
 const run = promisify(execFile);
@@ -100,10 +101,27 @@ function hostSpeech(ctx, env) {
   };
 }
 
+/**
+ * yt-dlp 在哪 —— **必须和真正跑的时候用同一个发现逻辑**，否则设置页会撒谎。
+ *
+ * 以前这里只 `spawn('yt-dlp')` 裸命令；而实际运行时 `discoverYtdlp()` 除了 PATH，
+ * 还会扫 pip 的 Scripts 目录（`%APPDATA%\\Python\\Python3XX\\Scripts`）。
+ * 结果是"pip 装好、实际能用，但 UI 写着未找到"，用户以为自己没装（社区实报）。
+ */
+async function ytdlpStatus(env) {
+  try {
+    const found = await discoverYtdlp({ env });
+    return { ok: true, detail: found.version ? `${found.version} · ${found.bin}` : String(found.bin) };
+  } catch (e) {
+    const tried = Array.isArray(e?.tried) && e.tried.length ? `，试过 ${e.tried.length} 处` : '';
+    return { ok: false, detail: `未找到（PATH 与 pip 的 Scripts 目录都没有${tried}）` };
+  }
+}
+
 /** @returns {Promise<Array<{id:string,label:string,ok:boolean,detail:string}>>} */
 export async function checkEnvironment(ctx, env = process.env) {
   const python = await firstOf([['python', ['--version']], ['py', ['--version']]]);
-  const ytdlp = await firstOf([['yt-dlp', ['--version']], ['python', ['-m', 'yt_dlp', '--version']]]);
+  const ytdlp = await ytdlpStatus(env);
   const ffmpeg = await version(DEFAULT_FFMPEG, ['-version']);
   const ffprobe = await version(DEFAULT_FFPROBE, ['-version']);
   const speech = hostSpeech(ctx, env);
