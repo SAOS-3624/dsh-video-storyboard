@@ -196,7 +196,7 @@ test('settings server: 页面 token、API token、保存后不回显 key', async
   assert.equal(result.url, page.url);
 });
 
-test('settings: DSH 设置 tab 的 client bundle 可注册', () => {
+test('settings: client bundle 只在组合包页面注册，不占用设置 tab', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(pkg.dsh.client.platform, 'web');
   assert.equal(pkg.exports['./client'], './lib/client.js');
@@ -208,10 +208,7 @@ test('settings: DSH 设置 tab 的 client bundle 可注册', () => {
   const mod = handoff.factory(() => ({ createElement: () => ({}) }));
   const registered = [];
   mod.apply({ slots: { inject(_name, callback) { callback(); }, register(options, component) { registered.push({ options, component }); } } });
-  const tab = registered.find((entry) => entry.options.name === 'settings.plugins.tab');
-  assert.equal(tab.options.id, 'video-storyboard');
-  assert.equal(tab.options.label(), '视频分镜');
-  assert.equal(typeof tab.component, 'function');
+  assert.equal(registered.some((entry) => entry.options.name === 'settings.plugins.tab'), false);
   const bundle = registered.find((entry) => entry.options.name === 'plugins.bundle.config');
   assert.equal(bundle.options.key, 'dsh-video-storyboard');
   assert.equal(bundle.component({ view: 'summary' }), null);
