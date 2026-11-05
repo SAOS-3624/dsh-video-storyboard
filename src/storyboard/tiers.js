@@ -379,6 +379,12 @@ export const BIN_COST = Object.freeze({
   full: 0.55,       // 宁可多开一张，也要保住格子尺寸
   standard: 1.02,
   compact: 1.5,
+  /**
+   * `native` 不给 auto 用（`AUTO_CANDIDATES` 里没有它），但用户显式传的时候要走这个数。
+   * 它和 `standard` 的保真度一样（都不改档位），只是不压 1 档。
+   * 不写的话会落到 `BIN_COST[name] ?? 1.02` 的兜底 —— 值一样，但那是巧合，不是设计。
+   */
+  native: 1.02,
   skim: 2.5,        // 把"多一张"算贵，尽量一张装完
   brief: 2.5,
 });

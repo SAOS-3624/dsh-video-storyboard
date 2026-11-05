@@ -109,3 +109,32 @@ test('boardOptions：关掉自动选档时才落回 compact', () => {
   const o = boardOptions({ input: 'x.mp4' }, { kind: 'board' });
   assert.equal(o.strategy, 'compact', 'storyboard.auto=false 时默认是 compact');
 });
+
+// ---- 「每帧固定多大」= 八项全指向同一档 ------------------------------------
+//
+// 守一个**等价关系**：想让切点密度不影响尺寸，正确做法是把八项都填成同一档。
+// 曾经为此加过独立的"锁定"开关，后来删了 —— 它和全映射到同一档逐字节相同，
+// 多一个概念只会让人以为还有别的东西。
+
+const { applyStrategy, applyTierMap } = await import('../src/storyboard/tiers.js');
+
+const allSame = (n) => Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8].map((i) => [i, n]));
+
+test('八项全指向同一档 = 每帧一样大，切点密度被整表吃掉', () => {
+  const apply = (tiers, n) => {
+    const mapped = applyStrategy(tiers, 'native');
+    return mapped.map((t) => allSame(n)[Math.round(Number(t))] ?? t);
+  };
+  assert.deepEqual(apply([1, 3, 6, 8], 4), [4, 4, 4, 4]);
+  assert.deepEqual(apply([1, 5], 2), [2, 2]);
+});
+
+test('全映射不吃掉 0 档（自由尺寸补位帧）', () => {
+  assert.deepEqual(applyTierMap([0, 5], allSame(3)), [0, 3]);
+});
+
+test('对照：compact 是"每档 +1"，结果仍随密度变', () => {
+  const base = [1, 5, 8];
+  assert.deepEqual(applyStrategy(base, 'compact'), [2, 6, 8]);
+  assert.notDeepEqual(applyStrategy(base, 'compact'), [2, 2, 2], '这就是"没锁定"的样子');
+});
