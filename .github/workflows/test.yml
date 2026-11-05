@@ -8,7 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 12          # apt 偶尔卡住，别让它挂 6 小时
+    timeout-minutes: 15          # apt 偶尔卡住，别让它挂 6 小时；重试要留出预算
     strategy:
       fail-fast: false      # 一个版本挂了不要取消另一个，否则看不到全貌
       matrix:
@@ -22,8 +22,9 @@ jobs:
 
       - name: install ffmpeg
         # --no-install-recommends 少装几十个可选的依赖，apt 快得多；也少一个卡住的点。
-        # apt 镜像偶尔会挂住：先直接用 runner 自带的 ffmpeg；确实要装时给 update/install
-        # 各自加硬超时，避免把 12 分钟的 job 预算全耗在等网络上。
+        # 2026-11-05 node20 那次挂在"下 62.8MB 的包"上：一次给 180s 不够，整步 exit 124，
+        # 而 node22 同一份代码是绿的。所以改成**短超时多次重试** —— apt 会把下了一半的
+        # .deb 留在 /var/cache/apt/archives，第二次接着下，比一次给足十分钟更容易过。
         run: |
           if command -v ffmpeg >/dev/null 2>&1; then
             ffmpeg -version | head -1
@@ -31,7 +32,12 @@ jobs:
           fi
           APT_OPTS="-qq -o Acquire::ForceIPv4=true -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
           sudo timeout 120s apt-get update $APT_OPTS || sudo timeout 120s apt-get update $APT_OPTS
-          sudo timeout 180s apt-get install -y --no-install-recommends ffmpeg
+          for i in 1 2 3; do
+            if sudo timeout 150s apt-get install -y --no-install-recommends ffmpeg; then
+              break
+            fi
+            echo "::warning::apt-get install 第 $i 次没在 150s 内装完（已下的包会复用），重试"
+          done
           ffmpeg -version | head -1
 
       - name: syntax check
