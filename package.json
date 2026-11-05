@@ -24,6 +24,36 @@
     "url": "git+https://github.com/SAOS-3624/dsh-video-storyboard.git"
   },
   "author": "SAOS-3624",
+  "contributors": [
+    {
+      "name": "ggfgfgf-on",
+      "url": "https://github.com/ggfgfgf-on"
+    },
+    {
+      "name": "dugu951",
+      "url": "https://github.com/dugu951"
+    },
+    {
+      "name": "canyueY",
+      "url": "https://github.com/canyueY"
+    },
+    {
+      "name": "xingyueDanYang",
+      "url": "https://github.com/xingyueDanYang"
+    },
+    {
+      "name": "aizhimoran",
+      "url": "https://github.com/aizhimoran"
+    },
+    {
+      "name": "MULINXF",
+      "url": "https://github.com/MULINXF"
+    },
+    {
+      "name": "viwe-monai",
+      "url": "https://github.com/viwe-monai"
+    }
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "main": "./src/index.js",
