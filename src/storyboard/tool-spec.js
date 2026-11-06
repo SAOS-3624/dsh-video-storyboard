@@ -151,7 +151,7 @@ export function storyboardToolSpec() {
       },
       strategy: {
         type: 'string',
-        enum: ['auto', 'compact', 'standard', 'skim', 'full', 'brief'],
+        enum: ['auto', 'compact', 'standard', 'native', 'skim', 'full', 'brief'],
         description: 'Size policy. Omit → auto picks the cheapest readable one.',
       },
       cutFloor: {
@@ -308,7 +308,7 @@ export function zoomToolSpec() {
       },
       strategy: {
         type: 'string',
-        enum: ['full', 'standard', 'compact', 'skim', 'brief'],
+        enum: ['full', 'standard', 'compact', 'native', 'skim', 'brief'],
         description: 'Size policy, default full.',
       },
       // zoom 的窗口通常只有几十秒、格数很少，切点门槛对结果影响极小；
