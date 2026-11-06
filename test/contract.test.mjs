@@ -15,8 +15,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-  locateToolSpec, probeToolSpec, storyboardToolSpec, validateToolArgs,
-  validateZoomArgs, zoomToolSpec,
+  helpToolSpec, locateToolSpec, probeToolSpec, storyboardToolSpec, subtitlesToolSpec,
+  validateToolArgs, validateZoomArgs, zoomToolSpec,
 } from '../src/tool-spec.js';
 
 const HOST_TOOLS = join(homedir(), '.dsh/profiles/node_modules/@deepseek-ai/dsh-tools/lib/index.js');
@@ -182,4 +182,21 @@ test('本地兜底校验：zoom 要求 from/to 且区间有效', () => {
   assert.ok(validateZoomArgs({ input: 'a', from: 5, to: 5 }).length > 0);
   assert.ok(validateZoomArgs({ input: 'a', from: -1, to: 5 }).length > 0);
   assert.ok(validateZoomArgs({ input: 'a', from: 0, to: 5, maxFrames: 300 }).length > 0);
+});
+
+test('contract: 常驻文案有预算（六个工具的 description + 参数说明每轮都要重发）', () => {
+  // 2026-11-06 把"为什么/多少 token/实测数字"搬进 video_help 之后：五个工具的常驻文案
+  // 6306 → 5770，加上 video_help 自己 274 一共 6044。这条预算防它长回去 ——
+  // 真要写，写进 src/storyboard/help.js（按需取，零常驻）。
+  const sizeOf = (s) => (s.description ?? '').length
+    + Object.values(s.parameters ?? {}).reduce((n, v) => n + (v?.description?.length ?? 0), 0);
+  const specs = [
+    storyboardToolSpec(), zoomToolSpec(), probeToolSpec(), locateToolSpec(),
+    subtitlesToolSpec(), helpToolSpec(),
+  ];
+  const total = specs.reduce((n, s) => n + sizeOf(s), 0);
+  assert.ok(total <= 6400, `六个工具的常驻文案合计 ${total} 字符，超了预算 6400 —— 请搬进 help.js`);
+  for (const s of specs) {
+    assert.ok(sizeOf(s) <= 2400, `${s.name} 的常驻文案 ${sizeOf(s)} 字符，超了单个工具预算 2400`);
+  }
 });
