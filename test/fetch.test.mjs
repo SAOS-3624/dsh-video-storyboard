@@ -425,6 +425,44 @@ test('pruneMedia: 上限够用时一个都不删', async () => {
   }
 });
 
+test('pruneMedia: 单个目录本身就超上限时，不能把它自己删掉（#81）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-prune3-'));
+  try {
+    const dir = join(root, 'media');
+    const only = join(dir, 'key');
+    await mkdir(only, { recursive: true });
+    // 长片的 720p 副本：2KB，上限只有 1KB
+    await writeFile(join(only, 'video.mp4'), Buffer.alloc(2048, 3));
+    const result = await pruneMedia({ dir, maxBytes: 1024 });
+    assert.equal(result.removed, 0, '这一轮正在用的目录必须留着');
+    assert.deepEqual(await readdir(dir), ['key'], '刚下好的片子不能被自己的清理逻辑删掉');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('pruneMedia: exclude 指定的目录连统计都不算', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-prune4-'));
+  try {
+    const dir = join(root, 'media');
+    const current = join(dir, 'current');
+    const older = join(dir, 'older');
+    await mkdir(current, { recursive: true });
+    await mkdir(older, { recursive: true });
+    await writeFile(join(current, 'video.mp4'), Buffer.alloc(1024, 4));
+    await writeFile(join(older, 'video.mp4'), Buffer.alloc(1024, 5));
+    // current 反而是更旧的那个：没有 exclude 时它会被删
+    const past = new Date(Date.now() - 86_400_000);
+    await utimes(join(current, 'video.mp4'), past, past);
+
+    const result = await pruneMedia({ dir, maxBytes: 512, exclude: current });
+    assert.equal(result.removed, 1);
+    assert.deepEqual((await readdir(dir)).sort(), ['current'], '正在用的那个必须活着');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('freeBytes: 按媒体目录所在的盘算，目录还没建也找最近的祖先', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-free-'));
   try {

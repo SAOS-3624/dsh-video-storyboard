@@ -494,7 +494,9 @@ export async function fetchMedia(input, opts = {}) {
   // 里面**没有直链**：那是带签名的凭证，只活在进程内存里。
   await writeFile(join(dir, 'meta.json'), JSON.stringify(source, null, 0), 'utf8').catch(() => {});
 
-  await pruneMedia({ dir: mediaDir(env), maxBytes: mediaMaxBytes(env) });
+  // 刚下好的这个目录不能被自己这行删掉（issue #81：长片 720p 副本 > 上限时，
+  // 它是"最旧的"也是"最新的"，按 mtime 淘汰等于下载完立刻自删）。
+  await pruneMedia({ dir: mediaDir(env), maxBytes: mediaMaxBytes(env), exclude: dir });
   onProgress?.({ phase: 'done', bytes: st.size });
 
   return {

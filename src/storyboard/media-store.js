@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { access, readdir, rm, stat, statfs } from 'node:fs/promises';
 import { constants, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { configuredText, readVideoFile } from './user-config.js';
 
 /** 文件在不在、可不可读。**一行一个坑**：裸 access() 抛异常，用 try 包住才是判断而不是报错。 */
@@ -71,26 +71,43 @@ async function dirSize(dir) {
 /**
  * 超限就**按 mtime 从旧到新**删整个 `<key>/` 目录。
  * 单个目录一起删，不留半个视频——否则下次会命中一个没有 video.mp4 的空壳。
+ *
+ * ## 两条不能省的护栏（issue #81）
+ *
+ * 1. **最新那个目录永远不删。** 它就是这一轮刚下好的片子。长片的 720p 副本
+ *    本身就超过上限（实测 72 分钟 544 MB > 300 MB），只按"总量超了就删最旧的"
+ *    会在下载完成的下一行把正在用的文件删掉，然后 `ffprobe: No such file`。
+ *    保它意味着这一轮之后缓存可能仍然超限 —— 那也比"刚下完就删"好。
+ * 2. `exclude`：调用方明确知道"这个目录正在用"时直接跳过，连统计都不算它。
+ *    两处保险叠在一起，是因为 `pipeline.js` 的 `pruneStorage()` 不传 `exclude`
+ *    也照样要安全。
+ *
+ * @param {{dir?: string, maxBytes?: number, exclude?: string|null}} [o]
  */
-export async function pruneMedia({ dir = mediaDir(), maxBytes = mediaMaxBytes() } = {}) {
+export async function pruneMedia({ dir = mediaDir(), maxBytes = mediaMaxBytes(), exclude = null } = {}) {
   let entries = [];
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch {
     return { removed: 0, bytes: 0 };
   }
+  const skip = exclude ? resolve(exclude) : null;
   const dirs = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const path = join(dir, entry.name);
+    if (skip && resolve(path) === skip) continue;
     const { total, newest } = await dirSize(path);
     if (total > 0) dirs.push({ path, size: total, at: newest });
   }
   dirs.sort((a, b) => a.at - b.at);
+  // 调用方点了名就保它；没点名才退回"保最新的那个"（`pruneStorage()` 走这条）。
+  const keep = skip ?? (dirs.length > 0 ? dirs[dirs.length - 1].path : null);
   let total = dirs.reduce((n, d) => n + d.size, 0);
   let removed = 0;
   for (const d of dirs) {
     if (total <= maxBytes) break;
+    if (keep && d.path === keep) continue;
     try {
       await rm(d.path, { recursive: true, force: true });
       total -= d.size;
