@@ -620,6 +620,7 @@ video_storyboard({ input: "materials.mp4", hotwords: "位错 滑移 柏氏矢量
 | [docs/INSTALL.zh.md](docs/INSTALL.zh.md) | 从零安装：依赖、自检、排错表 |
 | [docs/USAGE.zh.md](docs/USAGE.zh.md) | 完整手册：三条安装路径、六个工作流、每个参数 |
 | [docs/HISTORY.zh.md](docs/HISTORY.zh.md) | 从 v0.1 到现在，按"被什么打脸"组织 |
+| [docs/原理图解.zh.md](docs/原理图解.zh.md) | 用一支 MV 把流程拆成 7 步，每步配图 |
 | [CHANGELOG.md](CHANGELOG.md) | 逐版本变更 |
 | [CREDITS.md](CREDITS.md) | 第三方致谢、社区贡献、测试素材作者 |
 | [README.en.md](README.en.md) | English |
