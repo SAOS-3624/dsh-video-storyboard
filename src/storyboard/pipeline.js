@@ -401,7 +401,7 @@ export async function runStoryboard(opts) {
       duration: winDur, start: winStart, cuts: absCuts, marks: sampleMarks, maxFrames: cap,
     });
     if (Number(minFrames) > 1) sg = ensureMinFrames(sg, Math.min(24, Math.round(Number(minFrames))));
-    // 档位 = 切点密度；假切点段额外 +2 档（那里画面在连续变化，一帧代表不了多久）
+    // 档位 = 切点密度；假切点段再加 MARK_BOOST 档（那里画面在连续变化，一帧代表不了多久）
     const base = sg.map((s) => levelAt(curve, s.t - winStart));
     const raw = applyMarkBoost(base, sg);
     let tr = applyStrategy(raw, activeStrategy);
