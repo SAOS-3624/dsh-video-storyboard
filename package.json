@@ -52,6 +52,10 @@
     {
       "name": "viwe-monai",
       "url": "https://github.com/viwe-monai"
+    },
+    {
+      "name": "opcXopc",
+      "url": "https://github.com/opcXopc"
     }
   ],
   "license": "Apache-2.0",
