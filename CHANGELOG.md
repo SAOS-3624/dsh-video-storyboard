@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Fixed — 长片的 720p 副本下完就被自己的清理逻辑删掉（#81）
+
+`pruneMedia()` 按 mtime 从旧到新删整个 `<key>/`，而刚下好的那个目录同时是"最旧的"
+也是"最新的"。缓存里只有它、且它本身超过上限时（实测 72 分钟的片 720p 副本 544 MB >
+300 MB），下载完成的下一行就把自己删掉，后面 `ffprobe/ffmpeg` 报 `No such file`。
+
+- `fetch.js` 把刚下载的目录作为 `exclude` 传进去；
+- `pruneMedia()` 没拿到 `exclude` 时也保"最新的那个"（`pipeline.js` 的
+  `pruneStorage()` 走这条，同样安全）；
+- 测试 +2：单目录超限不自删、exclude 的目录连统计都不算。
+
+### Changed — 子进程统一 `windowsHide`（#37）
+
+`spawn` 控制台程序在 Windows 上会新建一个黑框，看视频时每隔几秒闪一下。
+`audio.js` / `scan.js` / `sheet.js` / `subtitle-strip.js` / `ytdlp.js` 全部补上
+`windowsHide: true`（非 Windows 平台该键被忽略）。
+
+### Docs — 原理图解（合 PR #82）
+
+用一支 MV 把链路拆成 7 步，每步配真实中间图。图不在仓库里（`NOTICE` 不放第三方画面），
+文档外链引用。顺手修掉两处和源码对不上的说明：README 的"格子尺寸全都一样"（0.6 起按
+切点密度分档）、注释里的"假切点 +2 档"（常量是 `MARK_BOOST = 3`）。
+
 ## [0.6.8] - 2026-11-06
 
 ### Changed — 工具契约瘦身：长说明搬进 `video_help`

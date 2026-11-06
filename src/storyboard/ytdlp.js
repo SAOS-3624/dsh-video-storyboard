@@ -116,7 +116,7 @@ export function runProcess({ bin, prefix = [] }, args, { timeoutMs = 120_000, si
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn(bin, [...prefix, ...args], { stdio: ['ignore', 'pipe', 'pipe'], signal });
+      child = spawn(bin, [...prefix, ...args], { stdio: ['ignore', 'pipe', 'pipe'], signal, windowsHide: true });
     } catch (error) {
       reject(new Error(`failed to spawn ${bin}: ${error.message}`));
       return;

@@ -394,7 +394,7 @@ export async function extractSharpest(opts) {
 
 function exec(args, { input, timeoutMs = 120_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(args[0], args.slice(1), { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(args[0], args.slice(1), { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     const out = [];
     let err = '';
     const timer = timeoutMs ? setTimeout(() => child.kill('SIGKILL'), timeoutMs) : null;

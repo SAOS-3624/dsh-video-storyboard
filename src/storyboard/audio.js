@@ -20,7 +20,7 @@ function runAudioFilter({ input, ffmpegPath, filter, start, end, timeoutMs = 180
     if (start > 0) args.push('-ss', String(start));
     if (end !== undefined) args.push('-t', String(Math.max(0.1, end - start)));
     args.push('-i', input, '-vn', '-sn', '-dn', '-af', filter, '-f', 'null', '-');
-    const child = spawn(args[0], args.slice(1), { stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(args[0], args.slice(1), { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
     let err = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     child.stderr.on('data', (d) => { err += d.toString(); });

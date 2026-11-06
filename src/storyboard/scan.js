@@ -699,7 +699,7 @@ export function scanShots(opts) {
         // 实测判定结果与 bicubic 相同（伪切点 6 类全 0、召回不变）。
         // （别用 neighbor：点采样会引入大量别名噪声，分数会抖。）
         '-vf', `scale=${width}:${height}:flags=area,format=rgb24`, '-f', 'rawvideo', '-'],
-      { stdio: ['ignore', 'pipe', 'pipe'], signal },
+      { stdio: ['ignore', 'pipe', 'pipe'], signal, windowsHide: true },
     );
 
     let pending = Buffer.alloc(0);

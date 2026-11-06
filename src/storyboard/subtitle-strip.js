@@ -38,7 +38,7 @@ export const DEFAULT_BAND = [0.82, 0.98];
 export const STRIP_WIDTH = 1280;
 
 const run = (bin, args, { timeoutMs = 120_000 } = {}) => new Promise((resolve, reject) => {
-  const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
   let err = '';
   const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
   child.stderr.on('data', (d) => { err += d.toString(); });
@@ -131,7 +131,7 @@ async function vstack({ ffmpegPath, images, out }) {
 async function mediaDuration({ input, ffprobePath = DEFAULT_FFPROBE }) {
   const out = await new Promise((resolve, reject) => {
     const child = spawn(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration',
-      '-of', 'default=nw=1:nk=1', input], { stdio: ['ignore', 'pipe', 'pipe'] });
+      '-of', 'default=nw=1:nk=1', input], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => { stdout += d.toString(); });
