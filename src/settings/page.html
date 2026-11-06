@@ -84,6 +84,14 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
       </select>
       <span class="hint">只影响没显式传 cutFloor 的调用。调低 → 检出更多镜头，图更多、token 更多，但画面被拼到一起的情况更少。</span>
     </label>
+    <label class="field">会话里的图涨到多少张就动手省（imageTrigger）
+      <input id="imageTrigger" type="number" min="0" max="2000" step="10" placeholder="300（默认）">
+      <span class="hint">涨到这个数，就把更早的分镜图一次性"省略"成一段文字：不再发给模型，磁盘上那份也能删。留空 = 默认 300；<b>0 = 关闭这个功能</b>。</span>
+    </label>
+    <label class="field">省完保留最近几张（imageKeep）
+      <input id="imageKeep" type="number" min="0" max="2000" step="10" placeholder="100（默认）">
+      <span class="hint"><b>必须小于上面的触发线</b>。100 张约 2.2 万 token。⚠ 每省略一次前缀缓存要全量重算，所以两数差得越大越省事。</span>
+    </label>
   </div>
 </div>
 
@@ -183,6 +191,8 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
     $('cookies').value = v.cookies || '';
     $('storyboardAuto').checked = v.storyboardAuto !== false;
     $('cutFloor').value = v.cutFloor == null ? '' : String(v.cutFloor);
+    $('imageTrigger').value = v.imageTrigger == null ? '' : String(v.imageTrigger);
+    $('imageKeep').value = v.imageKeep == null ? '' : String(v.imageKeep);
     $('videoSource').textContent = Array.isArray(v.envOverrides) && v.envOverrides.length
       ? '环境变量优先：' + v.envOverrides.join('、') + '；这里的改动不会覆盖它们。'
       : '';
@@ -252,6 +262,9 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
         cookies: $('cookies').value,
         storyboardAuto: $('storyboardAuto').checked,
         cutFloor: $('cutFloor').value === '' ? 0 : Number($('cutFloor').value),
+        // 空串 = 恢复默认（删键，走插件默认 300 / 100）；trigger 设 0 = 关掉这个功能
+        imageTrigger: $('imageTrigger').value === '' ? '' : Number($('imageTrigger').value),
+        imageKeep: $('imageKeep').value === '' ? '' : Number($('imageKeep').value),
       };
       const data = await api('/save', { asr, video });
       state.asr = data.asr; state.video = data.video;

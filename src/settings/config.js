@@ -166,6 +166,19 @@ export function readVideoSettings(env = process.env) {
       }
       return out;
     })(),
+    /**
+     * 会话里最多留多少张图 / 多少 MB（`image/offload` 的两个上限）。
+     * null = 没设，走插件默认（200 张 / 300 MB）；0 = 这一维不限。
+     * 这是**省完之后停在哪**，不是"一到就省"—— 实际会涨到 1.5 倍才动手（见 src/index.js）。
+     */
+    imageTrigger: (() => {
+      const n = Number(raw.data.imageTrigger);
+      return Number.isInteger(n) && n >= 0 && n <= 2000 ? n : null;
+    })(),
+    imageKeep: (() => {
+      const n = Number(raw.data.imageKeep);
+      return Number.isInteger(n) && n >= 0 && n <= 2000 ? n : null;
+    })(),
     envOverrides: ['DSH_VIDEO_COOKIES', 'DSH_STORYBOARD_AUTO']
       .filter((k) => env[k] !== undefined && env[k] !== ''),
   };
@@ -208,6 +221,36 @@ export function writeVideoSettings(patch = {}, env = process.env) {
       const n = Number(patch.cutFloor);
       if (!Number.isInteger(n) || n < 1 || n > 255) throw new Error('cutFloor 必须是 1-255 的整数');
       next.storyboard = { ...base, cutFloor: n };
+    }
+  }
+
+  /**
+   * 会话图片省略的两个上限（顶层键，和 `mediaMaxMb` 同级）。
+   *
+   * `0` 是**有意义的取值**（这一维不限），所以不能像 cutFloor 那样把 0 当"清掉"；
+   * 空串 / null 才是"恢复默认"（删键，走插件默认 200 张 / 300 MB）。
+   */
+  for (const key of ['imageTrigger', 'imageKeep']) {
+    if (patch[key] === undefined) continue;
+    if (patch[key] === '' || patch[key] === null) {
+      delete next[key];
+      continue;
+    }
+    const n = Number(patch[key]);
+    if (!Number.isInteger(n) || n < 0 || n > 2000) throw new Error(`${key} 必须是 0-2000 的整数`);
+    next[key] = n;
+  }
+
+  /**
+   * 触发线必须大于留底 —— 否则一到线就想省，结果发现"本来就不该省"。
+   * 这里**直接拒绝**而不是自动夹住：设置页正在编辑，用户需要知道是哪两个数打架。
+   * （插件加载时的 tuning.js 那条路是"夹住 + warn"，因为那时用户不在场。）
+   */
+  {
+    const t = next.imageTrigger === undefined ? 300 : Number(next.imageTrigger);
+    const k = next.imageKeep === undefined ? 100 : Number(next.imageKeep);
+    if (Number.isInteger(t) && Number.isInteger(k) && t > 0 && k >= t) {
+      throw new Error(`保留张数（${k}）必须小于触发线（${t}）`);
     }
   }
   /**

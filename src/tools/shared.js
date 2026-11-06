@@ -9,6 +9,7 @@
 import { runStoryboard } from '../storyboard/pipeline.js';
 import { formatForDetail, formatPlanPreview } from '../storyboard/format.js';
 import { hostSpeechToText } from '../storyboard/host-asr.js';
+import { notifyDelivery } from '../storyboard/offload.js';
 
 /**
  * 从 cordis 上下文里取一个**可选**服务（取不到返回 null，绝不抛）。
@@ -42,7 +43,12 @@ export function serviceOf(ctx, name) {
   }
 }
 
-/** 把每张分镜图提交成附件。两个入口各写过一遍这段循环，收成一处 —— mediaType / 命名改一次就够。 */
+/**
+ * 把每张分镜图提交成附件。两个入口各写过一遍这段循环，收成一处 —— mediaType / 命名改一次就够。
+ *
+ * 交完顺手 `notifyDelivery()`：图上进了会话历史就跟着每一轮请求走，`src/storyboard/offload.js`
+ * 会按 `imageKeep` / `imageKeepMB` 把更早的省略掉（异步、不阻塞、失败只记日志）。
+ */
 export async function attachSheetImages(ctx, result) {
   // **运行期探测，不是 inject 声明**（原因见 src/index.js 的 inject 注释）：
   // 宿主没注册 attachments 时，插件必须照样能加载、工具照样能跑，只是拿不到图片。
@@ -63,6 +69,8 @@ export async function attachSheetImages(ctx, result) {
       name: `storyboard-${sheet.sheet}.png`,
     }));
   }
+  // 图已经进历史了，看一眼要不要把更早的省略掉（**绝不能影响这一轮的交付**）
+  notifyDelivery();
   return images;
 }
 
