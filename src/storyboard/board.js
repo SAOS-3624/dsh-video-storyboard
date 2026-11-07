@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { configuredNumber, readVideoFile } from './user-config.js';
+import { configuredNumber, configuredText, readVideoFile } from './user-config.js';
 
 import {
   AUTO_STRATEGY, DEFAULT_STRATEGY, STRATEGIES, resolveStrategy,
@@ -243,6 +243,12 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
         ? explicit
         : configuredNumber(userCfg, 'storyboard.cutFloor', { min: 1, max: 255 });
       return v ? { cutFloor: Math.min(255, Math.round(v)) } : {};
+    })(),
+    // 七道阈值取哪一套（`~/.dsh/video.json` 的 `storyboard.tierCurve`）。
+    // 认不出来的名字在 thresholdsFor 里退回 docx，这里只负责把配置读出来。
+    ...(() => {
+      const v = configuredText(userCfg, 'storyboard.tierCurve');
+      return v ? { tierCurve: v } : {};
     })(),
     // **默认不封顶**：帧数由切点决定，张数由排布决定，用户要看多少就给多少
     maxFrames: clampFrames(args.maxFrames, 0),

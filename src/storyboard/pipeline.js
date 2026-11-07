@@ -35,7 +35,7 @@ import {
   AUTO_CANDIDATES, AUTO_STRATEGY, BIN_COST, DEFAULT_STRATEGY, MARK_BOOST, READABILITY_ORDER, STRATEGIES,
   applyMarkBoost, applyStrategy, applyTierMap, autoSheetCap, shouldForceSheetCap,
   fitCanvas, pickAutoStrategy, resolveStrategy,
-  framesFromBounds, integralMarks, levelAt, levelCurve, readabilityOf, tierHistogram,
+  framesFromBounds, integralMarks, levelAt, levelCurve, readabilityOf, tierHistogram, thresholdsFor,
 } from './tiers.js';
 import { DEFAULT_STRETCH, solve, toRects } from './pack.js';
 import { remember } from './memory.js';
@@ -118,6 +118,9 @@ export async function runStoryboard(opts) {
     uniformTier = null,
     // 档位映射表：`{1:3, 5:4, 6:4}` —— 接在策略之后，调用方说啥就是啥（没写的档位原样保留）
     tierMap = null,
+    // 七道阈值取哪一套：`docx`（默认）/ `perceptual`（按人眼瞬时记忆定标）。
+    // 见 tiers.js 的 PERCEPTUAL_THRESHOLDS —— 同一批帧换这套表会排成更少、更小的格子。
+    tierCurve = null,
     // 积分取帧（假切点）：真切点之间按"画面变化率的时间积分"补采样点，累够就触发、触发即清零。
     integral = true,
     integralSeconds = 6,
@@ -361,7 +364,9 @@ export async function runStoryboard(opts) {
   // 三件事必须一起做：**帧数影响档位序列，档位序列决定张数**。所以当调用方要求
   // "最多几张图"（zoom / 陪看都是一张）时，只能减少帧数再重排 —— 不能事后砍掉尾图，
   // 那会让最后一格覆盖半分钟却只给一帧。
-  const curve = levelCurve({ duration: winDur, fps: info.fps, cuts: absCuts });
+  const curve = levelCurve({
+    duration: winDur, fps: info.fps, cuts: absCuts, thresholds: thresholdsFor(tierCurve),
+  });
   const canvas = fitCanvas(info.aspect, { maxSide: maxCanvasSide, budget });
   // 排布沿用"按行凑满"（fillRows: true）：放开它虽然填充率更高，但**张数会涨**（5 → 7），
   // 那是舍本逐末 —— 一张图的钱按它自己的像素算（tiers.imageTokens）：多一张就多一份像素地板

@@ -358,3 +358,42 @@ test('shouldForceSheetCap: 344 张算失控，60 张不算', () => {
   assert.equal(shouldForceSheetCap(344, 0), false, '没有预算就不判');
   assert.equal(shouldForceSheetCap(NaN, 12), false);
 });
+
+// ── 第二套阈值：perceptual（从 see-now 0.2.0 同步过来的）───────────────────────
+
+test('perceptual 表：7 道、严格递增、端点是 3 s / 0.3 s（每帧概率口径）', async () => {
+  const { PERCEPTUAL_THRESHOLDS, LEVEL_THRESHOLDS } = await import('../src/storyboard/tiers.js');
+  assert.equal(PERCEPTUAL_THRESHOLDS.length, 7);
+  for (let i = 1; i < 7; i += 1) {
+    assert.ok(PERCEPTUAL_THRESHOLDS[i] > PERCEPTUAL_THRESHOLDS[i - 1],
+      `第 ${i + 1} 道没递增：${PERCEPTUAL_THRESHOLDS[i - 1]} → ${PERCEPTUAL_THRESHOLDS[i]}`);
+  }
+  // 端点：一格最多 3 s、最少 0.3 s → 每帧概率 = 1/(30×秒)
+  assert.ok(Math.abs(PERCEPTUAL_THRESHOLDS[0] - 1 / (30 * 3)) < 0.0005, '下界应是 3 秒');
+  assert.ok(Math.abs(PERCEPTUAL_THRESHOLDS[6] - 1 / (30 * 0.3)) < 0.0005, '上界应是 0.3 秒');
+  // 和 docx 的换算关系必须一致：两边都除以 30 得到同一族的数
+  assert.ok(Math.abs(LEVEL_THRESHOLDS[6] - 3.0 / 30) < 0.0007, 'docx 上界换算对不上');
+});
+
+test('thresholdsFor：认名字，认不出来退回 docx（配置写错不该让分镜失败）', async () => {
+  const { thresholdsFor, LEVEL_THRESHOLDS, PERCEPTUAL_THRESHOLDS } = await import('../src/storyboard/tiers.js');
+  assert.deepEqual(thresholdsFor('docx'), LEVEL_THRESHOLDS);
+  assert.deepEqual(thresholdsFor('perceptual'), PERCEPTUAL_THRESHOLDS);
+  assert.deepEqual(thresholdsFor(undefined), LEVEL_THRESHOLDS);
+  assert.deepEqual(thresholdsFor('perceptua1'), LEVEL_THRESHOLDS);
+  assert.deepEqual(thresholdsFor('  perceptual  '), PERCEPTUAL_THRESHOLDS, '两边空格要能容错');
+});
+
+test('同一批切点换表：perceptual 只会把档位抬高或不变，不会反着降', async () => {
+  const { levelCurve, LEVEL_THRESHOLDS, PERCEPTUAL_THRESHOLDS } = await import('../src/storyboard/tiers.js');
+  // 每 0.6 秒一刀（1.67 刀/秒），60 秒
+  const cuts = Array.from({ length: 100 }, (_, i) => i * 0.6);
+  const a = levelCurve({ duration: 60, fps: 30, cuts, thresholds: LEVEL_THRESHOLDS });
+  const b = levelCurve({ duration: 60, fps: 30, cuts, thresholds: PERCEPTUAL_THRESHOLDS });
+  let higher = 0;
+  for (let i = 0; i < a.levels.length; i += 1) {
+    assert.ok(b.levels[i] >= a.levels[i], `第 ${i} 帧反而降了：${a.levels[i]} → ${b.levels[i]}`);
+    if (b.levels[i] > a.levels[i]) higher += 1;
+  }
+  assert.ok(higher > a.levels.length * 0.3, `perceptual 应该明显更早升档，实际只有 ${higher} 帧变了`);
+});

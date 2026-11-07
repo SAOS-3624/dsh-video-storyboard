@@ -24,6 +24,42 @@
 
 /** 7 道阈值 → 8 个档位（每帧的切点概率，照抄 docx）。 */
 export const LEVEL_THRESHOLDS = Object.freeze([0.0085, 0.02, 0.03, 0.04, 0.06, 0.08, 0.1]);
+
+/**
+ * 第二套阈值：**按人眼瞬时记忆定标**（see-now 0.2.0 里先做的，这里同步过来）。
+ *
+ * 端点不是拍脑袋的：一格代表的时间**最多 3 秒**（Pöppel 的"主观现在" 2~3 秒，
+ * 电影镜头时长本身就有 ~3 秒的偏好）、**最少 0.3 秒**（注意眨眼 200~500 ms、图标记忆的
+ * 部分报告优势在 250~500 ms 内消失 —— 比这更近的两次变化人眼当成一次），中间六道按等比
+ * （公比 1.4678，时长辨别服从 Weber 律）。
+ *
+ * **单位换算是关键**：see-now 那边用「刀/秒」，这边用「每帧概率」，两者差一个 fps。
+ * 这里是把 see-now 的表除以 30 得到的 —— 和 docx 那套的换算关系完全一致
+ * （0.26/30 = 0.00867 ≈ 0.0085、3.0/30 = 0.1），所以形状没被改，只是端点内收。
+ *
+ * 实测（see-now 60 秒素材、同样留帧数）：**张数 -14%~-18%，平均档位 +0.5**（格子小一档）。
+ * 无切点的素材两套完全一致。默认仍是 docx —— 想压 token 再切过去。
+ */
+export const PERCEPTUAL_THRESHOLDS = Object.freeze([
+  0.0111, 0.0163, 0.0239, 0.0351, 0.0516, 0.0757, 0.1111,
+]);
+
+/** 可选的阈值表。加新表在这里登记，`thresholdsFor()` 是唯一入口。 */
+export const TIER_CURVES = Object.freeze({
+  docx: LEVEL_THRESHOLDS,
+  perceptual: PERCEPTUAL_THRESHOLDS,
+});
+
+/** `video.json` 里 `storyboard.tierCurve` 认的值。 */
+export const TIER_CURVE_KEYS = Object.freeze(['docx', 'perceptual']);
+
+/**
+ * 名字 → 阈值表。**认不出来的名字一律退回 docx**，不抛 ——
+ * 配置写错不该让整个分镜失败，宁可跑默认那套。
+ */
+export function thresholdsFor(curve) {
+  return TIER_CURVES[String(curve ?? '').trim()] ?? LEVEL_THRESHOLDS;
+}
 /** 滞回：升档要越过 +(1+h)，降档要跌穿 −(1−h)，免得在阈值附近反复横跳。 */
 export const HYSTERESIS = 0.05;
 /** 切点密度的积分窗（帧）。docx 的 dt = 100。 */
