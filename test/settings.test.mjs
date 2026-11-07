@@ -90,6 +90,11 @@ test('settings: video.json 端口与 launchBrowser 合并写入', () => {
   assert.equal(writeVideoSettings({ cutFloor: 0 }, env).cutFloor, null);
   assert.equal(readVideoSettings(env).storyboardAuto, false, '清 cutFloor 不能顺带把 auto 重置');
 
+  // tierMap：非整数键/值必须直接拒绝，不能把 NaN 写进文件（issue #83）
+  assert.throws(() => writeVideoSettings({ tierMap: { foo: 1 } }, env), /tierMap 的档位必须是 1-8 的整数/);
+  assert.throws(() => writeVideoSettings({ tierMap: { 1: 'bar' } }, env), /tierMap 的目标档位必须是 1-8 的整数/);
+  assert.deepEqual(writeVideoSettings({ tierMap: { 1: 3, 5: 4 } }, env).tierMap, { 1: 3, 5: 4 });
+
   const overridden = readVideoSettings({
     ...env,
     DSH_VIDEO_COOKIES: 'D:/env/cookies.txt',
