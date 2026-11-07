@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Video Storyboard",
+    "description": "Turn a video into citable storyboard images: one frame per shot, packed into as few images as possible, with a timestamped transcript index.",
+    "detail": "docs/plugin.md"
+  }
+}

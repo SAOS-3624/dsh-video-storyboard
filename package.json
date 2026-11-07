@@ -82,7 +82,9 @@
     "./ytdlp": "./src/storyboard/ytdlp.js",
     "./python": "./src/storyboard/python.js",
     "./browser-time": "./src/storyboard/browser-time.js",
-    "./transcript-pass": "./src/storyboard/transcript-pass.js"
+    "./transcript-pass": "./src/storyboard/transcript-pass.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "bin": {
     "dsh-video-scan": "./bin/scan-video.mjs",
@@ -95,6 +97,7 @@
     "bin",
     "scripts",
     "docs",
+    "locale",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md",
