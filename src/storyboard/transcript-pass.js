@@ -38,6 +38,30 @@ const cutRange = (segments, from, to) => (Array.isArray(segments) ? segments : [
   .filter((s) => Number(s.to) > from && Number(s.from) < to);
 
 /**
+ * 站点字幕没拿到、又不会跑 ASR 时，`source` 该写什么（纯函数，好测）。
+ *
+ * `no-key` 的含义是"**没尝试**"（没配 ASR）。而 `no-ytdlp` / `failed` 是"**尝试了、但抓字幕
+ * 这一步坏了**"—— 两者对用户是完全相反的动作：一个去配听音服务，一个去修 yt-dlp。
+ * 以前它们长得一模一样，只能靠猜（issue #86）。
+ *
+ * `no-subs` 不算坏：那确实是"这条片子没有站点字幕"，写 `no-key` 是对的。
+ *
+ * @param {{remote?:{ok?:boolean,reason?:string,detail?:string}|null, willTranscribe?:boolean}} o
+ * @returns {{source:string, reason?:string, detail?:string}|null} `null` = 交给 ASR，别下结论
+ */
+export function subtitleMissSource({ remote = null, willTranscribe = false } = {}) {
+  if (willTranscribe) return null;
+  if (remote && !remote.ok && (remote.reason === 'no-ytdlp' || remote.reason === 'failed')) {
+    return {
+      source: 'subtitle-failed',
+      reason: String(remote.reason),
+      ...(remote.detail ? { detail: String(remote.detail).slice(0, 300) } : {}),
+    };
+  }
+  return { source: 'no-key' };
+}
+
+/**
  * 这一窗口的字从哪来（**决定，不扫图、不取帧**）。
  *
  * @returns {Promise<{transcriptInfo:object|null, textInSilence:number,
@@ -97,6 +121,14 @@ export async function resolveTranscript({
       // 有字幕但要登录：这个事实必须让用户看到，否则会以为"这视频没字幕"
       subtitleNeedsLogin = true;
     }
+    /**
+     * **抓字幕这一步自己坏了**（跟"这视频没字幕"是两件事）。
+     *
+     * `fetchOnce` 的四种 reason 里，只有 `needs-login` 以前会被单独提示；
+     * `no-ytdlp` / `failed` 全都一路掉到 `no-key`，而 `no-key` 的含义是
+     * "没配 ASR、压根没尝试转写" —— 用户看到它就去配 ASR，方向完全错（issue #86）。
+     * 判定收在 `subtitleMissSource()` 里（纯函数，单测直接咬）。
+     */
     if (subtitle) {
       transcriptInfo = {
         segments: subtitle,
@@ -107,7 +139,7 @@ export async function resolveTranscript({
       // 压根不会转写（云端没配 key）—— 跟"跑了但没听懂"是两码事。
       // 旧代码走的是 withCache → null 空壳 → asr.empty → 'asr-empty'，清单于是写
       // "ASR ran and found no speech here"，一个字都没听过却说"这片子没人说话"。
-      transcriptInfo = { segments: [], source: 'no-key' };
+      transcriptInfo = { segments: [], ...subtitleMissSource({ remote, willTranscribe: false }) };
     } else {
       try {
         // 切片调用：单次请求过长会让时间码整体压早（实测 299s 压早 13s）。

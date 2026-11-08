@@ -265,6 +265,48 @@ test('formatManifest: no-key 说"没跑"，且不许出现"跑了没听到话"',
   assert.ok(!/may be misheard/.test(text), '没跑就不该出现"可能听错"');
 });
 
+/**
+ * 抓站点字幕失败 ≠ 没配 ASR ≠ 这条片子没台词（issue #86）。
+ * 三个动作对用户完全相反：一个去装 yt-dlp，一个去配听音服务。
+ */
+test('formatManifest: subtitle-failed 明确指出"抓字幕坏了"，并给出按 reason 的动作', () => {
+  const r = makeResult({ cells: 4 });
+  r.transcript = { source: 'subtitle-failed', segments: 0, reason: 'no-ytdlp' };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /site subtitles FAILED \(no-ytdlp\)/);
+  assert.match(text, /NOT "the video has no subtitles" and NOT "no ASR key"/);
+  assert.match(text, /yt-dlp/);
+  assert.match(text, /DSH_YTDLP_PATH/);
+  // 不能退化成"没配 ASR"那套话术
+  assert.ok(!/NOT attempted/.test(text), '这是"尝试了但坏了"，不是"没尝试"');
+  assert.ok(!/ASR ran and found no speech/.test(text));
+});
+
+test('formatManifest: failed 带 detail 时把原文带出来', () => {
+  const r = makeResult({ cells: 4 });
+  r.transcript = { source: 'subtitle-failed', segments: 0, reason: 'failed', detail: 'ENOSPC: no space left' };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /site subtitles FAILED \(failed\): ENOSPC/);
+  assert.match(text, /execution failed|执行失败/);
+});
+
+test('formatManifest: 清单带上具体走了哪条轨（site-cc:ai-zh / embedded）', () => {
+  const r = makeResult({ cells: 4 });
+  r.transcript = { source: 'subtitle', segments: 3, model: 'site-cc:ai-zh' };
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /transcript="subtitle"/);
+  assert.match(text, /transcript-model="site-cc:ai-zh"/);
+
+  const r2 = makeResult({ cells: 4 });
+  r2.transcript = { source: 'subtitle', segments: 3, model: 'embedded' };
+  assert.match(formatManifest(r2, { maxChars: 200_000 }), /transcript-model="embedded"/);
+
+  // 没有 model 时不写这个属性（别在清单里留个空壳）
+  const r3 = makeResult({ cells: 4 });
+  r3.transcript = { source: 'asr', segments: 3 };
+  assert.ok(!/transcript-model=/.test(formatManifest(r3, { maxChars: 200_000 })));
+});
+
 test('formatManifest: 未合流的 DASH 音频指向 ffmpeg，而不是让人换 cookies', () => {
   const r = makeResult({ cells: 4 });
   r.source = { kind: 'url', audioMissing: true, audioMissingReason: 'unmerged-dash' };

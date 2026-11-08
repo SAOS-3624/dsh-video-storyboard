@@ -624,6 +624,9 @@ export function formatManifest(result, {
       // 音轨到底在不在，是这一层最容易被误读的事实（"no-key" 常被读成"视频没声音"）
       ` audio="${info?.hasAudio ? 'present' : 'absent'}"` +
       `${result.transcript?.source ? ` transcript="${result.transcript.source}"` : ''}` +
+      // 具体走了哪条轨（`site-cc:ai-zh` / `embedded` / `file:srt`）。`source` 只说"字幕"，
+      // 不说是站点 CC 还是容器内嵌 —— 排查时这两件事的处理方式完全不同（issue #86）
+      `${result.transcript?.model ? ` transcript-model="${result.transcript.model}"` : ''}` +
       (cellRange ? ` cells="${lo}-${hi} of ${total}"` : '') +
       (result.cuts?.length
         ? ` cuts="${result.cuts.length} (avg ${(result.window.duration / Math.max(1, result.cuts.length)).toFixed(1)}s)"`
@@ -1017,6 +1020,24 @@ export function formatManifest(result, {
     lines.push(`transcript unavailable: ${result.transcript.error ?? 'ASR call failed'}`);
     lines.push('  → 告诉用户：听音服务连不上（装了但没启动，或地址/端口不对），'
       + '不是这条片子没人说话 —— 起一下本机服务就好。');
+  }
+  if (result.transcript?.source === 'subtitle-failed') {
+    /**
+     * **抓站点字幕这一步自己坏了**，不是"这视频没字幕"，也不是"没配 ASR"（issue #86）。
+     *
+     * 这两个动作对用户是完全相反的：一个去装/修 yt-dlp，一个去配听音服务。
+     * 以前它和 `no-key` 长得一模一样，只能靠猜。
+     */
+    const why = String(result.transcript.reason ?? 'failed');
+    const detail = String(result.transcript.detail ?? '').trim();
+    lines.push(`transcript: site subtitles FAILED (${why})` +
+      (detail ? `: ${detail.slice(0, 200)}` : '') +
+      ' — this is NOT "the video has no subtitles" and NOT "no ASR key": the subtitle fetch itself broke.');
+    lines.push(why === 'no-ytdlp'
+      ? '  → 告诉用户：这台机器上找不到 yt-dlp（读 B 站 CC 字幕要它）。装一个，或者把路径写进 '
+        + 'DSH_YTDLP_PATH / `~/.dsh/video.json`；也可以直接给 ASR 配一个本地服务，两条路都行。'
+      : '  → 告诉用户：yt-dlp 装了但这次执行失败了（常见是子进程写不进临时目录、或 cookie 文件读不了）。'
+        + '先看上面 detail 里的原文；临时可以让它用本地文件跑，或先把 ASR 配上。');
   }
   if (result.transcript?.source === 'no-key') {
     lines.push(`transcript: NOT attempted — this ASR backend needs a key and none is configured, so ` +

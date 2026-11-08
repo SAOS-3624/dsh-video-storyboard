@@ -45,7 +45,7 @@ function configuredCookies(env = process.env) {
   return null;
 }
 
-/** 同一支视频只试一次：失败（尤其 needs-login）就别每次调用都白等 5 秒 */
+/** 同一支视频只试一次：**成功和"确实没字幕"才记**，环境类失败会重试（见 `memoizable`） */
 const memo = new Map();
 
 export async function fetchRemoteSubtitles({
@@ -72,9 +72,27 @@ export async function fetchRemoteSubtitles({
     }
   }
 
-  // "要登录"不要进缓存：用户可能下一秒就去登录了，缓存住会让他以为没生效
-  if (result.ok || result.reason !== 'needs-login') memo.set(key, result);
+  /**
+   * 缓存的是"**这条 URL 的结论**"，不是"这台机器此刻的状况"。
+   *
+   * - 成功进缓存：省掉下一次 5 秒的 yt-dlp；
+   * - `no-subs` 进缓存：这确实是"这条片子没有站点字幕"，不会因为用户操作而变；
+   * - `needs-login` **不进**：用户可能下一秒就去登录（原有逻辑）；
+   * - `no-ytdlp` / `failed` **也不进**（issue #86）：前者是没装工具，后者是
+   *   "跑了但写临时文件失败"这类瞬时环境问题 —— 用户修好之后，同一 URL 在同一个
+   *   进程里永远不重试，表现就是"改了也没用"。
+   */
+  if (memoizable(result)) memo.set(key, result);
   return result;
+}
+
+/**
+ * 这条结论值不值得进 memo（纯函数，单测直接咬）。
+ *
+ * 判据是"**结论会不会因为用户修环境而变**"：会变的一律不缓存。
+ */
+export function memoizable(result) {
+  return Boolean(result?.ok) || result?.reason === 'no-subs';
 }
 
 async function fetchOnce({ url, cookies, timeoutMs, langs }) {
