@@ -277,10 +277,14 @@ export function writeVideoSettings(patch = {}, env = process.env) {
     const clean = {};
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
       for (const [k, v] of Object.entries(raw)) {
-        const from = Math.round(Number(k));
-        const to = Math.round(Number(v));
-        if (from < 1 || from > 8) throw new Error(`tierMap 的档位必须是 1-8（收到 ${k}）`);
-        if (to < 1 || to > 8) throw new Error(`tierMap 的目标档位必须是 1-8（收到 ${v}）`);
+        const from = Number(k);
+        const to = Number(v);
+        if (!Number.isInteger(from) || from < 1 || from > 8) {
+          throw new Error(`tierMap 的档位必须是 1-8 的整数（收到 ${k}）`);
+        }
+        if (!Number.isInteger(to) || to < 1 || to > 8) {
+          throw new Error(`tierMap 的目标档位必须是 1-8 的整数（收到 ${v}）`);
+        }
         if (from !== to) clean[from] = to;
       }
     }
