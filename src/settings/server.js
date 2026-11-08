@@ -11,11 +11,10 @@
  *  - 不做“一键安装”，避免把任意命令执行暴露给浏览器。
  */
 
-import { randomBytes } from 'node:crypto';
-
 import { checkEnvironment } from './deps.js';
 import { configPaths, readAsrSettings, readVideoSettings, writeAsrSettings, writeVideoSettings } from './config.js';
 import { settingsPage } from './page.js';
+import { settingsToken } from './token.js';
 
 const PAGE_PATH = '/dsh-video-storyboard/settings';
 const API_PREFIX = PAGE_PATH + '/api';
@@ -111,7 +110,7 @@ function statePayload(ctx, env) {
 export function createSettingsPage({ ctx, env = process.env, log = () => {} } = {}) {
   const webServer = ctx?.get?.('webServer');
   if (!webServer || typeof webServer.register !== 'function') return null;
-  const token = randomBytes(32).toString('hex');
+  const token = settingsToken(env);
   let disposed = false;
 
   const handle = async (req, res) => {
