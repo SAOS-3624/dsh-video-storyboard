@@ -22,6 +22,22 @@ const run = promisify(execFile);
 let hasFfmpeg = false;
 try { await run(DEFAULT_FFMPEG, ['-version']); hasFfmpeg = true; } catch { /* 无 */ }
 
+/** 两个镜头、只有一个切点的长片：`maxFrames` 不能把补位关掉（issue #87）。 */
+async function makeOneCutFixture(dir, seconds = 30) {
+  const out = join(dir, 'onecut.mp4');
+  const half = seconds / 2;
+  const args = ['-hide_banner', '-v', 'error', '-y'];
+  for (const c of ['0xffffff', '0x000000']) {
+    args.push('-f', 'lavfi', '-i', `color=c=${c}:s=320x180:r=5:d=${half}`);
+  }
+  args.push(
+    '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0[v]',
+    '-map', '[v]', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', out,
+  );
+  await run(DEFAULT_FFMPEG, args);
+  return out;
+}
+
 /** 6 个镜头各 1s，其中一个带 0.5s 的模糊（测 sharp 取帧） */
 async function makeFixture(dir) {
   const out = join(dir, 'f.mp4');
@@ -71,6 +87,19 @@ test('e2e: runStoryboard 出一张图 + 完整清单', async (t) => {
   assert.match(text, /sha256="[0-9a-f]{64}"/);
   assert.match(text, /plan: strategy=compact/);
   assert.match(text, /tiers /, '档位分布要写进清单');
+});
+
+test('e2e: maxFrames 只是上限，不会关掉补位（#87）', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pipe-onecut-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeOneCutFixture(dir);
+
+  const auto = await runStoryboard({ input: file, encode: false });
+  const capped = await runStoryboard({ input: file, maxFrames: 12, encode: false });
+  assert.ok(auto.sheets[0].cells.length > 1, '默认应该补出多帧');
+  assert.equal(capped.sheets[0].cells.length, auto.sheets[0].cells.length,
+    '上限 12 不该比默认更少；补位仍可运行，只是不能越过上限');
 });
 
 test('e2e: 交给附件的必须是真 PNG（裸 RGB 会被判 malformed）', async (t) => {
