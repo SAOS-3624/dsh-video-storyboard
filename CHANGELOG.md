@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.7.1] - 2026-11-08
+
+> 这一版全是社区反馈的修复，没有新参数。三件事：**字幕抓取失败不再冒充「没配 ASR」**、
+> 设置页的 token 不再一重启就失效、`tierMap` 不再把 `NaN` 写进配置。
+
+### Fixed — 站点字幕抓取失败被静默降级成 `transcript="no-key"`（#86，PR #84 之后的实报）
+
+`no-key` 的含义是「**没尝试**转写」（没配 ASR）；而 `no-ytdlp` / `failed` 是「尝试了、但抓字幕
+这一步坏了」。两者以前在清单里长得一模一样，用户看到 `no-key` 就去配 ASR，实际该修的是 yt-dlp。
+
+- 新增 `transcript="subtitle-failed"`，带 `reason`（`no-ytdlp` / `failed`）和 `detail`；
+  只在「抓字幕自己坏了 + 没有内嵌字幕 + 又不会跑 ASR」时出现。`no-subs` 仍是 `no-key`
+  —— 那确实是「这条片子没有站点字幕」；
+- 清单里对应一段 `site subtitles FAILED (…)`，按 reason 给动作（装 yt-dlp / 读 detail 原文）；
+- 字幕 memo **只缓存成功和 `no-subs`**：`no-ytdlp` / `failed` / `needs-login` 不再缓存，
+  否则用户装好 yt-dlp 之后同一 URL 在本进程里永远不重试（「改了也没用」）；
+- 清单新增 `transcript-model="site-cc:ai-zh"` / `"embedded"`，站点 CC 和容器内嵌分得开。
+
+### Fixed — `tierMap` 接受非整数键值，把 `NaN` 写进 video.json（#83，PR #84）
+
+旧代码 `Math.round(Number(k))`：`foo` 变 `NaN`、`3.4` 悄悄四舍五入成 3。`NaN` 键写进去之后
+档位映射整段失效，而且没有任何提示。现在只收 1–8 的整数，非法值直接抛错、由设置页回显。
+
+### Fixed — 设置页 token 一重启就失效（PR #85）
+
+token 以前每次 `createSettingsPage()` 都新生成。宿主一重启，浏览器里已经打开的那个设置页
+就带着旧 token，保存全部报「token 无效」。现在落到 `$DSH_HOME/video-settings-token`
+（0600），跨进程稳定。
+
+### Added — 插件市场的本地化元数据与详情页（PR #85）
+
+`locale/{zh,en}.json` + `docs/plugin*.md`：详情页不再直接把 README 铺出来。
+`exports` 补 `./package.json` 与 `./locale/*.json`，`files` 加 `locale`。
+
 ## [0.7.0] - 2026-11-07
 
 > 这一版只有一件「新功能」，其余全是补课：**七道阈值多了一套按人眼感知定标的表**；
