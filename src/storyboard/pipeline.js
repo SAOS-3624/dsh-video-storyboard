@@ -558,9 +558,11 @@ export async function runStoryboard(opts) {
   };
   const deficitOf = (plan) => binFills(plan).reduce((n, [, a]) => n + Math.max(0, FILL_TARGET - a), 0);
 
-  const fillGaps = (b) => {
+  const fillGaps = (b, maxFrames = Infinity) => {
     let cur = b;
     const startFrames = b.segs.length;
+    /** 补位也不许越过调用方给的 maxFrames（默认 Infinity 等于不限）。 */
+    const fits = (segs) => segs.length <= maxFrames;
     // **不许因为补位多开图**：多一张就多付一张的钱（≈233 @800×450），补位只该在现有张数里找缝。
     const binCap = b.plan.bins;
     for (let round = 0; round < 10; round += 1) {
@@ -593,6 +595,7 @@ export async function runStoryboard(opts) {
           const segs2 = [...cur.segs.slice(0, first), ...newSegs, ...cur.segs.slice(last + 1)];
           const tiers2 = [...cur.tiers.slice(0, first),
             ...new Array(small).fill(tier), ...cur.tiers.slice(last + 1)];
+          if (!fits(segs2)) continue;
           const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
           if (process.env.DSH_PLAN_DEBUG) {
             console.error(`[fillGaps] coarsen bin=${worst.bin} ${nb}->${small} tier=${tier}`
@@ -633,6 +636,7 @@ export async function runStoryboard(opts) {
           const segs2 = [...cur.segs.slice(0, first), ...newSegs, ...cur.segs.slice(last + 1)];
           const tiers2 = [...cur.tiers.slice(0, first),
             ...new Array(sq).fill(tier), ...cur.tiers.slice(last + 1)];
+          if (!fits(segs2)) continue;
           const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
           if (process.env.DSH_PLAN_DEBUG) {
             console.error(`[fillGaps] uniform bin=${worst.bin} ${nb}->${sq} tier=${tier}`
@@ -678,6 +682,7 @@ export async function runStoryboard(opts) {
           segs2.splice(c2.i, 1, ...ps);
           tiers2.splice(c2.i, 1, cur.tiers[c2.i], cur.tiers[c2.i]);
         }
+        if (!fits(segs2)) continue;
         const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
         if (process.env.DSH_PLAN_DEBUG) {
           console.error(`[fillGaps] bin=${worst.bin} n=${n} toSquare=+${toSquare}`
@@ -699,6 +704,7 @@ export async function runStoryboard(opts) {
           const parts = splitSeg(cur.segs[pick.i], frac);
           segs2.splice(pick.i, 1, ...parts);
           tiers2.splice(pick.i, 1, cur.tiers[pick.i], 0);
+          if (!fits(segs2)) continue;
           const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
           if (process.env.DSH_PLAN_DEBUG) {
             console.error(`[fillGaps] bin=${worst.bin} free-filler seg=${pick.i}`
@@ -717,8 +723,9 @@ export async function runStoryboard(opts) {
     }
     return cur;
   };
-  // **显式限帧就不补**：调用方说"最多 4 帧"就是 4 帧，补到 5 帧是违约。
-  if (!Number.isFinite(capFrames)) built = fillGaps(built);
+  // 补位不能只在不限帧时跑：显式给 maxFrames 时同样可以补到上限，
+  // 否则 `maxFrames: 12` 反而比默认的 4 帧更少（issue #87）。补位内部有 fits() 守上限。
+  built = fillGaps(built, capFrames);
 
   // ---- auto 的张数预算：按时长压，但**不许把画面压成色块**
   //
