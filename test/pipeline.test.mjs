@@ -100,6 +100,16 @@ test('e2e: maxFrames 只是上限，不会关掉补位（#87）', async (t) => {
   assert.ok(auto.sheets[0].cells.length > 1, '默认应该补出多帧');
   assert.equal(capped.sheets[0].cells.length, auto.sheets[0].cells.length,
     '上限 12 不该比默认更少；补位仍可运行，只是不能越过上限');
+
+  // 反向也要成立：上限小的时候补位**不许**越过它。只验"不再变少"是不够的 ——
+  // 把 fits() 写错成恒真，上面那条照样绿。
+  const tight = await runStoryboard({ input: file, maxFrames: 2, encode: false });
+  assert.ok(tight.sheets[0].cells.length <= 2,
+    `maxFrames:2 出来了 ${tight.sheets[0].cells.length} 帧 —— 补位越过了上限`);
+
+  // 压张数那一路（auto 预算）以前也把补位关掉，同一个 bug 的第二个入口
+  const sheets = (r) => r.sheets.length;
+  assert.equal(sheets(capped), sheets(auto), '上限不该让张数变多（补位不许新开图）');
 });
 
 test('e2e: 交给附件的必须是真 PNG（裸 RGB 会被判 malformed）', async (t) => {

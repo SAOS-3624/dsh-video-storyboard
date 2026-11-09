@@ -690,6 +690,75 @@ export function framesFromBounds({
 }
 
 /**
+ * **静态长镜头的密度兜底**（issue #87）。
+ *
+ * 病：密度只由切点推。一段 PPT / 课件 / 单机位讲座，全片可能只有 1 个切点，
+ * 于是整段被当成"一个镜头"，钉死 1 帧/格、一格 40 秒 —— 中间翻过去的十几页全看不见，
+ * 而且清单里没有任何提示，调用方以为"成功了"。
+ *
+ * 这不是"切点检测不够灵"：幻灯片翻页是**内容替换**，不是镜头变化；扫描器的面积门槛
+ * （`cutAbs` / mc 80）本来就是给影视素材定的。所以这里做的是**按时间兜底**，不是调阈值：
+ * 切点撑不起密度时，至少每 `STATIC_SHOT_MAX_SEC` 秒留一帧。
+ *
+ * 只在"整个窗口 ≤1 个真切点"时生效，且帧数封顶 `STATIC_SHOT_MAX_FRAMES` ——
+ * 一段 40 分钟的单机位讲座不该按时间切出 80 帧。
+ */
+export const STATIC_SHOT_MAX_SEC = 30;
+export const STATIC_SHOT_MAX_FRAMES = 8;
+/** 短于这个长度的窗口不兜底：十几秒的单镜头本来就该一帧 */
+export const STATIC_SHOT_MIN_SEC = 60;
+
+/**
+ * 这个窗口要不要走时间兜底（纯函数，好测）。
+ *
+ * @param {{segs?:Array<{from:number,to:number,cut?:boolean}>, duration?:number,
+ *          minSec?:number, maxSec?:number}} o
+ * @returns {boolean}
+ */
+export function needsTimeFloor({ segs = [], duration = 0, minSec = STATIC_SHOT_MIN_SEC,
+  maxSec = STATIC_SHOT_MAX_SEC } = {}) {
+  if (!(duration >= minSec)) return false;
+  const realCuts = segs.filter((s) => s?.cut === true).length;
+  if (realCuts > 1) return false;                       // 密度能算出来，不插手
+  return segs.some((s) => (Number(s.to) - Number(s.from)) > maxSec);
+}
+
+/**
+ * 把过长的段按时间切开（纯函数，不改入参）。
+ *
+ * 每次都切**当前最长**的那一段，切成两半，直到都 ≤ `maxSec` 或总帧数到 `cap`。
+ * 切出来的新段 `via: 'time'`（清单靠它说"这段是按时间兜底的"），
+ * 只有第一段继承原来的 `cut` 标记。
+ *
+ * @param {Array<{from:number,to:number,cut?:boolean,via?:string}>} segs
+ * @param {{maxSec?:number, cap?:number}} [o]
+ */
+export function splitStaticShots(segs, { maxSec = STATIC_SHOT_MAX_SEC,
+  cap = STATIC_SHOT_MAX_FRAMES } = {}) {
+  if (!Array.isArray(segs) || segs.length === 0) return segs;
+  const limit = Math.max(1, Math.min(Number(cap) || segs.length, 64));
+  if (segs.length >= limit) return segs;
+  const out = segs.map((s) => ({ ...s }));
+  let guard = 0;
+  while (out.length < limit && guard < 64) {
+    guard += 1;
+    let k = -1;
+    for (let i = 0; i < out.length; i += 1) {
+      const len = out[i].to - out[i].from;
+      if (len > maxSec && (k === -1 || len > out[k].to - out[k].from)) k = i;
+    }
+    if (k === -1) break;                                 // 没有超标段了
+    const s = out[k];
+    const mid = (s.from + s.to) / 2;
+    if (!(mid > s.from && mid < s.to)) break;
+    out.splice(k, 1,
+      { ...s, to: mid, t: (s.from + mid) / 2, via: 'time' },
+      { ...s, from: mid, t: (mid + s.to) / 2, cut: false, via: 'time' });
+  }
+  return out;
+}
+
+/**
  * **积分假切点切出来的帧，档位提 `MARK_BOOST`（3）档。**
  *
  * 真切点是"换镜头"，假切点是"这一段一直在变、攒够了才切"——后者没有硬边界，

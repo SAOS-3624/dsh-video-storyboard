@@ -716,6 +716,20 @@ export function formatManifest(result, {
   // 格子小到看不清时**主动说**，并给三条可执行的改法（旧版对"看不清"完全沉默）
   const advice = readabilityAdvice(result.plan);
   if (advice) lines.push(advice);
+  /**
+   * **静态长镜头：密度是按时间兜底的，不是数出来的**（issue #87）。
+   *
+   * 不说这一句，模型会以为"这段只有 N 个镜头"，于是照着 N 个格子讲 —— 而 PPT / 课件
+   * 这种片子一格里翻过好几页，中间的内容它根本没见过。说清楚之后它至少知道
+   * "要看细节得 `video_zoom`，或者 `from`+`segment` 分段扫"。
+   */
+  if (result.plan?.staticLongshot) {
+    const { frames, maxSec } = result.plan.staticLongshot;
+    lines.push(`density: static-longshot fallback — this window has ≤1 hard cut, so frame placement `
+      + `cannot come from shot changes. Split by time instead (${frames} frames, ≤${maxSec}s each).`);
+    lines.push('  → 这类片子（PPT / 课件 / 单机位讲座）翻页不产生切点，一格里可能翻过好几页。'
+      + '要看清某一页：`video_zoom` 带上那一格的 from/to；要逐页扫：`from` + `segment` 分段调。');
+  }
   // 成本只报两件事：图数×token、ASR 秒数。CPU 秒数对模型没有决策价值。
   {
     const cost = [];

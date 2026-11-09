@@ -36,6 +36,7 @@ import {
   applyMarkBoost, applyStrategy, applyTierMap, autoSheetCap, shouldForceSheetCap,
   fitCanvas, pickAutoStrategy, resolveStrategy,
   framesFromBounds, integralMarks, levelAt, levelCurve, readabilityOf, tierHistogram, thresholdsFor,
+  needsTimeFloor, splitStaticShots, STATIC_SHOT_MAX_FRAMES, STATIC_SHOT_MAX_SEC,
 } from './tiers.js';
 import { DEFAULT_STRETCH, solve, toRects } from './pack.js';
 import { remember } from './memory.js';
@@ -401,11 +402,33 @@ export async function runStoryboard(opts) {
     return out;
   };
 
+  /**
+   * 这一版是不是走了"静态长镜头按时间兜底"（issue #87）。由 `build()` 每次重算，
+   * 最终留下的是最后一版（也就是真正被采用的那一版）的值。
+   */
+  let timeFloor = null;
+
   const build = (cap) => {
     let sg = framesFromBounds({
       duration: winDur, start: winStart, cuts: absCuts, marks: sampleMarks, maxFrames: cap,
     });
     if (Number(minFrames) > 1) sg = ensureMinFrames(sg, Math.min(24, Math.round(Number(minFrames))));
+    /**
+     * **切点撑不起密度时按时间兜底**（issue #87）。
+     *
+     * 一段 164 秒的幻灯片讲解只有 1 个切点 → 整片被当成一个镜头、一格 41 秒，
+     * 中间翻过去的页面全看不见，清单还不吭声。这里只在这个窗口"几乎没有切点"时
+     * 按时间切开（每段 ≤ 30 秒，总量封顶 8 帧；调用方给了 maxFrames 就听他的）。
+     */
+    const floored = needsTimeFloor({ segs: sg, duration: winDur });
+    if (floored) {
+      sg = splitStaticShots(sg, {
+        cap: Number.isFinite(capFrames) ? Math.min(capFrames, STATIC_SHOT_MAX_FRAMES) : STATIC_SHOT_MAX_FRAMES,
+      });
+    }
+    // 清单要说出去：这段的密度不是"算出来的"，是"按时间兜底撑起来的"。
+    // **记在这里而不是回头从 segs 里找 `via:'time'`**：补位会重组段、把标记冲掉。
+    timeFloor = floored ? { frames: sg.length, maxSec: STATIC_SHOT_MAX_SEC } : null;
     // 档位 = 切点密度；假切点段再加 MARK_BOOST 档（那里画面在连续变化，一帧代表不了多久）
     const base = sg.map((s) => levelAt(curve, s.t - winStart));
     const raw = applyMarkBoost(base, sg);
@@ -740,7 +763,10 @@ export async function runStoryboard(opts) {
     const tidy = (cap) => {
       let b = buildWithin(autoName, cap);
       b = trimTail(b);
-      if (!Number.isFinite(capFrames)) b = fillGaps(b);
+      // 和上面那条一样：压张数时补位也照跑，只受 `capFrames` 约束。
+      // 原来这里是 `if (!Number.isFinite(capFrames)) b = fillGaps(b)` —— 显式给 maxFrames 时
+      // 压张数这一路又会把补位关掉，同一个 bug 换了个入口（#87）。
+      b = fillGaps(b, capFrames);
       return b;
     };
     // 预算：调用方显式给的 maxSheets 优先，否则就是 autoSheetCap 那个数。
@@ -849,6 +875,8 @@ export async function runStoryboard(opts) {
     // 清单里要把"不限"说出来：写个 0 会让模型以为只能取 0 帧
     maxFrames: Number.isFinite(capFrames) ? capFrames : 0,
     markBoost: MARK_BOOST,
+    // 密度兜底：`{ frames, maxSec }` —— 清单据此说明"这段没有切点，是按时间撑起来的"
+    ...(timeFloor ? { staticLongshot: timeFloor } : {}),
     budget,
     // 地板抬升：{ requested: 230000, used: 295936 } —— 清单要说明"比它更小不省钱"
     ...(budgetFloorRaisedFrom && budgetFloorRaisedFrom !== budget
