@@ -123,9 +123,13 @@ test('integralMarks: 完全静止的片子一个点都不补', () => {
 
 test('integralMarks: 参考强度画面 → 大约每 equivSeconds 一个点', () => {
   // score 取 INTEGRAL_REF_SCORE 才是"中等强度画面"，此时间隔才该等于 equivSeconds。
-  // 阈值 = REF × fps × equivSeconds，攒够要 REF×fps×eq / (REF×fps) = eq 秒。
-  const series = Array.from({ length: 100 }, (_, i) => ({ t: i * 0.1, score: INTEGRAL_REF_SCORE }));
-  const marks = integralMarks({ duration: 10, series, equivSeconds: 5 });
+  //
+  // ⚠️ 构造必须是 **30fps**：`INTEGRAL_REF_SCORE` 就是按 30fps 素材标定的（见
+  // `INTEGRAL_BASE_FPS` 的注释），阈值为 `REF × 30 × eq`。真实素材的逐帧分与帧率
+  // 成反比（8fps 每帧 16 分、30fps 只有 4 分），所以"每帧恒 4 分"只在 30fps 下
+  // 代表中等强度画面；用 10fps + 每帧 4 分是虚构的低帧率低强度素材，攒不够是对的。
+  const series = Array.from({ length: 300 }, (_, i) => ({ t: i / 30, score: INTEGRAL_REF_SCORE }));
+  const marks = integralMarks({ duration: 10, series, equivSeconds: 5, fps: 30 });
   assert.ok(marks.length >= 1 && marks.length <= 3, `实得 ${marks.length}: ${marks}`);
   for (let i = 1; i < marks.length; i += 1) assert.ok(marks[i] > marks[i - 1]);
   if (marks.length >= 2) {
@@ -137,9 +141,10 @@ test('integralMarks: 参考强度画面 → 大约每 equivSeconds 一个点', (
 test('integralMarks: 阈值是**绝对值** —— 画面整体越快，点越多', () => {
   // 这是那条被修掉的病：以前阈值 = 全片平均变化量 × equivSeconds，阈值跟着画面一起涨，
   // 两者抵消 → 不管多快都是 equivSeconds 秒一个点（实测 2/s 到 64/s 全是 19 个）。
+  // 同上：30fps 构造（`INTEGRAL_REF_SCORE` 的标定帧率）
   const at = (score) => {
-    const series = Array.from({ length: 1200 }, (_, i) => ({ t: i / 12, score }));
-    return integralMarks({ duration: 100, series, equivSeconds: 6, fps: 12 }).length;
+    const series = Array.from({ length: 3000 }, (_, i) => ({ t: i / 30, score }));
+    return integralMarks({ duration: 100, series, equivSeconds: 6, fps: 30 }).length;
   };
   const slow = at(1);
   const ref = at(INTEGRAL_REF_SCORE);

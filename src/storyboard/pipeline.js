@@ -122,6 +122,14 @@ export async function runStoryboard(opts) {
     // 七道阈值取哪一套：`docx`（默认）/ `perceptual`（按人眼瞬时记忆定标）。
     // 见 tiers.js 的 PERCEPTUAL_THRESHOLDS —— 同一批帧换这套表会排成更少、更小的格子。
     tierCurve = null,
+    /**
+     * 帧率归一化（`~/.dsh/video.json` 的 `storyboard.timeNormalize`，默认开）。
+     *
+     * 关掉 = 老口径：窗宽恒 100 帧，于是 60fps 素材的窗只覆盖 1.67 秒、
+     * 算出的密度只有 30fps 的一半，档位整体偏低 2 档（格子面积差 4 倍）。
+     * 详见 `tiers.js` 头注释里的对照表。
+     */
+    timeNormalize = true,
     // 积分取帧（假切点）：真切点之间按"画面变化率的时间积分"补采样点，累够就触发、触发即清零。
     integral = true,
     integralSeconds = 6,
@@ -367,6 +375,7 @@ export async function runStoryboard(opts) {
   // 那会让最后一格覆盖半分钟却只给一帧。
   const curve = levelCurve({
     duration: winDur, fps: info.fps, cuts: absCuts, thresholds: thresholdsFor(tierCurve),
+    timeNormalize,
   });
   const canvas = fitCanvas(info.aspect, { maxSide: maxCanvasSide, budget });
   // 排布沿用"按行凑满"（fillRows: true）：放开它虽然填充率更高，但**张数会涨**（5 → 7），

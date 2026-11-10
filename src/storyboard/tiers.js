@@ -20,6 +20,27 @@
  *
  * 两者差一个 fps 常数，而 docs 里的数值是按帧给的。换 60fps 素材时用"刀/秒"会把
  * 判据整体平移一倍，所以这里严格按帧算，只在注释里换算成人话。
+ *
+ * ⚠️ **但"严格按帧算"的代价是：表只在 30fps 素材上是对的。**
+ *
+ * 窗宽是 `INTEGRAL_FRAMES = 100`（帧），切点时刻是秒 —— 于是：
+ *
+ * | 素材帧率 | 窗覆盖的秒数 | 每秒一刀时算出的概率 | 判成几档 |
+ * |---|---|---|---|
+ * | 24fps | 4.17 秒 | 高 | 5 档 |
+ * | 30fps | 3.33 秒 | 中（标定基准） | 4 档 |
+ * | 60fps | **1.67 秒** | **只有一半** | **2 档** |
+ * | 120fps | 0.83 秒 | 四分之一 | 2 档 |
+ *
+ * 也就是**同样一段画面，60fps 素材会被判成两档（格子面积是 30fps 的 4 倍）**，
+ * 一页只放得下 4 帧，"镜头越密格子越小"这件事在高帧率素材上直接失效。
+ * 60fps 在游戏录屏、运动视频、手机高帧率拍摄里很常见。
+ *
+ * 所以加了 `timeNormalize`（默认开）：把窗宽、平滑窗、阈值三样一起按
+ * `fps / 30` 折算，**30fps 时三个系数都是 1，行为逐位不变**；非 30fps 素材
+ * 会被拉回"30fps 标定"的含义上。实测 24 / 60 / 120fps 归一化后与 30fps 完全一致。
+ *
+ * 想回到老口径（不同帧率判不同档）就传 `timeNormalize: false`。
  */
 
 /** 7 道阈值 → 8 个档位（每帧的切点概率，照抄 docx）。 */
@@ -66,6 +87,12 @@ export const HYSTERESIS = 0.05;
 export const INTEGRAL_FRAMES = 100;
 /** 密度曲线的平滑窗（帧）。docx 的 movmean 窗口 50。 */
 export const SMOOTH_FRAMES = 50;
+
+/**
+ * 阈值表是按**这个帧率**标定的（docx 那句"0.0085 ≈ 3.3 秒一刀"就是 30fps 下算的）。
+ * `timeNormalize` 用它当基准做折算 —— 换基准等于换掉整套标定，别动。
+ */
+export const BASE_FPS = 30;
 
 export const TIER_MIN = 1;
 export const TIER_MAX = 8;
@@ -280,6 +307,7 @@ export function levelCurve({
   hysteresis = HYSTERESIS,
   integralFrames = INTEGRAL_FRAMES,
   smoothFrames = SMOOTH_FRAMES,
+  timeNormalize = true,
 } = {}) {
   if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
   const rate = Number(fps) > 0 ? Number(fps) : 30;
@@ -294,8 +322,20 @@ export function levelCurve({
   const cum = new Float64Array(n + 1);
   for (let i = 0; i < n; i += 1) cum[i + 1] = cum[i] + bin[i];
 
+  /**
+   * 帧率归一化：窗宽和阈值一起按 `rate / BASE_FPS` 折算。
+   *
+   * - 窗**帧数** × K（帧多了，但覆盖的秒数不变）
+   * - 阈值 ÷ K（同样的"刀/秒"，在更宽的窗里就是更小的概率）
+   *
+   * 30fps 时 K = 1，两个式子都是恒等 —— 现有行为逐位不变。
+   */
+  const K = timeNormalize ? rate / BASE_FPS : 1;
+  const th = timeNormalize ? thresholds.map((v) => v / K) : thresholds;
+  const framesK = (v) => Math.max(1, Math.round(v * K));
+
   // 2) 卷积 = 窗内切点数 / 窗宽（帧）→ "每帧切点概率"
-  const W = Math.max(1, Math.min(n, Math.round(integralFrames)));
+  const W = Math.max(1, Math.min(n, framesK(integralFrames)));
   const density = new Float64Array(n);
   for (let i = 0; i < n; i += 1) {
     const hi = Math.min(n, i + Math.ceil(W / 2));
@@ -304,7 +344,7 @@ export function levelCurve({
   }
 
   // 3) movmean 平滑
-  const S = Math.max(1, Math.min(n, Math.round(smoothFrames)));
+  const S = Math.max(1, Math.min(n, framesK(smoothFrames)));
   const pre = new Float64Array(n + 1);
   for (let i = 0; i < n; i += 1) pre[i + 1] = pre[i] + density[i];
   const smoothed = new Float64Array(n);
@@ -315,8 +355,8 @@ export function levelCurve({
   }
 
   // 4) 带滞回的状态机（照抄 docx 的 calc_levels_and_jumps）
-  const up = thresholds.map((v) => v * (1 + hysteresis));
-  const down = thresholds.map((v) => v * (1 - hysteresis));
+  const up = th.map((v) => v * (1 + hysteresis));
+  const down = th.map((v) => v * (1 - hysteresis));
   const countAtLeast = (val, arr) => {
     let k = 0;
     for (const v of arr) if (val >= v) k += 1;
@@ -334,7 +374,7 @@ export function levelCurve({
     }
     levels[i] = Math.max(TIER_MIN, Math.min(TIER_MAX, cur));
   }
-  return { fps: rate, frames: n, density, smoothed, levels, thresholds };
+  return { fps: rate, frames: n, density, smoothed, levels, thresholds: th, timeNormalize };
 }
 
 /** 某一时刻的档位（就近取帧）。 */
@@ -552,13 +592,25 @@ export function applyStrategy(tiers, strategy = DEFAULT_STRATEGY) {
 export const INTEGRAL_REF_SCORE = 4;
 
 /**
+ * 积分阈值是按**这个帧率**标的（`T = 4 × 30 × 6` 正好落在设计的"6 秒一个采样点"上）。
+ *
+ * 之前这里写的是"实际 fps"，于是 T 随帧率线性涨，而 `acc` 累的逐帧分本来就与
+ * 帧率成反比（帧间隔越短差越小）—— **Σscore 与 fps 无关**。两者相乘的结果是
+ * 高帧率永远攒不够（实测同一段 60 秒素材、每秒累计 120 分：12fps 出 24 个采样点、
+ * 30fps 出 10 个、60fps 只剩 5 个）。
+ */
+export const INTEGRAL_BASE_FPS = 30;
+
+/**
  * **积分采样点（假切点）**：沿时间累加画面变化率，累够阈值就记一个点、然后清零。
  *
  * 这是用户要的"积分取帧"，顺序上**排在真切点之后**：
  *   - 真切点先定边界（它们是硬切，不能动）；
  *   - 假切点只在真切点之间补，并且离真切点太近就不补（真切点自己已经是边界）。
  *
- * **阈值必须是绝对值**：`T = INTEGRAL_REF_SCORE × fps × equivSeconds`。
+ * **阈值必须是绝对值**：`T = INTEGRAL_REF_SCORE × INTEGRAL_BASE_FPS × equivSeconds`。
+ * 注意乘的是**基准帧率（30）而不是实际 fps** —— 逐帧分与 fps 成反比，Σscore 与 fps 无关，
+ * 乘实际 fps 会让高帧率素材的采样点直接消失（见 `INTEGRAL_BASE_FPS` 的注释）。
  *
  * 曾经写成 `T = 全片平均每秒变化量 × equivSeconds` —— 那是错的：画面动得越厉害，
  * 平均分越高，阈值也跟着涨，两者抵消，于是不管素材多快多慢，都是固定
@@ -576,7 +628,7 @@ export const INTEGRAL_REF_SCORE = 4;
  */
 export function integralMarks({
   duration, series = [], cuts = [], start = 0,
-  equivSeconds = 6, minGap = 0.8, skipNearCut = 0.35, fps,
+  equivSeconds = 6, minGap = 0.8, skipNearCut = 0.35, fps, timeNormalize = true,
 } = {}) {
   if (!(duration > 0)) throw new RangeError(`duration must be > 0, got ${duration}`);
   const pts = (Array.isArray(series) ? series : [])
@@ -593,7 +645,8 @@ export function integralMarks({
     : (pts.length > 1 && pts[pts.length - 1].t > pts[0].t
       ? (pts.length - 1) / (pts[pts.length - 1].t - pts[0].t)
       : 12);
-  const T = INTEGRAL_REF_SCORE * rate * equivSeconds;
+  // 折算：用基准帧率，不用实际 fps（关掉 timeNormalize 就退回旧口径）
+  const T = INTEGRAL_REF_SCORE * (timeNormalize ? INTEGRAL_BASE_FPS : rate) * equivSeconds;
   if (!(T > 0)) return [];
 
   const out = [];

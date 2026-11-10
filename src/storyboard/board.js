@@ -250,6 +250,17 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
       const v = configuredText(userCfg, 'storyboard.tierCurve');
       return v ? { tierCurve: v } : {};
     })(),
+    /**
+     * 帧率归一化（`storyboard.timeNormalize`，**默认开**）。
+     *
+     * 关了就是老口径：窗宽恒 100 帧，60fps 素材会被判成 2 档（30fps 是 4 档）。
+     * 只有"想复现旧分镜"时才该关。
+     */
+    ...(() => {
+      const v = configuredText(userCfg, 'storyboard.timeNormalize');
+      if (v === null || v === undefined || String(v).trim() === '') return {};
+      return { timeNormalize: !/^(0|false|off|no)$/i.test(String(v).trim()) };
+    })(),
     // **默认不封顶**：帧数由切点决定，张数由排布决定，用户要看多少就给多少
     maxFrames: clampFrames(args.maxFrames, 0),
     maxSheets: clampFrames(args.maxSheets, 0),
