@@ -17,6 +17,7 @@
 | [watch-skill / DeepWatch](https://github.com/oxbshw/watch-skill) | MIT | "**索引一次、追问免费**"的产品形态；"答案要能被另一个东西复核"这条（我们落成了 `.evidence.json` 的雏形） |
 | [PySceneDetect](https://github.com/Breakthrough/PySceneDetect) | BSD-3-Clause | ContentDetector 的**加权打分思想**（HSV 三通道差异），`scan.js` 为独立实现，未参考其代码 |
 | [TransNet V2](https://github.com/soCzech/TransNetV2) | MIT | 可选后端的选型依据；本仓库不分发其代码与权重 |
+| [cortico-world-image](https://github.com/Lostdegree/cortico-world-image) | MIT | 桌宠版（`cortico/`）的 **World 契约形状**：`tools()` 的 `{name,description,parameters,tags,handler}`、`handler` 的 `{text, blobs?, failed?}` 回执。只对齐方法与字段，未复制实现；契约细节的来源记在 [docs/cortico-world-notes.md](docs/cortico-world-notes.md) |
 
 > 以上四家的想法我们都只**取判断、不取代码**（MIT 允许复制，但这个项目不这么做）。README 里有和它们的逐项对比，包括我们明确输在哪。
 

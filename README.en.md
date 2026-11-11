@@ -4,7 +4,7 @@
 
 **A scene-aware storyboard for text-only agents.** Feed a video in, get one addressable grid out: numbered cells, a timestamp per cell, and the transcript line that falls inside it — so the model can *look*, *cite a cell*, and *ask for a close-up* instead of being told a summary.
 
-**The effect, in numbers.** A 5-minute clip becomes **one image** — 9–16 frames for **384 tokens**, where a frame-per-image tool spends 3,072–6,144 for the same coverage. A 90-second PV scans in 9 s and returns 12 cells whose shot boundaries match 41 detected cuts. Second call on the same file: 3.6 s (cached). No model weights, no image library, no font config.
+**The effect, in numbers.** A 5-minute clip becomes **one image** — 9–16 frames for **222 tokens**, where a frame-per-image tool spends 3,072–6,144 for the same coverage. A 90-second PV scans in 9 s and returns 12 cells whose shot boundaries match 41 detected cuts. Second call on the same file: 3.6 s (cached). No model weights, no image library, no font config.
 
 > **License change (v0.5.0).** MIT → **Apache-2.0**. The reason is to protect the code's attribution
 > (the license requires keeping the copyright notice) while still allowing free use, modification and
@@ -37,15 +37,17 @@ as documentation only — see [NOTICE](./NOTICE).*
 
 > **0.6.0 rewrote everything after cut detection** — one frame per shot, cell size = cut density
 > (1/1 … 1/8), row-packed, canvas cropped to content. Read [README.md](README.md) (Chinese) or
-> [CHANGELOG](CHANGELOG.md) for the current API; the body of this file still reflects 0.5.x.
+> **English edition.** API-level statements here are current as of 0.7; the measured numbers and
+> screenshots come from 0.5–0.6 runs unless noted otherwise. The authoritative change list is
+> [CHANGELOG](CHANGELOG.md).
 >
 > **0.6.0 breaking change (2026-11-01).** `cells` / `sheets` / `need` / `maxPerSheet` /
 > `adaptive` / `tileFirst` / `planThresholds` / `size` were **removed**. Frames are now
 > one-per-shot; each shot's cell size comes from cut density (8 tiers, side = 1/k) and a
 > row-packing solver lays them out. The knobs are `maxFrames` (96), `strategy`
-> (`quality|balanced|saver|frugal`), `maxSheets` (8) and `budget` (capped at 640000 = 800×800,
-> 384 vision tokens). Examples below that still mention `cells` are 0.5.x; see README.md /
-> README.zh.md and CHANGELOG for the current API.
+> (`auto|compact|standard|native|skim|full|brief` — old names `quality|balanced|saver|frugal|
+> thrifty|ultra` are still accepted), `maxSheets` (8) and `budget` (360000 by default, capped at
+> 1690000 = 1300×1300, 994 vision tokens). One 800×450 image bills **222** vision tokens.
 
 ## Links work now
 
@@ -89,7 +91,7 @@ the code existed):
 |---|---|
 | **"read the transcript first, then decide how to slice"** | audio and transcript are computed **before** any cell decision; chars/sec is a third density signal. Precisely: the transcript decides *how long each cell is*, not *where the cuts are* — cuts stay a visual signal |
 | **"pick the sharpest frame, do not get fooled by a blur transition"** | 3 candidates per segment, highest Laplacian variance. `ffmpeg thumbnail` picks by histogram, and blur does not change a histogram |
-| **"give the fast part more cells, but do not let a half-second shot eat a whole cell"** | dense stretches get short cells; `minGap` is not a fixed 1.2 s — it is capped by the material's own granularity (≤ 0.9 × median shot), otherwise six 1-second shots merge into three and the grid cannot be filled |
+| **"give the fast part more cells, but do not let a half-second shot eat a whole cell"** | dense stretches get short cells; `scanGap` is not a fixed 1.2 s — it is capped by the material's own granularity (≤ 0.9 × median shot), otherwise six 1-second shots merge into three and the grid cannot be filled |
 
 ## What the algorithm actually does
 
@@ -101,9 +103,9 @@ Eight decisions, each made because the obvious alternative failed on real footag
 | 2 | **Threshold chosen by rate, not by a score multiple** — target ≈1 cut per 1.5 s, floor at score 12 | `3×p95` scored 38 on B-roll (fine) but 130 on fast-cut anime → **zero cuts**, on exactly the content that needs the most cells | `src/scan.js` |
 | 3 | **Cell placement = equal increments of the local cut-rate integral**, snapped to real cuts (≤30 % of an ideal cell) | Uniform splitting gives a 6 s burst of 20 shots the same space as a 20 s static shot; snapping without a limit silently distorts the weights | `src/density.js` |
 | 4 | **Grid size from motion p90**, not from duration | 16 cells over a static single take = 16 identical frames; 4 cells over a PV = nothing | `src/plan.js` |
-| 5 | **Minimum gap capped by the material's own granularity** (`min(minGap, medianShot×0.9)`) | A fixed 1.2 s merged six 1 s shots into three, and then could not reach the requested cell count at all | `src/segments.js` |
+| 5 | **Minimum gap capped by the material's own granularity** (`min(scanGap, medianShot×0.9)`) | A fixed 1.2 s merged six 1 s shots into three, and then could not reach the requested cell count at all | `src/segments.js` |
 | 6 | **Sharpest frame wins** — 3 candidates per segment, highest Laplacian variance | `thumbnail=n=` picks by histogram; blur does not change a histogram, so it happily returns a Gaussian-smeared credit card | `src/sheet.js` |
-| 7 | **Audio envelope on the same axis**, inside the same image | A separate audio image costs another 384 tokens and loses the alignment, which is the entire point | `src/audio.js`, `src/sheet.js` |
+| 7 | **Audio envelope on the same axis**, inside the same image | A separate audio image costs another 222 tokens and loses the alignment, which is the entire point | `src/audio.js`, `src/sheet.js` |
 | 8 | **ASR chunked to ≤45 s at silence midpoints**, non-speech segments filtered and reported | One 299 s request shifted every timestamp **13 s early**; a music-only PV produced a fake 29 s line that landed in 5 cells | `src/asr.js`, `src/pipeline.js` |
 
 ### Reading order is a choice, and one of them spoils the film
@@ -113,7 +115,7 @@ An overview image of a 2 h film puts the last scene on the same screen as the fi
 
 | | what it does | when |
 |---|---|---|
-| **STRUCTURE** — `cells: 16, sheets: 4` over the whole file | 4 images, whole arc at once. ~310 s CPU for 2.5 h | analysing, indexing, "is this worth watching" |
+| **STRUCTURE** — `maxFrames: 16, maxSheets: 4` over the whole file | 4 images, whole arc at once. ~310 s CPU for 2.5 h | analysing, indexing, "is this worth watching" |
 | **SEQUENCE** — `from`/`to` windows of 2–5 min, one at a time | never shows a later scene than the one you asked for | following a plot, suspense, shot-by-shot study |
 
 `video_probe` returns both, labelled, and refuses to pick for you. Nothing in the tool forces a whole-file
@@ -122,14 +124,14 @@ the first pass costs nothing.
 
 ### The two-stage read, and what a long film actually costs
 
-A 2 h 35 m film is **not** 24 images up front (9,216 tokens). The cheap path is:
+A 2 h 35 m film is **not** 24 images up front (5,328 tokens). The cheap path is:
 
 | stage | cost | what you learn |
 |---|---|---|
 | `video_probe` | **0** | length, audio/subtitle tracks, how to read it |
-| one overview (16 cells over the whole file) | 384 | structure — which 7.5-minute stretch is worth opening |
-| open the 2–3 suspicious stretches | 3 × 384 | 16 cells of detail each |
-| total | **1,536** | same price as four images, but the first 384 already tells you whether to continue |
+| one overview (16 cells over the whole file) | 222 | structure — which 7.5-minute stretch is worth opening |
+| open the 2–3 suspicious stretches | 3 × 222 | 16 cells of detail each |
+| total | **888** | same price as four images, but the first 222 already tells you whether to continue |
 
 The saving is not in shrinking any single image — it is in **letting the model stop early**. That is why
 `video_probe` returns a plan rather than a picture, and why `textOnly` paging exists.
@@ -139,7 +141,7 @@ Prior art, accuracy ceilings we do not try to beat, and the things we deliberate
 
 ## Long films: the text index has a budget
 
-One image is 384 tokens, but the *text* index is unbounded — a 2 h 35 min film produced 64 cells and a
+One image is 222 tokens, but the *text* index is unbounded — a 2 h 35 min film produced 64 cells and a
 **75 KB** index, which exceeded the host's tool-result limit. The excess was folded into a file on disk and
 never read, so 44 minutes of dialogue were silently missing. Three things prevent that now:
 
@@ -151,9 +153,9 @@ never read, so 44 minutes of dialogue were silently missing. Three things preven
 - **`cellRange` + `textOnly`** — page through the index without re-rendering images or re-decoding frames.
 
 ```js
-video_storyboard({ input, cells: 16, sheets: 4 })                     // 4 images + first page of text
-video_storyboard({ input, cells: 16, sheets: 4, cellRange: [14, 42], textOnly: true })
-video_storyboard({ input, cells: 16, sheets: 4, cellRange: [43, 64], textOnly: true })
+video_storyboard({ input, maxFrames: 16, maxSheets: 4 })                     // 4 images + first page of text
+video_storyboard({ input, maxFrames: 16, maxSheets: 4, cellRange: [14, 42], textOnly: true })
+video_storyboard({ input, maxFrames: 16, maxSheets: 4, cellRange: [43, 64], textOnly: true })
 ```
 
 `textOnly` returns no image, so paging costs nothing in tokens; with the scan **and** ASR results cached it
@@ -166,7 +168,7 @@ node bin/storyboard.mjs film.mp4 --batch 300 --out film.png
 # → film-w01.png … film-w24.png  +  film-timeline.md (window | cells | cuts | chars | image)
 ```
 
-A tail window under 30 s is merged into the previous one instead of spending 384 tokens on a 2-second
+A tail window under 30 s is merged into the previous one instead of spending 222 tokens on a 2-second
 window that holds a single cell. Window boundaries are **snapped to real cuts** (one full scan up front,
 `--no-snap` to disable), so a window never ends in the middle of a sentence.
 
@@ -201,7 +203,7 @@ bundle). Either way, **restart DSH afterwards**: the plugin tree is composed at 
 Worth stating plainly, because it is easy to misread:
 
 - **Tokens are billed per image, not per frame.** Everything here exists to put *many* frames into
-  *one* image. 9–16 frames = 384 tokens.
+  *one* image. 9–16 frames = 222 tokens.
 - **All cells are the same size.** This tool does **not** shrink resolution in fast-cut sections.
   What it varies is **how many seconds each cell covers** — dense regions get short cells, calm
   regions get long ones (`density(t) = clamp(localCutRate / meanCutRate, 1, 2.5)`).
@@ -253,7 +255,7 @@ Against `ffmpeg -vf scdet` on the same clip: scdet's default threshold finds **4
 
 Grid size follows **content density** (`p90`), not duration alone: ≥15 → 12 s/cell, 5–15 → 20 s/cell, <5 → 40 s/cell. A fast-cut PV gets 9 cells over 90 s; a static single take gets 4 cells and a warning.
 
-Minimum gap between sampled frames is enforced by merging segments shorter than `minGap` (default 1.2 s) before fitting to the cell count — a 0.3 s shot in a burst should not eat a whole cell.
+Minimum gap between sampled frames is enforced by merging segments shorter than `scanGap` (default 1.2 s) before fitting to the cell count — a 0.3 s shot in a burst should not eat a whole cell.
 
 ### Pick the sharpest frame, not the blurriest
 
@@ -346,17 +348,18 @@ reported in the text block:
 | tool | for | cells | images | tokens |
 |---|---|---|---|---|
 | `video_probe` | container metadata + a reading plan, before spending anything | — | 0 | **0** |
-| `video_storyboard` | the whole clip (or a slice) at a glance | 4–16 | 1–4 | 384 × images |
-| `video_zoom` | one short window, read closely | 1–9 (default 6) | 1 | 384 |
+| `video_storyboard` | the whole clip (or a slice) at a glance | 4–16 | 1–4 | 222 × images |
+| `video_zoom` | one short window, read closely | 1–9 (default 6) | 1 | 222 |
 
 `video_probe` reads the container only — no decode, no image. Use it first when the length is unknown: it
 replies with duration/resolution/rotation/audio/subtitle tracks and, for anything over 20 minutes, tells
 you to read the file in 5-minute windows instead of scanning it whole.
 
-Both run the same pipeline; zoom just narrows the window and drops `adaptive`, so each cell gets
-~4× the pixels of a 16-cell overview.
+Both run the same pipeline; zoom narrows the window and uses **one uniform tier** (`uniformTier: 'auto'`,
+`strategy: 'full'`) instead of sizing each cell by its own cut density, so each cell gets ~4× the pixels
+of a 16-cell overview.
 
-For fast-cut montage, `video_zoom` takes `minGap: 0.4` — half-second shots then get their own cell instead
+For fast-cut montage, `video_zoom` takes `scanGap: 0.4` — half-second shots then get their own cell instead
 of being merged into a neighbour (default 1.2 s).
 
 On the same 96–128 s window of a talking-head video, `video_zoom` at 429×239 per cell renders the
@@ -381,17 +384,20 @@ Each cell also reports **how many cuts happened inside it** (`cuts 7`), and the 
 with the average spacing (`cuts="141 (avg 2.1s)"`). That is the answer to "how fast is this section cut" —
 the yellow ticks on the footer show *where*, the number says *how many*.
 
-On a 90 s PV: uniform gives 4.5–9.6 s cells; adaptive gives 3.9 s in the fast section and 10.6 s in
-the still ones — and the closing title card, which uniform sampled as a blurry credit list, is now a
-clean cell. `adaptive: false` keeps the old behaviour.
+On a 90 s PV: uniform gives 4.5–9.6 s cells; density-driven sizing gives 3.9 s in the fast section and
+10.6 s in the still ones — and the closing title card, which uniform sampled as a blurry credit list, is
+now a clean cell.
 
-### Index size: 15 % of cell height
+### Index size
 
-The burned index defaults to **15 % of the cell height** (was 22 %). Downsampling the sheet to 66×37 per cell and re-reading it, the digit stays legible all the way down to 11 %, so 15 % keeps a margin while covering half the pixels of the old badge. `--badge 0.22` if you prefer the louder version; `--badge 0` is the same as `burn: none`.
+The burned index is a 5×7 bitmap glyph scaled **3–5× by canvas width**
+(`badgeScale(w) = clamp(round(w / 280), 3, 5)`), drawn with an 8-way dark outline so it stays readable
+on both bright and dark frames. Scale 3 is the floor on purpose: at scale 2 the built-in glyphs read
+`86` as `88`. Turn it off with `burn: 'none'`.
 
 ### Planning a long film
 
-`--plan 300` prints the window list before rendering anything — for an 18-minute film: 4 windows of ≤300 s, 4 images, ≈1536 tokens. If the requested step would exceed 12 windows, the step is **stretched instead of truncated**, so a 90-minute film becomes 12 × 450 s covering the whole runtime rather than 12 × 300 s that stops at minute 60.
+`--plan 300` prints the window list before rendering anything — for an 18-minute film: 4 windows of ≤300 s, 4 images, ≈888 tokens. If the requested step would exceed 12 windows, the step is **stretched instead of truncated**, so a 90-minute film becomes 12 × 450 s covering the whole runtime rather than 12 × 300 s that stops at minute 60.
 
 ### No image library, on purpose
 
@@ -437,7 +443,7 @@ Two things the existing ones don't do:
 
 ## Decisions worth knowing
 
-- **The pixel budget is fixed** (~640k per image, ~384 tokens per image), so `m×n` only decides *how many frames share one image*. More detail is bought by **sending another image**, never by cutting cells smaller.
+- **The pixel budget is fixed** (~640k per image, ~222 tokens per image), so `m×n` only decides *how many frames share one image*. More detail is bought by **sending another image**, never by cutting cells smaller.
 - **Square grids keep the source aspect** (`canvas = (m/n) × source`). For a 16:9 video use `2×2` / `3×3` / `3×4` — *not* `4×3`, whose canvas is 2.37:1 and gets cropped by square-ish encoders.
 - **Coarse first, then zoom.** Default plan is always `balanced` (3×3, one image). The model then asks for a close-up of the cells it cares about.
 - **Only the index is burned in.** Timestamps are 8 characters at 7.5% cell height — they die first under compression, and the text manifest already carries them exactly.
@@ -454,13 +460,13 @@ Two regression tests cover it — one asserts the PNG magic and IHDR dimensions,
 
 ## How it compares
 
-DSH bills **384 tokens per image**, so the number of *images* is the cost. Packing N frames into one
+DSH bills **222 tokens per image**, so the number of *images* is the cost. Packing N frames into one
 image is the whole trick:
 
 | approach | frames shown | images | host tokens |
 |---|---|---|---|
-| this plugin, 9-cell sheet | 9 | **1** | **384** |
-| this plugin, 16-cell sheet | 16 | **1** | **384** |
+| this plugin, 9-cell sheet | 9 | **1** | **222** |
+| this plugin, 16-cell sheet | 16 | **1** | **222** |
 | frame-per-image plugin (`count=8`) | 8 | 8 | 3,072 |
 | frame-per-image plugin (`count=64`) | 64 | 64 | 24,576 |
 | bridge plugin (frames → external VLM, text back) | 12 | 0 | ≈0 + API cost |
@@ -491,4 +497,5 @@ Speech recognition is designed to run against a user-configured OpenAI-compatibl
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+**Apache-2.0** — see [LICENSE](./LICENSE). Third-party attributions are in [CREDITS.md](./CREDITS.md);
+the "what this project does not do" statement is in [NOTICE](./NOTICE).

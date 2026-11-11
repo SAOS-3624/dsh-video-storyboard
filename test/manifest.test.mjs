@@ -42,7 +42,7 @@ function makeResult({ cells = 64, textLen = 300 } = {}) {
     transcript: { source: 'subtitle', model: 'embedded', segments: 1782 },
     plan: {
       cells: 16, sheets: 4, produced: cells, frames: cells,
-      strategy: 'balanced', strategyNote: '1 档压成 1/2 尺寸', maxFrames: 96,
+      strategy: 'standard', strategyNote: '1 档压成 1/2 尺寸', maxFrames: 96,
       // 新口径：cell 报的是**最小格**，canvas 是画布尺寸，tiers 是档位分布
       cell: { w: 400, h: 225, readability: 'scene' },
       canvas: { width: 800, height: 450 }, fill: 82.5, tiers: { 4: cells }, sampleMarks: 0,
@@ -110,7 +110,7 @@ test('清单头部带 cell/tokens/ffmpeg/sha256 与 plan 输入', () => {
   assert.match(text, /tokens="407"/);
   assert.match(text, /ffmpeg="6\.1\.1-essentials_build"/);
   assert.match(text, /sha256="abc123"/);
-  assert.match(text, /plan: strategy=balanced/);
+  assert.match(text, /plan: strategy=standard/);
   assert.match(text, /tiers 1\/4×16/);
   assert.match(text, /meanLufs=-18 LUFS/);
   assert.match(text, /motion=3\.2/);
@@ -238,7 +238,11 @@ test('formatManifest: 有快剪爆发时报出区间与镜头数', () => {
   ] };
   const text = formatManifest(r, { maxChars: 200_000 });
   assert.match(text, /fast cuts: 00:42\.80-01:04\.80 \(22 shots\)/);
-  assert.match(text, /minGap: 0\.4/);
+  // 锁死"给模型的下一步"用现役参数名：cells 0.6.0 已删，minGap 改名 scanGap。
+  // 这两条断言是给未来改参数名的人用的 —— 改参数忘了改这行提示，测试会先红。
+  assert.match(text, /video_zoom\(\{ from, to, maxFrames: 6, scanGap: 0\.4 \}\)/);
+  assert.doesNotMatch(text, /\bcells:/);
+  assert.doesNotMatch(text, /\bminGap\b/);
 });
 
 test('formatManifest: asr-empty 说明"没有台词"而不是"字幕坏了"', () => {
@@ -596,6 +600,48 @@ test('只有 2~4 格的重复不值得单列 legend（省下的比表头少）',
   r.plan.produced = 3;
   const text = formatManifest(r, { maxChars: 200_000 });
   assert.ok(!/shared speech/.test(text), '3 格重复用 legend 反而更长');
+});
+
+test('一句 30 字的台词只落在两格：第二格写指针，不再重印一遍（issue #89 第 3 条）', () => {
+  const LINE = '语法真的很好玩，认真听我讲课就行了。这句大概三十来个字，落在相邻两格。';
+  const r = makeLyricResult();
+  r.sheets[0].cells = r.sheets[0].cells.slice(0, 2)
+    .map((c) => ({ ...c, text: LINE, lines: undefined }));
+  r.plan.produced = 2;
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.ok(!/shared speech/.test(text), '两格抽 legend 是净亏，不该抽');
+  assert.match(text, /→ same as cell 1/, '要用指针，否则同一句话占两遍 token');
+  const hits = text.split(LINE).length - 1;
+  assert.equal(hits, 1, `同一句出现了 ${hits} 次`);
+});
+
+/* ---------------------------------------------------------------- 清单里不许说假话 */
+
+test('证据文件只在真落盘时才提（插件路径不写盘，issue #89 第 2 条）', () => {
+  const r = makeResult({ cells: 16 });
+  assert.ok(!/evidence\.json/.test(formatManifest(r, { maxChars: 200_000 })),
+    '没落盘却让模型去找文件，它只会白翻一圈 temp 目录');
+
+  r.evidencePath = 'C:\\Users\\x\\AppData\\Local\\Temp\\out.evidence.json';
+  const text = formatManifest(r, { maxChars: 200_000 });
+  assert.match(text, /per-cell times for verification: out\.evidence\.json/);
+  assert.ok(!/AppData/.test(text), '清单里不许出现本机绝对路径');
+});
+
+test('兜底撞了帧数封顶：报实际最长那一格，不写死 ≤30s（issue #89 第 1 条）', () => {
+  const r = makeResult({ cells: 16 });
+  r.plan.staticLongshot = { frames: 8, maxSec: 30 };
+  const capped = formatManifest(r, { maxChars: 200_000 });
+  assert.match(capped, /longest 145s/, 'makeResult 每格 145 秒，撞 cap 时最长就是 145');
+  assert.ok(!/≤30s each/.test(capped), '实际超了就不许写 "≤30s each"');
+
+  // 没撞 cap 的那条路照旧报目标值
+  const ok = makeResult({ cells: 16 });
+  ok.sheets[0].cells = ok.sheets[0].cells.slice(0, 8).map((c, k) => ({
+    ...c, t_start: k * 20, t_end: (k + 1) * 20,
+  }));
+  ok.plan.staticLongshot = { frames: 8, maxSec: 30 };
+  assert.match(formatManifest(ok, { maxChars: 200_000 }), /≤30s each/);
 });
 
 test('整窗同一档位时，只在开头说一次 k=，不逐格重复', () => {

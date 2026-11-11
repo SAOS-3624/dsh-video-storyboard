@@ -779,9 +779,15 @@ export function needsTimeFloor({ segs = [], duration = 0, minSec = STATIC_SHOT_M
 /**
  * 把过长的段按时间切开（纯函数，不改入参）。
  *
- * 每次都切**当前最长**的那一段，切成两半，直到都 ≤ `maxSec` 或总帧数到 `cap`。
+ * 每次都挑**当前最长**的那一段，一次切成"够用的等分"，直到都 ≤ `maxSec` 或总帧数到 `cap`。
  * 切出来的新段 `via: 'time'`（清单靠它说"这段是按时间兜底的"），
  * 只有第一段继承原来的 `cut` 标记。
+ *
+ * **为什么不是"每次切两半"**（issue #89）：二分是"切到 ≤maxSec **或** 撞 cap 就停"，
+ * 撞 cap 时会留下超标的格子 —— 而清单一直写着 `≤maxSec each`，实测有 39.6 秒的格子，
+ * 下游模型照着这句话算就会对不上账。改成按需等分：一段 90 秒要 ≤30 秒就是切 3 刀，
+ * 不是先切 45+45 再各来一刀（4 段），同样满足上限但少吃一个额度，cap 就不容易撞。
+ * 真撞上了也没关系：`splitStaticShots` 只负责尽力，清单会报**实际最长那一格**。
  *
  * @param {Array<{from:number,to:number,cut?:boolean,via?:string}>} segs
  * @param {{maxSec?:number, cap?:number}} [o]
@@ -802,13 +808,30 @@ export function splitStaticShots(segs, { maxSec = STATIC_SHOT_MAX_SEC,
     }
     if (k === -1) break;                                 // 没有超标段了
     const s = out[k];
-    const mid = (s.from + s.to) / 2;
-    if (!(mid > s.from && mid < s.to)) break;
-    out.splice(k, 1,
-      { ...s, to: mid, t: (s.from + mid) / 2, via: 'time' },
-      { ...s, from: mid, t: (mid + s.to) / 2, cut: false, via: 'time' });
+    const len = s.to - s.from;
+    if (!(len > 0)) break;
+    // 这一段要切成几片才 ≤maxSec（至少 2 片）；额度不够就按剩下的用完为止
+    const want = Math.max(2, Math.min(Math.ceil(len / maxSec - 1e-9), limit - out.length + 1));
+    out.splice(k, 1, ...evenSplit(s, want));
   }
   return out;
+}
+
+/** 把一段等分成 `k` 片；端点取原值，露点误差不会累积到总时长上 */
+function evenSplit(s, k) {
+  const parts = [];
+  const step = (s.to - s.from) / k;
+  for (let j = 0; j < k; j += 1) {
+    const from = j === 0 ? s.from : s.from + step * j;
+    const to = j === k - 1 ? s.to : s.from + step * (j + 1);
+    parts.push({
+      ...s, from, to,
+      t: (from + to) / 2,
+      cut: j === 0 ? s.cut : false,
+      via: 'time',
+    });
+  }
+  return parts;
 }
 
 /**

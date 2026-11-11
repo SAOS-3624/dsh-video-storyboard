@@ -1,5 +1,93 @@
 # Changelog
 
+## [0.7.3] - 2026-11-11
+
+> #89 的三条，共同点是**清单说了但没做到**。前两条是清单在说假话：
+> 写死 `≤30s each`（撞了帧数封顶其实有 39.6 秒的格子）、写死 `.evidence.json`
+> （插件路径根本不落盘，模型照着去 temp 翻）。第三条是短句重复的账算不过来。
+
+### Fixed — 撞上帧数封顶时，清单不再谎称 `≤30s each`（#89）
+
+`splitStaticShots()` 原来是「每次都切最长那一段的两半」，切到都 ≤ 30 秒**或**帧数到上限就停 ——
+后半句才是问题：撞上限时会留下超标的格子，而清单一直写 `≤${maxSec}s each`。
+
+- 切法改成**按需要等分**：一段 90 秒要 ≤30 秒就是 3 片，不是先 45/45 再各来一刀（4 片）。
+  同样达标，但少吃一个额度，cap 更不容易撞；
+- 真撞上了也不撒谎：清单改报**实际最长那一格**
+  （`longest 39s — 30s each does not fit inside 8 frames`），只有做到时才写 `≤30s each`。
+
+### Fixed — `evidence.json` 只在真写出来时才提（#89）
+
+清单末尾那句 `per-cell times for verification: <name>.evidence.json` 是写死的，但只有 CLI 的
+`saveStoryboards()` 会落盘；插件走附件服务，压根不写文件 —— 模型照着去找，翻遍 temp 也没有。
+现在只有 `result.evidencePath` 存在时才打，且**只报文件名**：本机绝对路径不该进模型上下文。
+
+### Fixed — 同一句台词只落在两格时，第二格给指针（#89）
+
+不是"按段去重"漏了：抽 legend 的成本是表头一行 + 每格一个 `→ L1`，一句 30 字重复两格净亏，
+所以以前两格各印一遍（用户看到的是同一句话占两遍 token）。现在 24 字以上的重复落指针
+`→ same as cell 4`；更短的句子指针比正文还长，仍然照印。
+
+### Fixed — 三份 README 的协议声明统一到 Apache-2.0（docs）
+
+v0.5.0 从 MIT 换到 Apache-2.0 时改了六处、漏了两处，于是同一份 `README.en.md` 里
+第 9 行写着"已改为 Apache-2.0"、第 494 行还写着 `MIT — see LICENSE`；`README.zh.md` 的
+许可段则整段照旧写 MIT。`LICENSE` / `NOTICE` / `package.json` / npm 元数据四处都是
+Apache-2.0，属于声明自相矛盾。
+
+- `README.en.md`、`README.zh.md`、`README.md` 的许可段统一为 **Apache-2.0**，并指向
+  `NOTICE` 与 `CREDITS.md`；`README.zh.md` 补上"v0.5.0 起由 MIT 变更"的交代；
+- 历史版本仍是 MIT 那句话保留，不删 —— 已发布的 MIT 版本不会因为这次改动变协议。
+
+### Fixed — 清单里给模型的"下一步"用了已删除的参数名（#89 同类）
+
+`formatManifest()` 报快剪爆发时提示 `video_zoom({ from, to, cells: 6, minGap: 0.4 })` ——
+`cells` 0.6.0 就删了、`minGap` 后来改名 `scanGap`。模型照着这句话调，两个参数都会被宿主
+按 schema 静默丢弃，然后奇怪"为什么没生效"。现在改成 `maxFrames: 6, scanGap: 0.4`，
+并在 `manifest.test.mjs` 里加了两条 `doesNotMatch`，以后再改参数名忘了改这句提示，测试先红。
+
+同一处的 `strategy` 提示还把旧名 `"saver"/"frugal"` 当现役名教给模型，改成 `compact`/`skim`。
+
+### Fixed — 测量口径漂移：一张图 384 token → 222（46 处）
+
+384 是 800² 时代的旧口径。现在默认画布是 **798×450**（宽度按 42 向下对齐，800×450 未对齐是 233），
+`rows×(cols+1)+2` = **222**。三份 README 里的 384 及其派生数字一起校正：
+
+| 场景 | 旧 | 新 |
+|---|---|---|
+| 单图 | 384 | **222** |
+| 2 张 | 768 | 444 |
+| 3 张 | 1152 | 666 |
+| 4 张 | 1536 | 888 |
+| 10 张 | 3840 | 2220 |
+| 18 张 | 6912 | 3996 |
+| 19 张 | 7296 | 4218 |
+| 24 张 | 9216 | 5328 |
+
+`npm run verify-tokens` 与宿主 23 组尺寸逐一对拍，数字以它为准。
+
+### Fixed — 英文版 README 还停在 0.5.x 的 API（doc）
+
+`README.en.md` 正文里留着 `video_storyboard({ input, cells: 16, sheets: 4 })` 这种**照抄就会失败**
+的示例，而文件开头自己写着 "the body of this file still reflects 0.5.x"、"examples below that still
+mention `cells` are 0.5.x" —— 用一句免责声明顶替了修改。
+
+- `cells` / `sheets` → `maxFrames` / `maxSheets`（表格 1 处 + 代码示例 3 行）；
+- `drops adaptive` / `adaptive gives …` → 实际的 `uniformTier: 'auto'`、`strategy: 'full'`；
+- `--badge 0.22` 整段重写：**这个开关不存在**，编号是 `badgeScale(w) = clamp(round(w/280), 3, 5)`
+  的 5×7 点阵，scale 2 会把 86 读成 88；
+- 开头那句"still reflects 0.5.x"删掉，换成"API 按 0.7 校正、实测数字来自 0.5–0.6"的如实说明。
+
+### Fixed — `minGap` 的校验是死代码
+
+`validateZoomArgs` 里还留着 `args.minGap` 的范围校验，但 schema 里只有 `scanGap` —— 宿主按 schema
+过滤参数，这个分支永远进不来。删掉；`scanGap` 自己的校验（0..30）在 `validateArgs` 里，覆盖更严。
+
+### Fixed — 测试夹具还在用 0.6 之前的策略名（test）
+
+`makeResult()` 里写 `strategy: 'balanced'`，而 `resolveStrategy()` 会把它换成 `standard` ——
+真实输出永远不会是 `balanced`。夹具改成 `standard`，断言同步。
+
 ## [0.7.2] - 2026-11-10
 
 > 两个都是 #87 报出来的：**`maxFrames` 反而把帧数压少**（真 bug，装了这个参数就中招），

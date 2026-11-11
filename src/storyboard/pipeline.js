@@ -70,9 +70,10 @@ export const BURN_MODES = ['index', 'none'];
  * @param {number} [opts.to] 窗口终点（秒）
  * @param {number|'auto'} [opts.threshold] 切点阈值
  * @param {number} [opts.scanGap] 切点近邻合并的秒数（0 = 关掉）
- * @param {'quality'|'balanced'|'saver'|'frugal'} [opts.strategy] 升降档策略
+ * @param {'auto'|'compact'|'standard'|'native'|'skim'|'full'|'brief'} [opts.strategy] 升降档策略
+ *   （旧名 quality/balanced/saver/frugal/thrifty/ultra 仍认，见 tiers.js 的 STRATEGY_ALIASES）
  * @param {number} [opts.maxFrames] 最多取多少帧（超过就合并最短的段）
- * @param {number} [opts.budget] 单图像素预算（不会超过 800×800）
+ * @param {number} [opts.budget] 单图像素预算（不会超过 1300×1300 = 1.69M）
  * @param {'sharp'|'mid'|'thumb'} [opts.pick]
  * @param {'index'|'none'} [opts.burn]
  * @param {(p:object)=>void} [opts.onProgress]

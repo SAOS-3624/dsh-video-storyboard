@@ -225,7 +225,7 @@ export async function formatProbe(info) {
     lines.push(`      video_storyboard({ input, maxFrames: ${estFrames} }) → up to ${estFrames} frames ` +
       `at ~${px.w}×${px.h} for the 1/3 tier, ~${perImage * estSheets} vision tokens.`);
     lines.push('    The tier is decided by cut density, not by you: fast-cutting stretches get 1/8-size ' +
-      'cells (100×56 on a 800-wide canvas), long takes get 1/1. Lower `strategy` to "saver"/"frugal" ' +
+      'cells (100×56 on a 800-wide canvas), long takes get 1/1. Lower `strategy` to `compact`/`skim` ' +
       'only when you accept blurrier cells in exchange for fewer images.');
   } else if (mins < 1) {
     lines.push(`under a minute (${info.duration.toFixed(0)}s): one call is enough.`);
@@ -725,8 +725,16 @@ export function formatManifest(result, {
    */
   if (result.plan?.staticLongshot) {
     const { frames, maxSec } = result.plan.staticLongshot;
+    // 报**实际最长那一格**，不是目标值：撞了帧数封顶时会有比 maxSec 更长的格子
+    // （issue #89 实测 39.6 秒），写死 "≤30s each" 等于让下游照着对不上账。
+    const longest = all.reduce(
+      (m, c) => Math.max(m, (Number(c.t_end) || 0) - (Number(c.t_start) || 0)), 0,
+    );
+    const shape = longest > maxSec + 0.05
+      ? `longest ${Math.round(longest)}s — ${maxSec}s each does not fit inside ${frames} frames`
+      : `≤${maxSec}s each`;
     lines.push(`density: static-longshot fallback — this window has ≤1 hard cut, so frame placement `
-      + `cannot come from shot changes. Split by time instead (${frames} frames, ≤${maxSec}s each).`);
+      + `cannot come from shot changes. Split by time instead (${frames} frames, ${shape}).`);
     lines.push('  → 这类片子（PPT / 课件 / 单机位讲座）翻页不产生切点，一格里可能翻过好几页。'
       + '要看清某一页：`video_zoom` 带上那一格的 from/to；要逐页扫：`from` + `segment` 分段调。');
   }
@@ -875,7 +883,7 @@ export function formatManifest(result, {
   if (result.plan?.bursts?.length) {
     const top = [...result.plan.bursts].sort((a, b) => (b.shots ?? 0) - (a.shots ?? 0)).slice(0, 3);
     lines.push(`fast cuts: ${top.map((b) => `${tc(b.from)}-${tc(b.to)} (${b.shots} shots)`).join(', ')}` +
-      ' — video_zoom({ from, to, cells: 6, minGap: 0.4 }) splits these into single shots.');
+      ' — video_zoom({ from, to, maxFrames: 6, scanGap: 0.4 }) splits these into single shots.');
   }
 
   // 切点不多时直接列出精确时间：条带只能读个 ±2~4 秒的大概，而这一行是 0.01 秒的准确值。
@@ -936,6 +944,25 @@ export function formatManifest(result, {
   const sharedByCell = new Map();
   for (const g of shared) for (const i of g.cells) sharedByCell.set(i, g.id);
 
+  /**
+   * **重复但不够本抽 legend 的那几组**（issue #89 第 3 条）：后出现的那格写
+   * `→ same as cell 4`，不再把同一句话重印一遍。
+   *
+   * 抽 legend 的成本是表头一行（~24）+ 每格一个 `→ L1`；一句 30 字的台词只落在
+   * 两格时这笔账算不过来（净亏），于是以前两格各印一次 —— 用户看到的是"同一句
+   * 话占了两遍 token"。指针不用表头，19 个字就够，所以短句重复也有得赚。
+   * 阈值取 24 字：更短的句子指针反而更长。
+   */
+  const DUP_MIN_CHARS = 24;
+  const dupOf = new Map();
+  for (const [key, cells2] of groups) {
+    if (cells2.length < 2 || key.length < DUP_MIN_CHARS) continue;
+    if (sharedByCell.has(cells2[0])) continue;            // 已经进 legend 了
+    const first = Math.min(...cells2);
+    if (first < lo || first > hi) continue;               // 首现在别的分页里，指针指不到
+    for (const i of cells2) if (i !== first) dupOf.set(i, first);
+  }
+
   // ---- 压缩 ②：整窗同一档位时，别在每个格子上重复同一个 k=
   const tierSet = new Set(picked.map((c) => c.tier).filter((t) => Number.isFinite(t)));
   const uniformTier = picked.length > 1 && tierSet.size === 1 ? [...tierSet][0] : null;
@@ -976,7 +1003,9 @@ export function formatManifest(result, {
     const head = `cell ${c.i}${where} = ${tc(c.t_start)}-${tc(c.t_end)}` +
       (showFrame ? ` frame@${tc(c.t_frame)}` : '') +
       (c.cuts ? `  cuts ${c.cuts}` : '') + tierTag + markTag;
-    const body = ref ? `${head}  → ${ref}` : (text ? `${head}\n    ${text}` : head);
+    const body = ref ? `${head}  → ${ref}`
+      : (dupOf.has(c.i) ? `${head}  → same as cell ${dupOf.get(c.i)}`
+        : (text ? `${head}\n    ${text}` : head));
     if (used + body.length + 1 > maxChars) { stoppedAt = c.i - 1; break; }
     lines.push(body);
     used += body.length + 1;
@@ -1111,7 +1140,12 @@ export function formatManifest(result, {
   // 追问时不必重新出图 —— 这张图就在上下文里，按格号引用即可（每省一次就是一张图的钱）。
   // 两行共约 100 字符，换掉一次重读（一张图的钱）—— 只要追问一次就赚回来。
   lines.push('sheet already in context: cite cells by number; video_zoom only for a narrower window.');
-  lines.push('per-cell times for verification: <name>.evidence.json');
+  // 证据文件**只在真落盘时**才提（CLI / `saveStoryboards`）。插件走附件服务、不写盘，
+  // 以前这句是写死的 —— 模型照着去 temp 目录找，翻遍也找不到（issue #89）。
+  if (result.evidencePath) {
+    const name = String(result.evidencePath).split(/[\\/]/).pop();
+    lines.push(`per-cell times for verification: ${name}`);
+  }
   return lines.join('\n');
 }
 

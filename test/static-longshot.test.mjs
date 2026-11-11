@@ -72,6 +72,27 @@ test('splitStaticShots：cap 更小时听 cap（调用方给了 maxFrames 就按
   assert.ok(Math.abs(out.reduce((n, s) => n + (s.to - s.from), 0) - 600) < 1e-6);
 });
 
+test('splitStaticShots：一段 90 秒切 3 片，不是二分 4 片（省额度，issue #89）', () => {
+  // 二分法会把 90 切成 45/45 再各切一刀 = 4 片；按需等分只要 3 片，
+  // 同样是 ≤30s，但少吃一个额度 —— cap 就是这么撞上的。
+  const out = splitStaticShots([
+    { from: 0, to: 90, cut: true, via: 'start' },
+    { from: 90, to: 180, cut: false },
+  ]);
+  assert.equal(out.length, 6, `两段 90 秒各切 3 片 = 6，实际 ${out.length}`);
+  for (const s of out) {
+    assert.ok(s.to - s.from <= STATIC_SHOT_MAX_SEC + 1e-6, `有 ${(s.to - s.from).toFixed(1)}s 的格子`);
+  }
+});
+
+test('splitStaticShots：真撞 cap 时不谎称达标，只是尽力（清单报实际值）', () => {
+  const out = splitStaticShots([{ from: 0, to: 180, cut: false }], { cap: 2 });
+  assert.equal(out.length, 2);
+  const longest = Math.max(...out.map((s) => s.to - s.from));
+  assert.ok(longest > STATIC_SHOT_MAX_SEC, '两个格子装不下 180 秒的 ≤30s，超了是必然');
+  assert.ok(longest <= 90 + 1e-6, '但也不许比"干脆不切"更差');
+});
+
 test('splitStaticShots：全是短段时原样返回', () => {
   const segs = [{ from: 0, to: 10 }, { from: 10, to: 20 }];
   const out = splitStaticShots(segs);

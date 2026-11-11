@@ -604,7 +604,6 @@ export function validateToolArgs(args) {
   if (args.to !== undefined && args.from !== undefined && args.to <= args.from) {
     problems.push('to must be greater than from');
   }
-  if (args.minGap !== undefined && !(args.minGap >= 0)) problems.push('minGap must be >= 0');
   if (args.transcript !== undefined && !['auto', 'off'].includes(args.transcript)) {
     problems.push("transcript must be 'auto' or 'off'");
   }
