@@ -73,49 +73,49 @@ export function bounds(k, grow = DEFAULT_GROW) {
 const ROW_CACHE = new Map();
 const ROW_CACHE_MAX = 20000;
 
-export function rowOptions(tiers, grow = DEFAULT_GROW, stretch = 0, fillRows = true,
+export function rowOptions(tiers, grow = DEFAULT_GROW, stretch = DEFAULT_STRETCH, fillRows = true,
   crop = DEFAULT_CROP) {
+  // **先把 stretch 夹进裁切预算**，再进缓存键：同一个 stretch 配不同预算不是同一份候选。
+  // （这套映射和 see-now 的 pack.js 完全一致 —— 两个包各有一份实现，语义必须一字不差。）
+  const st = effectiveStretch(stretch, crop);
   // **键必须覆盖所有影响结果的参数**（#64）：以前只编码 "stretch > 0.15" 这个布尔，
   // `grow` 完全没编 —— 于是「允许升档」和「不允许升档」两次调用会命中同一份候选，
   // 拿到别的情况下算出来的行高（flat 行高直接依赖精确的 stretch 值）。
   // 顺带：原来的数值键是 `key = key * 9 + tiers[i]` 累乘，60 档时早就越过
   // Number 的安全整数范围了，碰撞是迟早的事。改成字符串键，正确性优先。
-  const key = `${tiers.join(',')}|${grow.join(',')}|${stretch}|${fillRows ? 1 : 0}`
-    + `|${crop.cropX}|${crop.cropY}`;
+  const key = `${tiers.join(',')}|${grow.join(',')}|${st}|${fillRows ? 1 : 0}`;
   const hit = ROW_CACHE.get(key);
   if (hit !== undefined) return hit;
-  const val = rowOptionsRaw(tiers, grow, stretch, fillRows, crop);
+  const val = rowOptionsRaw(tiers, grow, st, fillRows);
   if (ROW_CACHE.size > ROW_CACHE_MAX) ROW_CACHE.clear();
   ROW_CACHE.set(key, val);
   return val;
 }
 
-/** 默认：一格都不许裁。拉伸想生效，必须由调用方给出"画面自带多少黑边"的预算。 */
+/** 默认：一格都不许裁。拉伸想生效，必须由调用方给出"能裁多少"的预算。 */
 export const DEFAULT_CROP = Object.freeze({ cropX: 0, cropY: 0 });
 
 /**
- * 这一行每格的裁切量是否都在预算内。
+ * 裁切预算 → 允许的拉伸系数。
  *
- * 归一化空间里格子本来是正方形（= 源画面比例）。渲染成 `s_i × h_i` 之后：
- *   - `h_i < s_i` → 格子比画面**宽** → cover 裁上下，裁掉 `1 − h_i/s_i`（吃 `cropY`）
- *   - `h_i > s_i` → 格子比画面**窄** → cover 裁左右，裁掉 `1 − s_i/h_i`（吃 `cropX`）
- * 超预算就整行作废 —— 宁可多开一张图，也不把真画面裁掉。
- * `cropX/cropY` 为 0（默认）时这条规则等价于"只许正方形格子"，
- * 混合档位靠 `bounds()` 把相邻档缩/放到同一尺寸来填满，不靠拉伸。
+ * 一格被拉高 `s` 倍，cover 就裁掉 `1 − 1/(1+s)`。所以"最多裁 c"⇔"最多拉 c/(1−c)"：
+ * 0.1 → 0.111，0.3 → 0.429。**预算 0 时结果恒为 0**，这就是默认的"一格不裁"。
+ *
+ * 为什么用"换算"而不是"先生成再丢弃超预算的行"：丢弃会让整行作废（连它没超预算的
+ * 布局一起没了），于是同样的档位序列在 0.1 预算下反而只能装 7 帧、比不裁（9 帧）还差。
+ * 换成先把 stretch 夹小，行还在、只是拉得少 —— 单调、可解释。
  */
-function fitsCrop(s, c, stretch, flat, crop) {
-  const eps = 1e-9;
-  for (let i = 0; i < s.length; i += 1) {
-    const sv = s[i];
-    const hh = flat ? c : Math.min(c, sv * (1 + stretch));
-    if (!(hh > 0)) return false;
-    if (hh < sv - eps && 1 - hh / sv > crop.cropY + eps) return false;
-    if (hh > sv + eps && 1 - sv / hh > crop.cropX + eps) return false;
-  }
-  return true;
+export function stretchForCrop(crop) {
+  const c = Math.max(0, Math.min(0.9, Math.max(Number(crop?.cropX) || 0, Number(crop?.cropY) || 0)));
+  return c / (1 - c);
 }
 
-function rowOptionsRaw(tiers, grow, stretch, fillRows = true, crop = DEFAULT_CROP) {
+/** **crop 是硬上限**：不管调用方传多大的 stretch，实际拉伸都不许超过预算。 */
+export function effectiveStretch(stretch, crop = DEFAULT_CROP) {
+  return Math.max(0, Math.min(Number(stretch) || 0, stretchForCrop(crop)));
+}
+
+function rowOptionsRaw(tiers, grow, stretch, fillRows = true) {
   const cs = tiers.map((k) => (k === FREE ? UNIT / 4 : UNIT / k));
   const los = tiers.map((k) => bounds(k, grow)[0]);
   const his = tiers.map((k) => bounds(k, grow)[1]);
@@ -123,9 +123,7 @@ function rowOptionsRaw(tiers, grow, stretch, fillRows = true, crop = DEFAULT_CRO
   if (sum(los) > UNIT + 1e-9) return [];
 
   const out = [];
-  if (sum(cs) <= UNIT && fitsCrop(cs, Math.max(...cs), stretch, false, crop)) {
-    out.push({ c: Math.max(...cs), A: sum(cs.map((x) => x * x)), s: cs });
-  }
+  if (sum(cs) <= UNIT) out.push({ c: Math.max(...cs), A: sum(cs.map((x) => x * x)), s: cs });
   // `fillRows=false`：**不强行把这一行填满**。格子按自己的档位尺寸放，剩下多少空多少，
   // 换行就行（用户要的"从上到下、从左到右"流式排法）。这时只剩"原尺寸"这一个候选。
   if (!fillRows) return out;
@@ -147,8 +145,9 @@ function rowOptionsRaw(tiers, grow, stretch, fillRows = true, crop = DEFAULT_CRO
   }
   const c = Math.max(...s);
   const A = sum(s.map((v) => v * v));
-  const same = out.length && Math.abs(out[0].c - c) <= 1e-9 && Math.abs(out[0].A - A) <= 1e-9;
-  if (!same && fitsCrop(s, c, stretch, false, crop)) out.push({ c, A, s });
+  if (!out.length || Math.abs(out[0].c - c) > 1e-9 || Math.abs(out[0].A - A) > 1e-9) {
+    out.push({ c, A, s });
+  }
 
   // 3) **格内拉伸**：同一行里各自纵向拉高到行高（宽高比变化 <= stretch）
   //    可行条件是"最宽的格 / 最窄的格 <= (1+stretch)²"：
@@ -163,15 +162,16 @@ function rowOptionsRaw(tiers, grow, stretch, fillRows = true, crop = DEFAULT_CRO
     if (wmax <= wmin * lim + 1e-9) {
       const c2 = wmax / (1 + stretch);
       const A2 = c2 * sum(s);                    // 面积 = 行高 × 本行实占宽度（未满宽就不许虚报）
-      const dup = out.some((o) => Math.abs(o.c - c2) < 1e-9 && Math.abs(o.A - A2) < 1e-9);
-      if (!dup && fitsCrop(s, c2, stretch, true, crop)) out.push({ c: c2, A: A2, s, flat: true });
+      if (!out.some((o) => Math.abs(o.c - c2) < 1e-9 && Math.abs(o.A - A2) < 1e-9)) {
+        out.push({ c: c2, A: A2, s, flat: true });
+      }
     }
   }
   return out;
 }
 
 /** 预计算：ropt[i][ln-1] = seq[i..i+ln) 这一行的候选。DP 内层只查表。 */
-export function precompute(tiers, grow = DEFAULT_GROW, stretch = 0, fillRows = true,
+export function precompute(tiers, grow = DEFAULT_GROW, stretch = DEFAULT_STRETCH, fillRows = true,
   crop = DEFAULT_CROP) {
   const n = tiers.length;
   const ropt = Array.from({ length: n }, () => []);
@@ -199,12 +199,14 @@ export function precompute(tiers, grow = DEFAULT_GROW, stretch = 0, fillRows = t
  *          x/y/w/h 是归一化坐标（0..1，y 相对本张），t=档位，f=实际缩放系数
  */
 export function solve(tiers, {
-  grow = DEFAULT_GROW, mu = 1, stretch = 0, binCost = 1.02, fillRows = true,
+  grow = DEFAULT_GROW, mu = 1, stretch = DEFAULT_STRETCH, binCost = 1.02, fillRows = true,
   crop = DEFAULT_CROP,
 } = {}) {
   const n = tiers.length;
   if (!n) return { bins: 0, fill: 0, cells: [], area: 0 };
-  const ropt = precompute(tiers, grow, stretch, fillRows, crop);
+  // **重建几何和生成候选用同一个 stretch**：只夹一半会造出"DP 以为裁 10%、实际裁 30%"的图。
+  const st = effectiveStretch(stretch, crop);
+  const ropt = precompute(tiers, grow, st, fillRows, crop);
   const CAP = UNIT;                     // 方形容器：行高总和 <= 1
   const BIN = UNIT * UNIT;              // 每箱面积
   const CLOSE = BIN * binCost;          // 封箱的真实代价
@@ -276,7 +278,7 @@ export function solve(tiers, {
       // 够不到行高的部分才留空。以前只有"整行 flat / 整行不拉"两档，宽度比超过
       // (1+τ)/(1−τ) 的行一点空隙都收不回来 —— 混合档位里那种行才是空隙的大头。
       // 这是**纯后处理**：不改行划分、不改箱数，只把已有的空白填上。
-      const hh = flat ? rowH : Math.min(rowH, sv * (1 + stretch));
+      const hh = flat ? rowH : Math.min(rowH, sv * (1 + st));
       cells.push({
         x: x / UNIT,
         y: binH,

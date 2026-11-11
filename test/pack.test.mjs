@@ -169,13 +169,15 @@ test('rowOptions: grow 参与缓存键（决定能不能升档）', () => {
  * 补完之后做了变异验证：每个改坏都会被抓到。
  */
 
-test('DEFAULT_STRETCH 是 0.3，而且它确实比 0.2 排得紧', () => {
+test('DEFAULT_STRETCH 是 0.3，而且它确实比 0.2 排得紧（给了裁切预算时）', () => {
   assert.equal(DEFAULT_STRETCH, 0.3, '容差被回滚的话这条会红');
   // 这条序列在 0.2 下要 2 张（44.3%），0.3 下 1 张（89.7%）。挑它是因为两者差一整张图，
   // 不是靠小数点后的 fill 差异 —— 那种断言换个平台就会飘。
+  // 拉伸只有在"允许裁画面"时才存在（默认 crop 为 0，等于一格不裁）。
+  const budget = { cropX: 0.9, cropY: 0.9 };
   const seq = [3, 4, 4, 4, 7, 7, 7, 2, 2];
-  const now = solve(seq);
-  const old = solve(seq, { stretch: 0.2 });
+  const now = solve(seq, { crop: budget });
+  const old = solve(seq, { stretch: 0.2, crop: budget });
   assert.equal(old.bins, 2, '0.2 容差下这 9 帧应该装不下');
   assert.equal(now.bins, 1, '0.3 容差下应该刚好一张');
   assert.ok(now.fill > old.fill + 0.2, `占用率该明显更高：${now.fill} vs ${old.fill}`);
@@ -226,7 +228,7 @@ test('给了裁切预算也别超：cropY 只放行到预算为止', () => {
   // [2,3,3] 的 flat 解会把 1/3 的格子拉到 1/2 高 —— 横向裁掉 1/3，超出 5% 的预算
   const tight = solve([2, 3, 3], { stretch: 0.3, crop: { cropX: 0.05, cropY: 0.05 } });
   for (const c of tight.cells) {
-    const dev = Math.max(c.w, c.h) / Math.min(c.w, c.h) - 1;
-    assert.ok(dev <= 0.05 + 1e-9, `裁过头了：${dev.toFixed(3)} > 0.05`);
+    const cut = 1 - Math.min(c.w, c.h) / Math.max(c.w, c.h);
+    assert.ok(cut <= 0.05 + 1e-9, `裁过头了：${(cut * 100).toFixed(1)}% > 5%`);
   }
 });

@@ -38,7 +38,7 @@ import {
   framesFromBounds, integralMarks, levelAt, levelCurve, readabilityOf, tierHistogram, thresholdsFor,
   needsTimeFloor, splitStaticShots, STATIC_SHOT_MAX_FRAMES, STATIC_SHOT_MAX_SEC,
 } from './tiers.js';
-import { DEFAULT_STRETCH, solve, toRects } from './pack.js';
+import { solve, toRects } from './pack.js';
 import { remember } from './memory.js';
 import { analyzeAudio, describeAudio, hasAudibleSamples } from './audio.js';
 import { alignCells, resolveAsrConfig } from './asr.js';
@@ -52,15 +52,6 @@ import { addAudioStrip, addSheetHeader, clock, composePacked, encodePngBuffer } 
 import { extractFrameWithFallback, extractFramesBatched, mapPool } from './frames.js';
 import { correctByOnScreenSubs } from './ocr-subs.js';
 import { resolveHwaccel } from './hwaccel.js';
-
-/**
- * 排布用的宽高比容差。**只在 `pack.js` 里用**：`0.3` 是"一格最多能比画面宽/窄 30%"，
- * 而**拉伸就是裁画面**（cover 裁掉溢出那一维）—— 所以从 0.8.0 起 pipeline 不再传它。
- *
- * 现在的规则：**格子的比例必须等于画面比例**，混合档位靠 `bounds()` 把相邻档缩/放到同一尺寸
- * 来填满一行（1/2 和 1/3 能在 1/3 上会合），不再靠拉伸硬凑。真画面一格都不裁。
- */
-const PACK_STRETCH = DEFAULT_STRETCH;
 
 export const PICK_MODES = ['sharp', 'mid', 'thumb'];// 只有两种：时间码不烧进画面 —— 它占像素、压缩后先糊，而清单里已经有 0.01 秒精度的时间。
 // （历史上 `index+time` 在参数表里但从没实现过，等于一个会静默失效的选项。）
