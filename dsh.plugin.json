@@ -1,7 +1,7 @@
 {
   "name": "dsh-video-storyboard",
   "description": "Shot-aware storyboard for DSH: one frame per cut, cell size = cut density (1/1…1/8), packed into few images with a citable timestamp index.",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "entry": {
     "name": "dsh-video-storyboard",
     "inject": [
