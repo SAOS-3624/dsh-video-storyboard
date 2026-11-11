@@ -354,6 +354,27 @@ test('fitCanvas: 预算低于 544² 地板时抬到地板（画小不省钱，�
   assert.ok(Math.max(big.width, big.height) <= MAX_CANVAS_SIDE);
 });
 
+test('fitCanvas: 竖屏的长边（高）也要落在计费行上（#91）', () => {
+  // 横屏是**宽**在长边上、已经对齐 42；竖屏是**高**在长边上。
+  // 以前高度那道闸写死 8px（443px 上标出来的），747px 的竖屏溢出 9px 就放弃压缩，
+  // 于是每张白付一行：420×765=211 vs 420×756=200。
+  const p = fitCanvas(9 / 16);
+  const ph = headerHeight(p.width);
+  assert.equal(p.width % 42, 0, '宽仍然落在计费格上');
+  assert.equal((p.height + ph) % 42, 0, '竖屏的总高（含页眉）必须正好压在行边界上');
+  assert.equal(imageTokens(p.width, p.height + ph), 200, '9:16 不能白付一行');
+  // 代价只能是"矮 1.2%"，不能为对齐多丢面积（420×747 是修之前的解）
+  assert.ok(p.width * p.height >= 420 * 747 * 0.98,
+    `面积掉太多：${p.width}×${p.height}`);
+});
+
+test('fitCanvas: 横屏结果不受 #91 影响（相对闸门在 443px 上仍等于 8px）', () => {
+  const d = fitCanvas(16 / 9);
+  const dh = headerHeight(d.width);
+  assert.deepEqual([d.width, d.height], [798, 443]);
+  assert.equal(imageTokens(d.width, d.height + dh), 222);
+});
+
 test('shouldForceSheetCap: 344 张算失控，60 张不算', () => {
   assert.equal(shouldForceSheetCap(344, 12), true, '49 分钟纪录片不封顶 344 张 → 必须压');
   assert.equal(shouldForceSheetCap(100, 12), true, '超过 max(64, 8x12)=96');

@@ -216,7 +216,7 @@ export function headerHeight(width) {
 }
 
 /**
- * 把格子区高度压回"格子区 + 页眉 = 42 的整数倍"，**只在溢出量 <= 8px 时生效**。
+ * 把格子区高度压回"格子区 + 页眉 = 42 的整数倍"，**只在溢出量 <= 高度 1.8% 时生效**。
  *
  * 出图时顶上会叠一条 `headerHeight` 的抬头，真正的 PNG 高度是两者之和。
  * 不把抬头算进来就会卡在行边界上多收一整行 token：
@@ -224,12 +224,25 @@ export function headerHeight(width) {
  *   449 + 19 = 468 → 12 行 → 242 token
  *   443 + 19 = 462 → 11 行 → 222 token   ← 格子区只矮 1.3%
  *
- * 压太多（差 30px 也去压）是拿面积换 token —— 两者近似线性，不划算。所以设 8px 的闸。
+ * 压太多（差 30px 也去压）是拿面积换 token —— 两者近似线性，不划算。所以设一道闸。
+ *
+ * ## 闸门是**相对**的，不是写死的 8px（#91）
+ *
+ * 8px 这个数是在 443px 高的横屏画布上标出来的（1.8%）。写死成绝对值就对竖屏失效：
+ * 9:16 的画布高 747，含页眉 765，溢出 9px > 8 → 不压，于是白付一整行：
+ *
+ *   420×747 + 18 = 765 → 19 行 → 211 token
+ *   420×738 + 18 = 756 → 18 行 → 200 token   ← 格子区只矮 1.2%，便宜 5.2%
+ *
+ * 横屏是**宽**在长边上（宽已对齐 42），竖屏是**高**在长边上，所以这条闸门只影响竖屏 ——
+ * 也就是说以前这套画布尺寸只对横屏调过。改成按高度取 1.8%：443px 上仍是 8px（不变），
+ * 747px 上给到 13px，竖屏才不会白付一行。
  */
 function snapHeightToHeader(height, width) {
   const hh = headerHeight(width);
   const over = (height + hh) % IMAGE_CELL;
-  if (over <= 0 || over > 8) return height;
+  const gate = Math.max(8, Math.round((Number(height) || 0) * 0.018));
+  if (over <= 0 || over > gate) return height;
   const next = height - over;
   if (next < 36) return height;
   // **只在真降价时才压**：地板区（<544²）压多少都是同一个价，白掉像素反而是亏。
