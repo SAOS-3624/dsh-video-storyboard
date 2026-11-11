@@ -91,6 +91,8 @@ export const SMOOTH_FRAMES = 50;
 /**
  * 阈值表是按**这个帧率**标定的（docx 那句"0.0085 ≈ 3.3 秒一刀"就是 30fps 下算的）。
  * `timeNormalize` 用它当基准做折算 —— 换基准等于换掉整套标定，别动。
+ *
+ * 积分阈值标定在同一条基准上，`INTEGRAL_BASE_FPS` 直接引用这个值（#90 nit）。
  */
 export const BASE_FPS = 30;
 
@@ -598,8 +600,11 @@ export const INTEGRAL_REF_SCORE = 4;
  * 帧率成反比（帧间隔越短差越小）—— **Σscore 与 fps 无关**。两者相乘的结果是
  * 高帧率永远攒不够（实测同一段 60 秒素材、每秒累计 120 分：12fps 出 24 个采样点、
  * 30fps 出 10 个、60fps 只剩 5 个）。
+ *
+ * **和 `BASE_FPS` 是同一个数**（#90 nit）：阈值表和积分阈值都标在 30fps 上，
+ * 换基准等于换掉整套标定，只改一个就会让两套判定错位。所以这里直接引用，不另写字面量。
  */
-export const INTEGRAL_BASE_FPS = 30;
+export const INTEGRAL_BASE_FPS = BASE_FPS;
 
 /**
  * **积分采样点（假切点）**：沿时间累加画面变化率，累够阈值就记一个点、然后清零。
