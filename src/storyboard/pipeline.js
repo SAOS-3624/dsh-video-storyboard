@@ -22,7 +22,7 @@
 
 import { cpus } from 'node:os';
 
-import { probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
+import { detectContentBox, probeVideo, DEFAULT_FFMPEG, DEFAULT_FFPROBE } from './probe.js';
 import { resolveInput } from './fetch.js';
 import {
   packPrints, packedFps, scanShots, unpackPrints,
@@ -54,8 +54,11 @@ import { correctByOnScreenSubs } from './ocr-subs.js';
 import { resolveHwaccel } from './hwaccel.js';
 
 /**
- * 排布用的宽高比容差。**只在这里引用一次**（源头是 `pack.DEFAULT_STRETCH`）：
- * 以前 pipeline 里散着 8 处 `stretch: 0.2`，改默认值得改 8 个地方，漏一个就漂移。
+ * 排布用的宽高比容差。**只在 `pack.js` 里用**：`0.3` 是"一格最多能比画面宽/窄 30%"，
+ * 而**拉伸就是裁画面**（cover 裁掉溢出那一维）—— 所以从 0.8.0 起 pipeline 不再传它。
+ *
+ * 现在的规则：**格子的比例必须等于画面比例**，混合档位靠 `bounds()` 把相邻档缩/放到同一尺寸
+ * 来填满一行（1/2 和 1/3 能在 1/3 上会合），不再靠拉伸硬凑。真画面一格都不裁。
  */
 const PACK_STRETCH = DEFAULT_STRETCH;
 
@@ -215,6 +218,23 @@ export async function runStoryboard(opts) {
     Number(to) > 0 ? Number(to) : (autoWindow ? winStart + segSec : info.duration),
   );
   const winDur = Math.max(0.2, winEnd - winStart);
+
+  /**
+   * **画面里真正有内容的那块矩形**（去掉黑边）。竖屏素材塞进横屏容器时，
+   * 四成的付费像素是黑的 —— 检测到就裁掉，画布比例也跟着内容走。
+   *
+   * 三条边界：
+   *   - 远程 URL 不探（ffmpeg 抓 URL 要带 UA/Referer，这里没有那套上下文）；
+   *   - 失败一律当"没有黑边"，宁可留着也不瞎裁；
+   *   - 只认"四边都在"的框：`detectContentBox` 内部已经做过理智检查。
+   */
+  const contentBox = /^https?:/i.test(String(input)) ? null : await detectContentBox({
+    input, width: info.width, height: info.height, duration: info.duration, ffmpegPath,
+  }).catch(() => null);
+  const padX = contentBox ? Math.max(0, (info.width - contentBox.w) / info.width) : 0;
+  const padY = contentBox ? Math.max(0, (info.height - contentBox.h) / info.height) : 0;
+  // 画布比例跟着**内容**走；没黑边时就是原来的 info.aspect
+  const viewAspect = contentBox ? contentBox.w / contentBox.h : info.aspect;
 
   let asrLife = null;
   let asrSeconds = null;
@@ -378,7 +398,7 @@ export async function runStoryboard(opts) {
     duration: winDur, fps: info.fps, cuts: absCuts, thresholds: thresholdsFor(tierCurve),
     timeNormalize,
   });
-  const canvas = fitCanvas(info.aspect, { maxSide: maxCanvasSide, budget });
+  const canvas = fitCanvas(viewAspect, { maxSide: maxCanvasSide, budget });
   // 排布沿用"按行凑满"（fillRows: true）：放开它虽然填充率更高，但**张数会涨**（5 → 7），
   // 那是舍本逐末 —— 一张图的钱按它自己的像素算（tiers.imageTokens）：多一张就多一份像素地板
   // 加上填充损失，所以"少开一张"仍然划算，但别再把它当成常数。`fillRows:false` 留给调用方自己选。
@@ -386,7 +406,7 @@ export async function runStoryboard(opts) {
   // PACK / activeStrategy 是**可变的**：auto 要拿同一批帧把三个候选各排一次再挑，
   // 所以 build() 读的是当前生效的那一对，而不是闭包里钉死的一个。改完这里必须把
   // activeStrategy/PACK 还原成最终选中的那个，后面 trimTail / fillGaps 还在用。
-  const packFor = (name) => ({ stretch: PACK_STRETCH, binCost: BIN_COST[name] ?? 1.02, fillRows: true });
+  const packFor = (name) => ({ binCost: BIN_COST[name] ?? 1.02, fillRows: true });
   let activeStrategy = strategy;
   let PACK = packFor(activeStrategy);
   // 低于 minFrames 就把最长的段反复二等分（zoom / 陪看用）
@@ -450,7 +470,7 @@ export async function runStoryboard(opts) {
       const k = Math.max(1, Math.min(8, Math.ceil(Math.sqrt(sg.length))));
       tr = sg.map(() => k);
     }
-    return { segs: sg, raw, tiers: tr, plan: solve(tr, { stretch: PACK_STRETCH, ...PACK }) };
+    return { segs: sg, raw, tiers: tr, plan: solve(tr, PACK) };
   };
   const minCellOf = (b) => {
     const minW = Math.min(...b.plan.cells.map((c) => Math.round(c.w * canvas.width)));
@@ -474,7 +494,7 @@ export async function runStoryboard(opts) {
     if (b.plan.bins <= cap) return b;
     for (let bump = 1; bump <= 7; bump += 1) {
       const tr = b.tiers.map((t) => (Number(t) === 0 ? 0 : Math.min(8, Number(t) + bump)));
-      const p = solve(tr, { stretch: PACK_STRETCH, ...PACK });
+      const p = solve(tr, PACK);
       if (p.bins <= cap) return { ...b, tiers: tr, plan: p };
     }
     return null;                                  // 全压到 1/8 还装不下 → 交给减帧
@@ -557,7 +577,7 @@ export async function runStoryboard(opts) {
     const from = lastBin[0].seq;
     for (let step = 1; step <= 2; step += 1) {
       const bumped = b.tiers.map((t, i) => (i >= from ? Math.min(8, t + step) : t));
-      const p2 = solve(bumped, { stretch: PACK_STRETCH, ...PACK });
+      const p2 = solve(bumped, PACK);
       if (p2.bins < b.plan.bins) return { ...b, tiers: bumped, plan: p2 };
     }
     return b;
@@ -629,7 +649,7 @@ export async function runStoryboard(opts) {
           const tiers2 = [...cur.tiers.slice(0, first),
             ...new Array(small).fill(tier), ...cur.tiers.slice(last + 1)];
           if (!fits(segs2)) continue;
-          const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
+          const p2 = solve(tiers2, PACK);
           if (process.env.DSH_PLAN_DEBUG) {
             console.error(`[fillGaps] coarsen bin=${worst.bin} ${nb}->${small} tier=${tier}`
               + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`
@@ -670,7 +690,7 @@ export async function runStoryboard(opts) {
           const tiers2 = [...cur.tiers.slice(0, first),
             ...new Array(sq).fill(tier), ...cur.tiers.slice(last + 1)];
           if (!fits(segs2)) continue;
-          const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
+          const p2 = solve(tiers2, PACK);
           if (process.env.DSH_PLAN_DEBUG) {
             console.error(`[fillGaps] uniform bin=${worst.bin} ${nb}->${sq} tier=${tier}`
               + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`
@@ -716,7 +736,7 @@ export async function runStoryboard(opts) {
           tiers2.splice(c2.i, 1, cur.tiers[c2.i], cur.tiers[c2.i]);
         }
         if (!fits(segs2)) continue;
-        const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
+        const p2 = solve(tiers2, PACK);
         if (process.env.DSH_PLAN_DEBUG) {
           console.error(`[fillGaps] bin=${worst.bin} n=${n} toSquare=+${toSquare}`
             + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`
@@ -738,7 +758,7 @@ export async function runStoryboard(opts) {
           segs2.splice(pick.i, 1, ...parts);
           tiers2.splice(pick.i, 1, cur.tiers[pick.i], 0);
           if (!fits(segs2)) continue;
-          const p2 = solve(tiers2, { stretch: PACK_STRETCH, ...PACK });
+          const p2 = solve(tiers2, PACK);
           if (process.env.DSH_PLAN_DEBUG) {
             console.error(`[fillGaps] bin=${worst.bin} free-filler seg=${pick.i}`
               + ` -> bins=${p2.bins} fill=${p2.fill.toFixed(3)}`
@@ -892,6 +912,17 @@ export async function runStoryboard(opts) {
     ...(budgetFloorRaisedFrom && budgetFloorRaisedFrom !== budget
       ? { budgetRaisedFrom: budgetFloorRaisedFrom } : {}),
     canvas: { width: canvas.width, height: canvas.height },
+    // 画面自带黑边（竖屏素材塞进横屏容器最常见）：清单要说明画布比例是照着**内容**算的。
+    // 只在真裁了东西时才报 —— 没有黑边也写一行 "trimmed 1280x720 → 1280x720"，
+    // 模型会以为这次做过什么处理。
+    ...(contentBox && (padX > 0.005 || padY > 0.005) ? {
+      trimmed: {
+        from: `${info.width}x${info.height}`,
+        to: `${contentBox.w}x${contentBox.h}`,
+        padX: +(padX * 100).toFixed(0),
+        padY: +(padY * 100).toFixed(0),
+      },
+    } : {}),
     // **最小格**是清单该报的那个数：模型看到的就是最小那格的可读性
     cell: {
       w: minCellW, h: minCellH,
@@ -1060,14 +1091,14 @@ export async function runStoryboard(opts) {
     }));
     const got = await extractFramesBatched({
       input, jobs: list, fps: info.fps, ffmpegPath,
-      srcW: info.width, srcH: info.height,
+      srcW: info.width, srcH: info.height, crop: contentBox,
       // 扫描已经按 (ffmpeg, input) 探过一次，这里直接命中进程内缓存；没探过就是 null
       hwaccel: await resolveHwaccel({ ffmpegPath, input }),
       // 批量块是"解码 20 秒"的重活，开太多路会互相抢解码器；实测 4 路已接近线性
       concurrency: Math.max(2, Math.min(4, Math.round(frameConcurrency / 3))),
       fallback: async (j) => extractFrameWithFallback({
         input, remote: null, at: j.at, dur: 0,
-        cellW: j.cellW, cellH: j.cellH, ffmpegPath, pick,
+        cellW: j.cellW, cellH: j.cellH, ffmpegPath, pick, crop: contentBox,
       }),
     });
     for (const [k, v] of got) shotOf.set(k, v);
@@ -1075,7 +1106,7 @@ export async function runStoryboard(opts) {
     for (const batch of batches) {
       const shots = await mapPool(batch, frameConcurrency, async (j) => extractFrameWithFallback({
         input, remote: remoteFrame, at: j.cell.t, dur: 0,
-        cellW: j.rect.pw, cellH: j.rect.ph, ffmpegPath, pick,
+        cellW: j.rect.pw, cellH: j.rect.ph, ffmpegPath, pick, crop: contentBox,
       }));
       for (let i = 0; i < batch.length; i += 1) shotOf.set(`${batch[i].si}:${batch[i].k}`, shots[i]);
     }

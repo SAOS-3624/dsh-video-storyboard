@@ -146,11 +146,13 @@ test('性能: 96 帧（长片概览规模）求解 < 50ms', () => {
 /* ---------------------------------------------------------------- 缓存键（#64） */
 
 test('rowOptions: 不同 stretch 不能共用缓存（flat 行高直接依赖它）', () => {
-  const a = rowOptions([3, 3], DEFAULT_GROW, 0.2, true);
-  const b = rowOptions([3, 3], DEFAULT_GROW, 0.3, true);
+  // 拉伸只在有裁切预算时才可能出现（黑边），没预算时两种 tau 都退化成"只许正方形"
+  const budget = { cropX: 0.4, cropY: 0.4 };
+  const a = rowOptions([3, 3], DEFAULT_GROW, 0.2, true, budget);
+  const b = rowOptions([3, 3], DEFAULT_GROW, 0.3, true, budget);
   assert.notDeepEqual(a, b, 'stretch 0.2 和 0.3 必须算出不同的行高');
   // 再算一次 0.2，必须还是 0.2 的结果（不能被 0.3 覆盖）
-  const again = rowOptions([3, 3], DEFAULT_GROW, 0.2, true);
+  const again = rowOptions([3, 3], DEFAULT_GROW, 0.2, true, budget);
   assert.deepEqual(again, a, '回头再算 0.2 仍要拿到 0.2 的结果');
 });
 
@@ -185,20 +187,46 @@ test('flat 只在该行 最宽/最窄 <= (1+τ)² 时出现（别偷偷拉过头
   //          旧的 (1+τ)/(1−τ) = 1.5 会放行，最窄格被拉到 1.25（+25%），
   //          比"最多走形 20%"多出四分之一 —— 这就是要拦的。
   //   τ=0.3：边界 (1.3)² = 1.69 → 1.5 放行。
-  const tight = rowOptions([2, 4, 4, 4], DEFAULT_GROW, 0.2, true);
+  const budget = { cropX: 0.4, cropY: 0.4 };
+  const tight = rowOptions([2, 4, 4, 4], DEFAULT_GROW, 0.2, true, budget);
   assert.equal(tight.some((o) => o.flat), false, '20% 容差下这行不该有 flat 候选');
-  const loose = rowOptions([2, 4, 4, 4], DEFAULT_GROW, 0.3, true);
+  const loose = rowOptions([2, 4, 4, 4], DEFAULT_GROW, 0.3, true, budget);
   assert.equal(loose.some((o) => o.flat), true, '30% 容差下应该允许');
 });
 
 test('部分拉伸：矮格被拉高，但不超过行高、也不超过 (1+τ) 倍', () => {
   // [1,4,4] 一行里宽度差 2 倍，flat 不可行（超过 (1+τ)²），只能靠逐格拉。
   const tau = 0.3;
-  const p = solve([1, 4, 4], { stretch: tau });
+  // 拉伸 = 裁画面，必须由调用方给"这里有这么多黑边可以吃"的预算
+  const p = solve([1, 4, 4], { stretch: tau, crop: { cropX: 0.25, cropY: 0.25 } });
   const stretched = p.cells.filter((c) => c.h > c.w + 1e-9);
   assert.ok(stretched.length > 0, '宽度不等又没有 flat 的行，应该有格子被拉高');
   for (const c of p.cells) {
     assert.ok(c.h <= c.w * (1 + tau) + 1e-9, `拉伸超过容差：${c.w.toFixed(3)} -> ${c.h.toFixed(3)}`);
     assert.ok(Math.abs(c.h * c.stretch - c.w) < 1e-9, 'h / stretch 字段必须自洽（渲染按 st 反查宽高）');
+  }
+});
+
+/* ---------------------------------------------------------------- 不裁真画面（8.0） */
+
+test('默认一格都不裁：没有裁切预算时，所有格子都是精确比例', () => {
+  // 拉伸是"为了凑行高把画面裁掉一截"。默认不许裁 —— 混合档位要靠 bounds()
+  // 把相邻档缩/放到同一尺寸来填满（1/2 和 1/3 能在 1/3 上会合）。
+  for (const seq of [[1, 4, 4], [2, 4, 4, 4], [1, 1, 3, 3, 4, 5, 5, 6], [2, 3, 4]]) {
+    const p = solve(seq);
+    for (const c of p.cells) {
+      assert.ok(Math.abs(c.stretch - 1) < 1e-9,
+        `${seq.join(',')} 出 了非方形格：${c.stretch.toFixed(3)}（等于把画面裁了）`);
+      assert.ok(Math.abs(c.h - c.w) < 1e-9);
+    }
+  }
+});
+
+test('给了裁切预算也别超：cropY 只放行到预算为止', () => {
+  // [2,3,3] 的 flat 解会把 1/3 的格子拉到 1/2 高 —— 横向裁掉 1/3，超出 5% 的预算
+  const tight = solve([2, 3, 3], { stretch: 0.3, crop: { cropX: 0.05, cropY: 0.05 } });
+  for (const c of tight.cells) {
+    const dev = Math.max(c.w, c.h) / Math.min(c.w, c.h) - 1;
+    assert.ok(dev <= 0.05 + 1e-9, `裁过头了：${dev.toFixed(3)} > 0.05`);
   }
 });

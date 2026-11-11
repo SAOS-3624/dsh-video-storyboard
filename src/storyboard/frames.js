@@ -26,14 +26,14 @@ const runFile = promisify(execFile);
  * 远程时把候选帧降到 1：一次 HTTP seek 实测 1.92 s，3 候选即使并发也要 3–4 s/格。
  */
 export async function extractFrameWithFallback({
-  input, remote, at, dur, cellW, cellH, ffmpegPath, pick = 'mid',
+  input, remote, at, dur, cellW, cellH, ffmpegPath, pick = 'mid', crop = null,
 }) {
   const grab = (src, http, candidates) => {
     if (pick === 'sharp') {
-      return extractSharpest({ input: src, at, dur, cellW, cellH, ffmpegPath, http, candidates });
+      return extractSharpest({ input: src, at, dur, cellW, cellH, ffmpegPath, http, candidates, crop });
     }
     return extractFrameRaw({
-      input: src, at, dur, cellW, cellH, ffmpegPath, http,
+      input: src, at, dur, cellW, cellH, ffmpegPath, http, crop,
       mode: pick === 'thumb' ? 'thumb' : 'mid',
     });
   };
@@ -189,7 +189,7 @@ function planBatches(jobs, { maxSpan, maxFrames }) {
 export async function extractFramesBatched({
   input, jobs, fps, ffmpegPath = DEFAULT_FFMPEG, srcW = 0, srcH = 0, hwaccel = null,
   maxSpan = MAX_SPAN_SEC, maxFrames = MAX_FRAMES_PER_CALL,
-  concurrency = 4, fallback,
+  concurrency = 4, fallback, crop = null,
 }) {
   const out = new Map();
   if (!jobs.length) return out;
@@ -219,7 +219,9 @@ export async function extractFramesBatched({
     // 让 `boxResize` 的 cover 成为**唯一一次裁切**，几何就和逐帧路径完全一致。
     //
     // 宽取够大，保证任何目标格都能被 cover 住：W ≥ max(cellW) 且 W ≥ max(cellH × 源比例)。
-    const srcAspect = (srcW && srcH) ? srcW / srcH : 16 / 9;
+    const srcAspect = crop
+      ? crop.w / crop.h
+      : ((srcW && srcH) ? srcW / srcH : 16 / 9);
     const needW = Math.max(...batch.map((j) => Math.max(j.cellW, Math.ceil(j.cellH * srcAspect))));
     // 偶数：yuv 系编码器要偶数，rgb24 不要求但统一取偶数省得记两套规则
     const W = Math.max(2, needW + (needW % 2));
@@ -232,8 +234,13 @@ export async function extractFramesBatched({
     // 两个格子可能落在**同一帧**（极短段的相邻中点）：select 对同一个 n 只吐一次，
     // 所以按唯一帧号去取，再把同一份 buffer 分给这几格。
     const uniq = [...new Set(ks)].sort((a, b) => a - b);
+    // 裁黑边放在**最前面**：后面的 `scale=W:-2` 仍然只缩放不裁，boxResize 仍是唯一一次 cover
+    const cropPrefix = crop
+      ? `crop=${Math.max(2, Math.round(crop.w))}:${Math.max(2, Math.round(crop.h))}`
+        + `:${Math.max(0, Math.round(crop.x))}:${Math.max(0, Math.round(crop.y))},`
+      : '';
     const filter = `select='${uniq.map((k) => `eq(n,${k})`).join('+')}',`
-      + `scale=${W}:-2:flags=area`;
+      + `${cropPrefix}scale=${W}:-2:flags=area`;
     let stdout;
     try {
       ({ stdout } = await runFile(ffmpegPath, [

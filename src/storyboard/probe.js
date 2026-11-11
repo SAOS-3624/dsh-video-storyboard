@@ -33,6 +33,74 @@ function run(bin, args, opts) {
 
 export { DEFAULT_FFMPEG, DEFAULT_FFPROBE };
 
+/**
+ * 从 cropdetect 的 stderr 里取最后一个 `crop=w:h:x:y`。
+ *
+ * cropdetect 每帧打一行，前面几帧常常是 `crop=0:0:0:0` 或全画幅（还没累积够），
+ * 所以要**取最后一条**，不是第一条。
+ */
+export function parseCropdetect(stderr) {
+  const hits = [...String(stderr ?? '').matchAll(/crop=(\d+):(\d+):(\d+):(\d+)/g)];
+  if (!hits.length) return null;
+  const [, w, h, x, y] = hits[hits.length - 1];
+  const box = { x: Number(x), y: Number(y), w: Number(w), h: Number(h) };
+  if (!(box.w > 0 && box.h > 0)) return null;
+  return box;
+}
+
+/**
+ * **画面里真正有内容的那块矩形**（去掉上下/左右的黑边）。
+ *
+ * 为什么必须检测：竖屏素材塞进横屏容器后，四成的付费像素是黑的。分镜本身不看那些像素，
+ * 但它们照样按 42px 网格收钱，而且把画布比例拽成 16:9 —— 格子里一半是黑边。
+ *
+ * 做法：抽两个位置（1/3、2/3）各解 0.6 秒，两次结果取**并集**（更保守：宁可少裁不可多裁），
+ * 再夹一层理智检查（面积 <20%、宽或高 <20% 都当检测失败）。
+ *
+ * 失败一律返回 null —— 拿不到就不能瞎裁，宁可留着黑边。
+ *
+ * @returns {Promise<{x:number,y:number,w:number,h:number}|null>}
+ */
+export async function detectContentBox({
+  input, width, height, duration, ffmpegPath = DEFAULT_FFMPEG, timeoutMs = 15_000,
+}) {
+  const W = Number(width) || 0;
+  const H = Number(height) || 0;
+  const dur = Number(duration) || 0;
+  if (!(W > 0 && H > 0)) return null;
+  const spots = dur > 3 ? [dur / 3, (dur * 2) / 3] : [0];
+  const boxes = [];
+  for (const at of spots) {
+    try {
+      const { stderr } = await run(ffmpegPath, [
+        '-hide_banner', '-nostdin', '-v', 'info',
+        '-ss', String(Math.max(0, at)), '-t', '0.6', '-i', input,
+        '-an', '-sn', '-vf', 'cropdetect=limit=24:round=2:reset=1',
+        '-frames:v', '18', '-f', 'null', '-',
+      ], { maxBuffer: 8 * 1024 * 1024, timeout: timeoutMs });
+      const box = parseCropdetect(stderr);
+      if (box) boxes.push(box);
+    } catch {
+      /* 这一处抽不到就算了，另一处还能用 */
+    }
+  }
+  if (!boxes.length) return null;
+  // 并集：x 取最小、右边取最大 —— 任一采样点里有内容的地方都不能裁掉
+  const x0 = Math.min(...boxes.map((b) => b.x));
+  const y0 = Math.min(...boxes.map((b) => b.y));
+  const x1 = Math.max(...boxes.map((b) => b.x + b.w));
+  const y1 = Math.max(...boxes.map((b) => b.y + b.h));
+  const box = {
+    x: Math.max(0, x0), y: Math.max(0, y0),
+    w: Math.min(W, x1) - Math.max(0, x0), h: Math.min(H, y1) - Math.max(0, y0),
+  };
+  // 理智检查：检测器抽风时会吐出窄条，照着裁就是把画面切了
+  if (!(box.w >= W * 0.2 && box.h >= H * 0.2)) return null;
+  if (box.w * box.h < W * H * 0.2) return null;
+  return box;
+}
+
+
 /** "25/1" | "30000/1001" → number | null */
 export function parseRational(value) {
   if (typeof value !== 'string' || value.trim() === '') return null;

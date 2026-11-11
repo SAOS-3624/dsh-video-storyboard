@@ -364,7 +364,7 @@ export function sharpness(buf, width, height) {
 export async function extractSharpest(opts) {
   const {
     input, at, dur, cellW, cellH, ffmpegPath = DEFAULT_FFMPEG,
-    candidates = 3, margin = 0.25, timeoutMs, http,
+    candidates = 3, margin = 0.25, timeoutMs, http, crop = null,
   } = opts;
   const safeDur = Math.max(0, dur || 0);
   const pad = Math.min(margin, safeDur / 3);
@@ -378,7 +378,7 @@ export async function extractSharpest(opts) {
   // 截断录制里末尾候选会越界（ffmpeg exit 0 + stdout 0 字节）。不能因为一个候选失败
   // 就丢掉另外两个可解候选 —— 一次失败会让整张分镜归零（issue #30）。
   const settled = await Promise.allSettled(times.map((t) =>
-    extractFrameRaw({ input, at: t, cellW, cellH, ffmpegPath, timeoutMs, http })
+    extractFrameRaw({ input, at: t, cellW, cellH, ffmpegPath, timeoutMs, http, crop })
       .then((f) => ({ ...f, sharp: sharpness(f.buffer, cellW, cellH) }))));
   const picked = settled.filter((s) => s.status === 'fulfilled').map((s) => s.value);
   if (picked.length === 0) {
@@ -410,9 +410,19 @@ function exec(args, { input, timeoutMs = 120_000 } = {}) {
   });
 }
 
-/** cover 缩放：等比放大到完全覆盖 cell，再居中裁切（绝不变形） */
-export const coverFilter = (cellW, cellH) =>
-  `scale=${cellW}:${cellH}:force_original_aspect_ratio=increase,crop=${cellW}:${cellH}`;
+/**
+ * cover 缩放：等比放大到完全覆盖 cell，再居中裁切（绝不变形）。
+ *
+ * `cropBox` 给了就**先把画面裁到内容区**（去掉黑边）再缩放 —— 黑边不会被搬进格子，
+ * 也就不会为纯黑像素付 token。裁的只是检测出来的边，不是画面内容（见 probe.detectContentBox）。
+ */
+export const coverFilter = (cellW, cellH, cropBox = null) => {
+  const head = cropBox
+    ? `crop=${Math.max(2, Math.round(cropBox.w))}:${Math.max(2, Math.round(cropBox.h))}`
+      + `:${Math.max(0, Math.round(cropBox.x))}:${Math.max(0, Math.round(cropBox.y))},`
+    : '';
+  return `${head}scale=${cellW}:${cellH}:force_original_aspect_ratio=increase,crop=${cellW}:${cellH}`;
+};
 
 const PTS_RE = /pts_time:([0-9.]+)/g;
 
@@ -438,8 +448,9 @@ export function httpInputArgs(input, http) {
 export async function extractFrameRaw(opts) {
   const {
     input, at, dur, cellW, cellH, ffmpegPath = DEFAULT_FFMPEG, mode = 'mid', timeoutMs, http,
+    crop = null,
   } = opts;
-  const filter = coverFilter(cellW, cellH);
+  const filter = coverFilter(cellW, cellH, crop);
   const netArgs = httpInputArgs(input, http);
   const need = cellW * cellH * 3;
   const baseSeek = mode === 'thumb' && dur > 0 ? at : (dur > 0 ? at + dur / 2 : at);

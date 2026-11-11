@@ -354,6 +354,8 @@ function formatPlanLine(plan) {
     .map(([k, v]) => (k === '0' ? `free×${v}` : `1/${k}×${v}`)).join(' ');
   const geo = [];
   if (plan.canvas) geo.push(`canvas=${plan.canvas.width}x${plan.canvas.height}`);
+  // 画面自带黑边时画布是照着**内容**算的：不说清楚，模型会以为比例错了
+  if (plan.trimmed) geo.push(`trimmed=${plan.trimmed.to} (bars cut, was ${plan.trimmed.from})`);
   // 报**最小格**：模型实际看到的最糊那一张就是它，报平均会让它高估小格的可读性
   if (plan.cell) geo.push(`cell>=${plan.cell.w}x${plan.cell.h} (${plan.cell.readability}, smallest)`);
   // 画布已裁到内容（图上不会有灰条），这个 fill 是**裁之前**占理想画布的比例
@@ -450,6 +452,10 @@ export function formatPlanPreview(result) {
       `frames="${plan.produced}" image="none (dry run)" ` +
       'note="scan + layout only: no image, no frame decoded, no transcript" />',
     `canvas ${canvas.width}x${canvas.height} · ${plan.produced} frames for this window` +
+      `${plan.trimmed
+        ? ` · bars trimmed ${plan.trimmed.from} → ${plan.trimmed.to} (${plan.trimmed.padX}% left-right / `
+          + `${plan.trimmed.padY}% top-bottom were black)`
+        : ''}` +
       `${result.cached ? ' · scan reused from cache (0 s)' : ''}`,
     `strategy preview — one image at this canvas ≈ ${imageTokens(canvas.width, canvas.height)} vision tokens ` +
       '(42px token grid); the text index is billed ON TOP of that:',
