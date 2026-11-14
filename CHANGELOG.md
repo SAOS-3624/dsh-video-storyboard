@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.5] - 2026-11-14
 
 ### Added — CLI 补上 `probe`（`dsh-video-probe`）
 
