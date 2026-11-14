@@ -34,8 +34,11 @@ async function cli(args) {
 
 test('probe: package.json 里注册了 dsh-video-probe，且文件存在', () => {
   const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.bin['dsh-video-probe'], './bin/probe.mjs');
-  assert.ok(existsSync(path.join(ROOT, pkg.bin['dsh-video-probe'])));
+  // `npm pkg fix` / `npm publish` 都会把 `./bin/x.mjs` 规范成 `bin/x.mjs`，
+  // 所以这里两种写法都认 —— 断言不该被一个无关的前缀搞红。
+  const rel = String(pkg.bin['dsh-video-probe'] || '').replace(/^\.\//, '');
+  assert.equal(rel, 'bin/probe.mjs');
+  assert.ok(existsSync(path.join(ROOT, rel)));
 });
 
 test('probe: 不给输入 → 退出 1，并给出用法', async () => {
