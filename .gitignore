@@ -8,6 +8,7 @@ storyboard*.png
 *-3.png
 *-4.png
 manifest*.json
+*.evidence.json
 
 # 本地临时/调试产物
 .tmp/

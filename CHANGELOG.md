@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Added — CLI 补上 `probe`（`dsh-video-probe`）
+
+工具层的 5 个入口里，CLI 一直只有 `storyboard`（外加 scan / doctor / asr-check 三个辅助 bin）。
+`probe` 是**最便宜的一步**（本地几毫秒、链接只解析不下载），没有它，脚本化流程只能直接跳去
+全片扫描 —— 一次扫描 + 几张图的 vision token（实测一张 ≈222，索引另算）就白付了。
+
+- 新增 `bin/probe.mjs`，注册为 `dsh-video-probe`；逻辑直接调 `probeVideo()` / `probeUrl()`，
+  与工具层同一批函数（`src/tools/probe.js` 是薄壳，这里也是薄壳，不复制逻辑）。
+- `--json` 输出字段与工具层返回一致，方便和 `video_probe` 对拍；不认识的开关照样当场喊出来
+  （与 0.6 起的约定一致）。
+- 与 `storyboard --dry-run` 的分工：`--dry-run` 会跑全片扫描（拿切点密度定档位），
+  `probe` 连扫描都不做 —— 只想问"多长、有没有音轨、什么分辨率"时用这个。
+
 ## [0.7.4] - 2026-11-11
 
 > 这一版只做一件事：**不拿真画面换省钱**。以前为了凑行高会把格子拉成 1.3:1 再 cover 裁掉
