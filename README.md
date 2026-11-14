@@ -513,7 +513,12 @@ D:/ocr-local/.venv/Scripts/python.exe -m pip install rapidocr onnxruntime
 { "ocr": { "python": "D:/ocr-local/.venv/Scripts/python.exe" } }
 ```
 
-不配这一行也能用：插件会依次试 `DSH_OCR_PYTHON` → `asr.json` 里那个 Python → PATH 上的 `python`。
+不配这一行也能用：插件会依次试 `DSH_OCR_PYTHON` → `asr.json` 里那个 Python →
+常见安装目录（macOS 的 `/opt/homebrew/bin`、`/usr/local/bin`、pyenv / asdf / conda，
+Windows 的 `%LOCALAPPDATA%\Programs\Python\Python3xx`）→ PATH 上的 `python3` / `python`。
+
+> 从 Finder / 程序坞启动的 DSH 拿不到登录 shell 的 PATH（macOS 上只有 `/usr/bin:/bin:/usr/sbin:/sbin`），
+> Homebrew 装的 `python3` 因此不在 PATH 里 —— 只按 PATH 找会得出"没装 Python"的错误结论。
 
 **怎么确认配好了**：跑一次 `detail: high`，清单里出现 `on-screen subs: spot-checked N lines`
 就是通了；还是 `skipped (no-python-with-rapidocr)` 说明没找到。`DSH_OCR_DEBUG=1` 会打印

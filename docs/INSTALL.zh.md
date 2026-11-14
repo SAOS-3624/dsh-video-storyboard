@@ -205,10 +205,12 @@ Chromium 127+ 有 App-Bound Encryption，`--cookies-from-browser` 会失败，�
 
 ```bash
 # 1) 独立环境。别装进 ASR 用的那个 venv —— 两个模型的依赖会打架
-python -m venv D:/ocr-local/.venv
+python -m venv D:/ocr-local/.venv          # Windows
+python3 -m venv ~/ocr-local/.venv          # macOS / Linux
 
 # 2) 模型包 + 推理后端，两个都要
-D:/ocr-local/.venv/Scripts/python.exe -m pip install rapidocr onnxruntime
+D:/ocr-local/.venv/Scripts/python.exe -m pip install rapidocr onnxruntime   # Windows
+~/ocr-local/.venv/bin/python -m pip install rapidocr onnxruntime            # macOS / Linux
 ```
 
 首装约 300MB，之后完全离线（模型落在 `Lib/site-packages/rapidocr/models/`）。
@@ -227,7 +229,13 @@ D:/ocr-local/.venv/Scripts/python.exe -m pip install rapidocr onnxruntime
 }
 ```
 
-不写这一行也行，插件会依次试：`DSH_OCR_PYTHON` → `asr.json` 里的那个 Python → PATH 上的 `python`。
+不写这一行也行，插件会依次试：`DSH_OCR_PYTHON` → `asr.json` 里的那个 Python →
+常见安装目录（macOS 的 `/opt/homebrew/bin`、`/usr/local/bin`、pyenv / asdf / conda，
+Windows 的 `%LOCALAPPDATA%\Programs\Python\Python3xx`）→ PATH 上的 `python3` / `python`。
+
+> 为什么还要扫目录：从 Finder / 程序坞启动的 DSH 拿不到登录 shell 的 PATH，
+> Homebrew 装的 `python3` 不在 PATH 里 —— 只按 PATH 找会得出"没装 Python"的错误结论，
+> 设置页也会跟着让你再下载一遍。
 
 ### 验证
 
