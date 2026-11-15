@@ -257,11 +257,15 @@ Grid size follows **content density** (`p90`), not duration alone: ≥15 → 12 
 
 Minimum gap between sampled frames is enforced by merging segments shorter than `scanGap` (default 1.2 s) before fitting to the cell count — a 0.3 s shot in a burst should not eat a whole cell.
 
-### Pick the sharpest frame, not the blurriest
+### Pick a frame: `mid` by default, `sharp` when you need it
 
-`--pick sharp` (default) samples 3 candidates inside each segment and keeps the one with the highest Laplacian variance. On the credit card of a PV, `--pick thumb` returned a Gaussian-blurred frame (text unreadable) while `--pick sharp` returned the crisp one — same segment, same second.
+`--pick mid` is the default (`board.js`: `pick: args.pick ?? 'mid'`). `--pick sharp` samples 3 candidates inside each segment and keeps the one with the highest Laplacian variance. On the credit card of a PV, `--pick thumb` returned a Gaussian-blurred frame (text unreadable) while `--pick sharp` returned the crisp one — same segment, same second.
+
+Why `mid` is the default now: in the current layout each cell is only 100–800 px wide, where that sharpness difference is invisible, while `sharp` decodes every cell three times. Pass `pick:'sharp'` explicitly when you do want it — the manifest then carries a `frame@` timestamp per cell.
 
 Cost on a 90 s clip / 9 cells: `mid` 8.0 s · **`sharp` 9.2 s** · `thumb` 11.3 s. Sharp is *cheaper* than `thumbnail=n=` because three seeks decode three frames, while the thumbnail filter decodes the whole segment.
+
+> Caught by issue #93: this README said `sharp` was the default long after the code had switched to `mid`.
 
 ### Read a slice, not the whole file
 

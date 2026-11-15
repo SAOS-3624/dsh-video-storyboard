@@ -844,9 +844,17 @@ export function formatManifest(result, {
   }
   // 这一句专治"把格的起点当画面时刻"：标题板常常出现在格的中后段，
   // 不给 frame@ 的话，模型会以为格首就是标题板，整段判断提前几十秒。
-  if (plan.pick === 'sharp' && picked.some((c) => Number.isFinite(c.t_frame))) {
-    lines.push('frame@ = the exact moment the cell\'s picture was taken (sharpest of 3 candidates), ' +
-      'which is NOT the cell start — a title card showing at frame@ belongs to a cell that begins earlier.');
+  //
+  // #93 的更正：`frame@` 只在 **pick !== 'mid'** 时打，而 **默认就是 mid**（`board.js`：
+  // `pick: args.pick ?? 'mid'`）—— 所以默认配置下一格 `frame@` 都没有，模型照样会把格首
+  // 当成画面时刻。这条误读在默认路径上更常见，必须单独说一句。
+  if (plan.pick !== 'mid' && picked.some((c) => Number.isFinite(c.t_frame))) {
+    lines.push('frame@ = the exact moment the cell\'s picture was taken ('
+      + (plan.pick === 'thumb' ? 'histogram-closest frame' : 'sharpest of 3 candidates')
+      + '), which is NOT the cell start — a title card showing at frame@ belongs to a cell that begins earlier.');
+  } else if (plan.pick === 'mid' && picked.length > 0) {
+    lines.push('frame = the cell midpoint (pick:"mid", the default) — each picture is taken halfway '
+      + 'through its cell\'s span, not at the cell start. A title card can sit later in the same cell.');
   }
   if (picked.some((c) => c.broken)) {
     lines.push('a [m:ss.s] marker inside a cell means the speech breaks there: that cell covers two ' +
