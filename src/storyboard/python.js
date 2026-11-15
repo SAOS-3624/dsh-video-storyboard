@@ -18,7 +18,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix, win32 } from 'node:path';
 
 const isFile = (path) => {
   try {
@@ -33,11 +33,20 @@ function homeDir(env) {
 }
 
 /**
+ * 按**目标平台**拼路径，而不是按真实平台。
+ *
+ * `platform` 是可注入的（测试要跑 macOS / Linux 的用例），但 `path.join` 永远跟着
+ * 真实平台走 —— 在 Windows 上跑 `platform:'darwin'` 的用例会拼出 `\Users\me\.pyenv\shims`，
+ * 断言当场对不上。所以这里按 platform 选 path 实现。
+ */
+const pathFor = (platform) => (platform === 'win32' ? win32 : posix);
+
+/**
  * 扫 `<root>/Python3xx` 这类版本目录 —— Windows 的 python.org 安装包就是这么放的。
  * 按目录名里的数字排（`Python312` 比 `Python38` 新），不能按字符串排：
  * 字符串里 "Python38" > "Python312"，3.8 会排到 3.12 前面。
  */
-function versionedDirs(root, pattern) {
+function versionedDirs(root, pattern, p = posix) {
   const versionOf = (name) => {
     const digits = /(\d+)$/.exec(name);
     return digits ? Number(digits[1]) : 0;
@@ -47,7 +56,7 @@ function versionedDirs(root, pattern) {
       .filter((entry) => entry.isDirectory() && pattern.test(entry.name))
       .map((entry) => entry.name)
       .sort((a, b) => versionOf(b) - versionOf(a)) // 新版本优先
-      .map((name) => join(root, name));
+      .map((name) => p.join(root, name));
   } catch {
     return [];
   }
@@ -60,15 +69,16 @@ function versionedDirs(root, pattern) {
  */
 export function pythonInstallDirs({ env = process.env, platform = process.platform } = {}) {
   const home = homeDir(env);
+  const p = pathFor(platform);
   const dirs = [];
   const add = (dir) => {
     if (typeof dir === 'string' && dir !== '' && !dirs.includes(dir)) dirs.push(dir);
   };
   if (platform === 'win32') {
-    const local = env.LOCALAPPDATA || join(home, 'AppData', 'Local');
-    for (const dir of versionedDirs(join(local, 'Programs', 'Python'), /^Python3\d+$/i)) add(dir);
-    for (const dir of versionedDirs('C:\\', /^Python3\d+$/i)) add(dir);
-    if (env.ProgramFiles) for (const dir of versionedDirs(env.ProgramFiles, /^Python3\d+$/i)) add(dir);
+    const local = env.LOCALAPPDATA || p.join(home, 'AppData', 'Local');
+    for (const dir of versionedDirs(p.join(local, 'Programs', 'Python'), /^Python3\d+$/i, p)) add(dir);
+    for (const dir of versionedDirs('C:\\', /^Python3\d+$/i, p)) add(dir);
+    if (env.ProgramFiles) for (const dir of versionedDirs(env.ProgramFiles, /^Python3\d+$/i, p)) add(dir);
     return dirs;
   }
   if (platform === 'darwin') {
@@ -76,21 +86,21 @@ export function pythonInstallDirs({ env = process.env, platform = process.platfo
     add('/usr/local/bin');      // Intel Homebrew；python.org 安装包也在这儿放符号链接
     add('/opt/local/bin');      // MacPorts
     add('/Library/Frameworks/Python.framework/Versions/Current/bin'); // python.org 安装包
-    add(join(home, 'miniconda3', 'bin'));
-    add(join(home, 'anaconda3', 'bin'));
-    add(join(home, '.pyenv', 'shims'));
-    add(join(home, '.asdf', 'shims'));
-    add(join(home, '.local', 'bin'));
+    add(p.join(home, 'miniconda3', 'bin'));
+    add(p.join(home, 'anaconda3', 'bin'));
+    add(p.join(home, '.pyenv', 'shims'));
+    add(p.join(home, '.asdf', 'shims'));
+    add(p.join(home, '.local', 'bin'));
     add('/usr/bin');            // 系统自带（Xcode CLT），最后兜底
     return dirs;
   }
   add('/usr/local/bin');
   add('/usr/bin');
-  add(join(home, '.local', 'bin'));
-  add(join(home, 'miniconda3', 'bin'));
-  add(join(home, 'anaconda3', 'bin'));
-  add(join(home, '.pyenv', 'shims'));
-  add(join(home, '.asdf', 'shims'));
+  add(p.join(home, '.local', 'bin'));
+  add(p.join(home, 'miniconda3', 'bin'));
+  add(p.join(home, 'anaconda3', 'bin'));
+  add(p.join(home, '.pyenv', 'shims'));
+  add(p.join(home, '.asdf', 'shims'));
   add('/snap/bin');
   return dirs;
 }
@@ -125,10 +135,11 @@ export function pythonCandidates({ config = {}, env = process.env, platform = pr
   push(asrPython(env));
   // 常见安装目录里的绝对路径。只收真的存在的文件：候选链每多一个不存在的名字，
   // 探测时就多 spawn 一次 ENOENT，报错信息里也多一行噪音。
+  const p = pathFor(platform);
   const names = platform === 'win32' ? ['python.exe', 'python'] : ['python3', 'python'];
   for (const dir of pythonInstallDirs({ env, platform })) {
     for (const name of names) {
-      const full = join(dir, name);
+      const full = p.join(dir, name);
       if (probe(full)) push(full);
     }
   }

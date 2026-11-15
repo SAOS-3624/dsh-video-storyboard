@@ -70,7 +70,9 @@ test('pythonCandidates: Windows 用 python.exe，PATH 上保留 python 和 py', 
   mkdirSync(dir, { recursive: true });
   const exe = join(dir, 'python.exe');
   const cands = pythonCandidates({
-    env: { LOCALAPPDATA: root },
+    // DSH_HOME 必须钉在临时目录：不给的话 asrPython() 会退回真实家目录，
+    // 读到开发机上那份 ~/.dsh/asr.json，凭空多出一个候选（本机是 D:/asr-local 那个 venv）。
+    env: { LOCALAPPDATA: root, DSH_HOME: join(root, 'no-dsh') },
     platform: 'win32',
     probe: only([exe]),
   });
