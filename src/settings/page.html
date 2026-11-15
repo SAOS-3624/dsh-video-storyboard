@@ -116,11 +116,14 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
     <h3>yt-dlp（B 站/YouTube 链接才需要）</h3>
     <ul>
       <li>Windows 可直接<a href="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" target="_blank" rel="noopener noreferrer">下载 yt-dlp.exe</a>，放到 PATH 里的目录。</li>
-      <li>或用 <code>python -m pip install -U yt-dlp</code><button class="copy" data-copy="python -m pip install -U yt-dlp">复制</button>；装完运行 <code>yt-dlp --version</code> 确认。</li>
+      <li>或用 pip 装：<code>python3 -m pip install -U yt-dlp</code>（Windows 上把 <code>python3</code> 换成 <code>python</code>）<button class="copy" data-copy="python3 -m pip install -U yt-dlp">复制</button>；装完运行 <code>yt-dlp --version</code> 确认。</li>
     </ul>
     <h3>Python（可选）</h3>
     <ul>
-      <li>只有用 pip 安装 yt-dlp 或跑 Python 工具时才需要：<a href="https://www.python.org/downloads/windows/" target="_blank" rel="noopener noreferrer">下载 Python</a>，安装时勾选 “Add python.exe to PATH”。</li>
+      <li>只有用 pip 安装 yt-dlp、或跑 OCR 校正字幕时才需要。</li>
+      <li>macOS：<code>brew install python</code><button class="copy" data-copy="brew install python">复制</button>；Linux：用发行版包管理器装 <code>python3</code>。</li>
+      <li>Windows：<a href="https://www.python.org/downloads/windows/" target="_blank" rel="noopener noreferrer">下载 Python</a>，安装时勾选 “Add python.exe to PATH”。</li>
+      <li>本页和插件用同一套查找顺序：先看 <code>python3</code> / <code>python</code>，再看 Homebrew、MacPorts、python.org、pyenv、asdf、conda 的默认目录。从 Finder / 程序坞启动的 DSH 拿不到终端里的 PATH，所以要额外扫这些位置。</li>
     </ul>
     <h3>本地 ASR / SenseVoice</h3>
     <ul>

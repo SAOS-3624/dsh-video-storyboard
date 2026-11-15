@@ -11,6 +11,7 @@ import { connect } from 'node:net';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import { pythonCandidates } from '../storyboard/python.js';
 import { DEFAULT_FFMPEG, DEFAULT_FFPROBE } from '../storyboard/probe.js';
 import { discoverYtdlp } from '../storyboard/ytdlp.js';
 import { dshHome, readVideoSettings } from './config.js';
@@ -26,16 +27,6 @@ async function version(command, args) {
   } catch (e) {
     return { ok: false, detail: e?.code === 'ENOENT' ? '未找到' : String(e?.message ?? e).slice(0, 120) };
   }
-}
-
-async function firstOf(list) {
-  const errors = [];
-  for (const [command, args] of list) {
-    const r = await version(command, args);
-    if (r.ok) return { ...r, command };
-    errors.push(r.detail);
-  }
-  return { ok: false, detail: errors[0] || '未找到' };
 }
 
 function portOpen(port, timeoutMs = 450) {
@@ -118,9 +109,37 @@ async function ytdlpStatus(env) {
   }
 }
 
+/** 版本号里的大版本；`python --version` 有的写 stdout 有的写 stderr，version() 两边都收 */
+function pythonMajor(detail) {
+  const m = /Python\s+(\d+)/i.exec(String(detail || ''));
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Python 在哪 —— **必须和真正跑 OCR 时用同一套候选链**（`pythonCandidates`）。
+ *
+ * 以前这里只试 `python` / `py`：macOS 上 Homebrew 装出来的命令叫 `python3`，
+ * 而且从 Finder / 程序坞启动的 DSH 拿不到登录 shell 的 PATH（`/opt/homebrew/bin` 不在里面），
+ * 于是"明明装了 Python，设置页还让你再下载一遍" —— 和上面 yt-dlp 那一行是同一个坑。
+ *
+ * @returns {Promise<{ok:boolean, detail:string, command?:string}>}
+ */
+export async function pythonStatus(env = process.env, { candidates = pythonCandidates({ env }) } = {}) {
+  const tried = [];
+  for (const command of candidates) {
+    const probe = await version(command, ['--version']);
+    // Python 2 也会回 0，但插件要的是 3（rapidocr 只支持 3.8+）：别把它算成"装好了"。
+    if (probe.ok && (pythonMajor(probe.detail) ?? 3) >= 3) {
+      return { ok: true, detail: `${probe.detail} · ${command}`, command };
+    }
+    tried.push(command);
+  }
+  return { ok: false, detail: tried.length ? `未找到（试过 ${tried.length} 个解释器）` : '未找到' };
+}
+
 /** @returns {Promise<Array<{id:string,label:string,ok:boolean,detail:string}>>} */
 export async function checkEnvironment(ctx, env = process.env) {
-  const python = await firstOf([['python', ['--version']], ['py', ['--version']]]);
+  const python = await pythonStatus(env);
   const ytdlp = await ytdlpStatus(env);
   const ffmpeg = await version(DEFAULT_FFMPEG, ['-version']);
   const ffprobe = await version(DEFAULT_FFPROBE, ['-version']);

@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed — macOS 上装了 Homebrew Python 却报"没装"，设置页让你再下一遍
+
+从 Finder / 程序坞启动的 DSH 拿不到登录 shell 的 PATH（实测宿主进程里只有
+`/usr/bin:/bin:/usr/sbin:/sbin`），于是 `brew install python` 装好的 `/opt/homebrew/bin/python3`
+既不在 PATH 上、也没人去找它：
+
+- 设置页的 Python 那一行只试 `python` / `py` 两个名字 —— macOS 上 Homebrew 的命令叫 `python3`，
+  所以永远"未找到"，页面跟着给出 python.org 的下载按钮（用户：我明明装了）；
+- 跑 OCR 时的候选链只有 PATH 上的 `python3` / `python`，GUI 启动时解析到 `/usr/bin/python3`
+  （3.9.6，没有 rapidocr），字幕校正静默跳过。
+
+修法和 ffmpeg / yt-dlp 那两处一致 —— **"装在哪"和"能不能找到"解耦**：
+
+- 新增 `pythonInstallDirs()`：macOS 列 `/opt/homebrew/bin`、`/usr/local/bin`、`/opt/local/bin`、
+  python.org 的 framework 目录、`~/miniconda3`、`~/anaconda3`、pyenv / asdf 的 shims、`~/.local/bin`，
+  `/usr/bin` 兜底；Linux 列 `/usr/local/bin`、`/usr/bin`、`~/.local/bin`、conda、pyenv / asdf、`/snap/bin`；
+  Windows 扫 `%LOCALAPPDATA%\Programs\Python\Python3xx`（按**版本号**从新到旧，不是按字符串）以及
+  `C:\` / `%ProgramFiles%`。
+- `pythonCandidates()` 顺序：显式配置 → 环境变量 → `asr.json` → **常见安装目录（只收真实存在的文件）** →
+  PATH 上的名字。常见目录排在 PATH 前面：GUI 的 PATH 里那个 `python3` 恰恰是最不可能装了 rapidocr 的。
+- 设置页的 Python 行复用同一条候选链（`pythonStatus()`），显示 `3.12.4 · /opt/homebrew/bin/python3`；
+  Python 2 不算"装好了"（rapidocr 只支持 3.8+）。
+- 顺手修掉 `findPython()` 的调试开关读的是 `process.env` 而不是传入的 `env`；补上文件末尾
+  只有注释、没有实现的 `resetPythonCache()`。
+- 文档：README / `docs/INSTALL.zh.md` 的查找顺序补上常见目录并说明为什么必须扫目录；
+  设置页的 Python 帮助从"只有 Windows"改成三平台（`brew install python` / 发行版 `python3` / python.org）。
+
+测试：新增 `test/python-candidates.test.mjs` 9 条（目录清单、候选顺序、Windows 版本目录排序、`pythonStatus`）。
+全量 607 pass / 1 fail / 2 skipped —— 失败的是 `test/ytdlp-discovery.test.mjs:19`，**与本改动无关**：
+它假定"目录不存在就返回 null"，但 macOS 上 `findPipScript()` 还会扫真实的 `/opt/homebrew/bin`，
+机器上装了 yt-dlp 就会扫到（CI 是 ubuntu，所以一直是绿的）。
+
 ## [0.7.5] - 2026-11-14
 
 ### Added — CLI 补上 `probe`（`dsh-video-probe`）
