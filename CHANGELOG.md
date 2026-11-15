@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Fixed — yt-dlp 读用户的全局 config：`--embed-subs` 让第一次下载必挂，缓存又把失败盖住（#91）
+
+用户 `yt-dlp` 全局配置里一句 `--embed-subs`，在 C站 上就会去取"字幕"（实为 danmaku XML），
+ffmpeg 封不进 mp4 → 后处理阶段失败、退出码 1。而**视频其实已经合好了**，原样再调一次还成功（走缓存）。
+
+- **四处 yt-dlp 调用统一加 `--ignore-config`**（下载 + 两处 `-J` 探测 + 直链探测）：插件只认自己
+  传的参数，不继承用户机器上的偏好。
+- **退出码非 0 不再直接判死**：先把产物收拢出来，能 probe 出视频流就降级成"成功 + 一条 warning"
+  （清单里记 `downloadWarning`）；真 probe 不出来才抛原始错误。
+- 清掉旁路产物（`video.danmaku.xml` / `video.jpg` 等），免得下次判"哪个才是片子"时被带偏。
+- 缓存命中但缺 `meta.json` 时回写一份最小的；footer 的 `auth=undefined` 改成 `auth=unknown`。
+
+### Added — 清单头报「最大空档」：预算和覆盖是两笔账（#93）
+
+`plan:` 只报 token 不报"最长有多久没人看"，读的人（尤其是模型）会自动把"便宜"读成"够用"；
+而 `cell 1 = 00:00.00-00:12.08` 这种区间会被当成"这 12 秒我看过"，实际只有 `frame@00:04.31` 那一瞬。
+
+紧跟 `plan:` 新增一行：
+
+```text
+coverage: 9 frames over 108.7s · largest gap 12.1s at 00:48.3–01:00.4 (no frame inside that gap — it does not mean nothing happened there)
+```
+
+- 按**实际发出的帧**（`t_frame`）算，不按格子算 —— `frames-merged:29->9` 时格子间距会小于真实采样间距，
+  按格子算会系统性少报。
+- 两端也算：片头到第一帧、最后一帧到片尾。
+- 措辞刻意不含 `≤`：只报实际值，撞上限就照实写（与 #89 的 `longest` 同一口径）。
+- 行尾那句是**边界声明**：`largest gap` 只界定「有没有人看过」，不界定「有没有漏掉事件」——
+  0.3 秒的手可以藏在 1.2 秒的空档里，它不能替代切点密度。
+
+### Fixed — #92 带的 python 测试在 Windows 上红 4 条（跨平台隔离）
+
+`pythonInstallDirs()` 接受可注入的 `platform`，但拼路径用的是 `path.join`（永远跟真实平台走）——
+在 Windows 上跑 `platform:'darwin'` 的用例会拼出 `\Users\me\.pyenv\shims`。
+改成按目标平台选 `path.win32` / `path.posix`；另有一条测试没钉 `DSH_HOME`，读到开发机真实的
+`~/.dsh/asr.json`，凭空多一个候选。现在全平台都是绿的（610 tests / 608 pass / 2 skipped）。
+
 ### Fixed — macOS 上装了 Homebrew Python 却报"没装"，设置页让你再下一遍
 
 从 Finder / 程序坞启动的 DSH 拿不到登录 shell 的 PATH（实测宿主进程里只有

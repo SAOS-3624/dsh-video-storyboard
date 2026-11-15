@@ -105,7 +105,7 @@ export async function resolveDirectUrl(input, opts = {}) {
   const auth = await resolveAuth({ cookies, allowAnonymous, env });
   const tool = ytdlp || await discoverYtdlp({ env, run });
 
-  const args = ['-J', '--no-warnings', '--no-playlist'];
+  const args = ['-J', '--ignore-config', '--no-warnings', '--no-playlist'];
   if (auth.cookiesPath) args.push('--cookies', auth.cookiesPath);
   args.push(url);
 

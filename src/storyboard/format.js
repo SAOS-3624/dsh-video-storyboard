@@ -381,6 +381,41 @@ function formatPlanLine(plan) {
 }
 
 /**
+ * 覆盖（#93）：**预算和覆盖是两笔账**，只报 token 不报"最长有多久没人看"，
+ * 读的人（尤其是模型）会自动把"便宜"读成"够用"。
+ *
+ * 而清单里 `cell 1 = 00:00.00-00:12.08` 这种区间会被当成"这 12 秒我看过" ——
+ * 实际只有 `frame@00:04.31` 这一瞬。所以这里按**实际发出的帧**算（`t_frame`），
+ * 不按格子算：`frames-merged:29->9` 时格子间距会小于真实采样间距，按格子算会系统性少报。
+ *
+ * 边界要写清楚：largest gap 只界定「有没有人看过」，**不界定「有没有漏掉事件」** ——
+ * 0.3 秒的手可以藏在 1.2 秒的空档里，它不能替代切点密度，两者要一起读。
+ */
+function formatCoverageLine(cells, window) {
+  if (!Array.isArray(cells) || cells.length === 0) return null;
+  const from = Number(window?.from ?? 0);
+  const to = Number(window?.to ?? 0);
+  if (!(to > from)) return null;
+  const marks = cells
+    .map((c) => (Number.isFinite(c.t_frame) ? c.t_frame : Number(c.t_start)))
+    .filter((t) => Number.isFinite(t))
+    .sort((a, b) => a - b);
+  if (marks.length === 0) return null;
+  // 两端也算"没人看的时段"：片头到第一帧、最后一帧到片尾
+  const edges = [from, ...marks, to];
+  let gap = 0;
+  let at = from;
+  for (let k = 1; k < edges.length; k += 1) {
+    const d = edges[k] - edges[k - 1];
+    if (d > gap) { gap = d; at = edges[k - 1]; }
+  }
+  // 只报实际值，不写 "≤"：撞上限就照实写（#89 的 longest 也是这个口径）
+  return `coverage: ${marks.length} frames over ${(to - from).toFixed(1)}s · ` +
+    `largest gap ${gap.toFixed(1)}s at ${tc(at)}–${tc(at + gap)} ` +
+    '(no frame inside that gap — it does not mean nothing happened there)';
+}
+
+/**
  * 可读性告警：**格子小到看不清时必须主动说**。
  *
  * 旧版对"看不清"完全沉默 —— 模型只能从 286×118 这个数字自己推断，
@@ -650,6 +685,10 @@ export function formatManifest(result, {
   }
   const planLine = formatPlanLine(result.plan);
   if (planLine) lines.push(planLine);
+  // 覆盖行紧跟 plan：预算（token）和覆盖（多大一段没人看）必须并排出现，
+  // 否则"便宜"会被读成"够用"（#93）。
+  const coverageLine = formatCoverageLine(picked, result.window);
+  if (coverageLine) lines.push(coverageLine);
   // 预算落进地板档（<544²）时必须说明：画得更小一分钱不省，只会更糊。
   if (result.plan?.budgetRaisedFrom) {
     const used = result.plan.budget;
@@ -817,10 +856,17 @@ export function formatManifest(result, {
   // 不说的话，它会把"这格字看不清"归因成视频本身糊，而不是"扫描用的是低清版、细看要 zoom"。
   if (result.source) {
     const s = result.source;
-    lines.push(`source: ${s.url} (auth=${s.auth}${s.cached ? ', cached' : ''}); ` +
+    lines.push(`source: ${s.url} (auth=${s.auth ?? 'unknown'}${s.cached ? ', cached' : ''}); ` +
       `scanned at ${s.scanActual ?? s.scanHeight}p` +
       (s.maxAvailable ? `, source max ${s.maxAvailable}p` : '') +
       (s.zoomTarget ? `; video_zoom reads ${s.zoomTarget}p from the original stream` : '') + '.');
+    // yt-dlp 退出码非 0、但产物可用（#91）：必须说出来 —— 否则用户以为一次就成功了，
+    // 换台机器又撞同一个错，还以为是"网络不好"。
+    if (s.downloadWarning) {
+      lines.push(`warning: yt-dlp exited non-zero, but the downloaded file is usable ` +
+        `(${s.downloadWarning}). Check the yt-dlp config file (~/yt-dlp.conf) for options ` +
+        'like --embed-subs that fail during post-processing.');
+    }
     if (Array.isArray(s.degraded) && s.degraded.length > 0) {
       const cap = s.maxAvailable ? `${s.maxAvailable}p` : 'a lower tier';
       lines.push(`source limit: this video tops out at ${cap} (${s.degraded.join(', ')}) — ` +
@@ -837,7 +883,7 @@ export function formatManifest(result, {
         ? 'subtitles and the paid stream are'
         : gates.includes('subtitle') ? 'subtitles are' : 'the stream is';
       lines.push(`!! NEEDS LOGIN — this site hides ${what} from anonymous requests ` +
-        `(auth=${s.auth}). Do NOT guess the dialogue from burned-in text or scenes.`);
+        `(auth=${s.auth ?? 'unknown'}). Do NOT guess the dialogue from burned-in text or scenes.`);
       lines.push('   Ask the user for cookies before trusting any transcript: export cookies.txt from the ' +
         'browser and point "cookies" in ~/.dsh/video.json at it (README, "needs a signed-in video"). ' +
         'If the user cannot provide one, say so explicitly rather than presenting a partial transcript ' +

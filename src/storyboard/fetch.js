@@ -41,6 +41,29 @@ import { directFromSummary, recallDirect, rememberDirect } from './direct-url.js
 const AUDIO_EXTS = new Set(['.m4a', '.m4b', '.mp3', '.aac', '.opus', '.ogg', '.oga', '.wav', '.flac', '.weba']);
 
 /**
+ * yt-dlp 按**用户全局配置**留下的旁路产物（弹幕 XML、字幕、封面图）—— 见 #91。
+ *
+ * config.txt 里一句 `--embed-subs` 就会让 B 站那个 danmaku XML 走字幕封装，顺手在缓存
+ * 目录里留下 `video.danmaku.xml` / `video.jpg`。这些对后续管线毫无用处，留着只会让
+ * "这个目录里到底哪个才是片子"更难判断。
+ *
+ * 只清这几种扩展名：`meta.json` 不在名单里，`video.*` 的视频/音频扩展也不在。
+ */
+const SIDECAR_RE = /\.(xml|vtt|srt|ass|ssa|jpg|jpeg|png|webp)$/i;
+
+async function cleanSidecars(dir) {
+  const removed = [];
+  for (const name of await readdir(dir).catch(() => [])) {
+    if (!SIDECAR_RE.test(name)) continue;
+    try {
+      await rm(join(dir, name), { force: true });
+      removed.push(name);
+    } catch { /* 正被读着，下次再清 */ }
+  }
+  return removed;
+}
+
+/**
  * 跑一次外部命令（只给合并用）。`execFile` 不用 shell，路径里有空格/中文也不会被拆。
  * 失败时把 stderr 带进 Error.message —— ffmpeg 的原因全在那里。
  */
@@ -286,6 +309,13 @@ export async function fetchMedia(input, opts = {}) {
       } else {
         const cachedDirect = cachedDirect0;
         onProgress?.({ phase: 'cache-hit', path: target });
+        // 老缓存可能根本没有 meta（早期版本在失败路径留下的目录，见 #91）→ 补一份最小的。
+        // 不补的话 footer 一直显示 auth=undefined，下次也还是不知道这个目录是怎么来的。
+        // maxAvailable / zoomTarget 补不了：那要重新 -J（2.4s），而缓存命中的意义就是别再跑一次。
+        if (!meta) {
+          meta = { kind: 'url', url, bytes: stNow.size, scanHeight, auth: 'unknown' };
+          await writeFile(join(dir, 'meta.json'), JSON.stringify(meta, null, 0), 'utf8').catch(() => {});
+        }
         // 缓存命中也得重新判一次音轨：老版本写的 meta 里根本没有 audioMissing 这一项，
         // 直接信它就会把"音轨没合进去"报成"这片子没声音"（#43 就是踩在这上面）。
         // 代价只有一次本地 ffprobe（~50ms），换掉的是"整条音频链无声且说不出原因"。
@@ -352,6 +382,10 @@ export async function fetchMedia(input, opts = {}) {
     // **不要 --no-warnings**：yt-dlp 找不到 ffmpeg 时只打一行 warning 就**静默降级成只下视频**，
     // 关掉警告等于把唯一的现场证据扔掉（#43/#44 都是这么"什么错都不报"的）。
     // 警告不刷屏：只在音轨缺失时才取出来写进清单。
+    // **不读用户的全局 config.txt**（#91）：全局里一句 `--embed-subs` 就会让 B 站那个
+    // danmaku XML 走字幕封装，ffmpeg 封不进 mp4 → 后处理失败、退出码 1，
+    // 而视频其实已经合好了。插件只认自己传的参数，不继承用户机器上的偏好。
+    '--ignore-config',
     '--no-playlist', '--no-progress',
     // 断点续传：网络抖了下次接着下，而不是从头再来
     '--continue',
@@ -382,12 +416,16 @@ export async function fetchMedia(input, opts = {}) {
     downloaded = await run(tool, retryArgs, { timeoutMs: 600_000 });
   }
 
-  if (downloaded.code !== 0) {
-    // **不要删目录**：yt-dlp 的 .part 是断点续传的本钱。
-    // 原来这里 `rm -rf` 掉整个缓存目录，于是网络一抖就"下到一半清零、从头再来"——
-    // 用户实测表现为"越下越慢"（繁星-夏夜反馈）。残留的 .part 由 pruneMedia 按时间清。
-    throw new Error(explainYtdlpError(downloaded.stderr, downloaded.code));
-  }
+  // 退出码非 0 **不一定没有可用产物**（#91）：yt-dlp 的后处理（全局配置里的
+  // `--embed-subs` / `--embed-thumbnail`）失败时，视频本身往往已经合并完成 ——
+  // 用户看到的是"下载坏了"，而原样再调一次反而成功（走缓存）。所以这里不判死：
+  // 先把产物收拢出来，能 probe 出视频流就降级成"成功 + 一条警告"。
+  //
+  // **不要删目录**：yt-dlp 的 .part 是断点续传的本钱。
+  // 原来这里 `rm -rf` 掉整个缓存目录，于是网络一抖就"下到一半清零、从头再来"——
+  // 用户实测表现为"越下越慢"（繁星-夏夜反馈）。残留的 .part 由 pruneMedia 按时间清。
+  const downloadFailed = downloaded.code !== 0;
+  const downloadError = downloadFailed ? explainYtdlpError(downloaded.stderr, downloaded.code) : null;
   // yt-dlp 有时会把 DASH 流写成 video.f100022.mp4（格式 id 进了文件名），
   // 而不是 --merge-output-format 期望的 video.mp4。文件名不是容器判定的依据：
   // 取目录里实际产出、最大的那个视频文件，收敛到稳定的 video.mp4 再交给管线。
@@ -413,7 +451,7 @@ export async function fetchMedia(input, opts = {}) {
           'or pass a local file path.',
         );
       }
-      throw new Error('yt-dlp reported success but produced no file');
+      throw new Error(downloadError ?? 'yt-dlp reported success but produced no file');
     }
     candidates.sort((a, b) => {
       const amp = a.ext === '.mp4' ? 1 : 0;
@@ -424,6 +462,9 @@ export async function fetchMedia(input, opts = {}) {
     await rename(candidates[0].path, target);
     st = await stat(target);
   }
+  // 旁路产物（#91）：全局配置留下的 video.danmaku.xml / video.jpg 清掉，
+  // 免得下次判"哪个才是片子"时被带偏。
+  const sidecarsRemoved = await cleanSidecars(dir);
   // 目标清晰度：请求的和实际能给的取小 —— 这正是"片源判断"要留在清单里的东西
   const zoomTarget = summary.heights.length > 0
     ? Math.min(zoomHeight, summary.maxHeight ?? zoomHeight)
@@ -434,6 +475,9 @@ export async function fetchMedia(input, opts = {}) {
   // 这里明确区分"源本来就没声音"和"这次下载的副本没声音"（xingyueDanYang 报的观察）。
   const sourceHasAudio = (summary.formats ?? []).some((f) => f.acodec && f.acodec !== 'none');
   const localInfo = await probeVideo(target).catch(() => null);
+  // 降级的前一半：文件是收拢出来了，但根本 probe 不出视频流 —— 那就是真坏了，
+  // 把 yt-dlp 的原始错误抛出去，别让一个半截的 mp4 混进管线。
+  if (downloadError && !localInfo) throw new Error(downloadError);
   // 判据以**磁盘证据**为准（旁边有没有留下音轨文件），`summary.formats` 只是辅助：
   // 缓存命中 / 直链路径 / 老版本写的 meta 里都可能拿不到 acodec，光看它会漏判成
   // "这条片子本来就没声音"（#43 的现象就是这样）。
@@ -470,6 +514,9 @@ export async function fetchMedia(input, opts = {}) {
     // 让下一次命中知道"这份坏缓存已经用哪个 ffmpeg 重试过"；换了 ffmpeg 才值得再试。
     ...(audioMissing && isAbsolute(ffmpegAbs) ? { audioMergeRetry: ffmpegAbs } : {}),
     url,
+    // yt-dlp 退出码非 0、但产物可用 —— 如实记一笔，别让"能用"掩盖"出过错"（#91）
+    ...(downloadError ? { downloadWarning: downloadError } : {}),
+    ...(sidecarsRemoved.length > 0 ? { sidecarsRemoved } : {}),
     cached: false,
     bytes: st.size,
     scanHeight,
@@ -526,7 +573,7 @@ export async function fetchMedia(input, opts = {}) {
  * @returns {{summary:object, authKind:string, warning?:string}}
  */
 async function probeSummary({ url, auth, tool, env, run }) {
-  const args = ['-J', '--no-warnings', '--no-playlist'];
+  const args = ['-J', '--ignore-config', '--no-warnings', '--no-playlist'];
   const out = {};
   if (auth.cookiesPath) args.push('--cookies', auth.cookiesPath);
   args.push(url);
@@ -544,7 +591,7 @@ async function probeSummary({ url, auth, tool, env, run }) {
     return { summary, authKind: auth.kind, raw };
   }
   try {
-    const anon = await run(tool, ['-J', '--no-warnings', '--no-playlist', url], { timeoutMs: 90_000 });
+    const anon = await run(tool, ['-J', '--ignore-config', '--no-warnings', '--no-playlist', url], { timeoutMs: 90_000 });
     if (anon.code !== 0) return { summary, authKind: auth.kind, raw };
     const anonInfo = unwrapSingle(JSON.parse(anon.stdout), url);
     const a = summariseInfo(anonInfo);
