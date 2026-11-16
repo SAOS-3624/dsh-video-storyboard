@@ -46,17 +46,21 @@ const pathFor = (platform) => (platform === 'win32' ? win32 : posix);
  * 按目录名里的数字排（`Python312` 比 `Python38` 新），不能按字符串排：
  * 字符串里 "Python38" > "Python312"，3.8 会排到 3.12 前面。
  */
-function versionedDirs(root, pattern, p = posix) {
+function versionedDirs(root, pattern) {
   const versionOf = (name) => {
     const digits = /(\d+)$/.exec(name);
     return digits ? Number(digits[1]) : 0;
   };
   try {
+    // `root` 一定是**真实文件系统**上的路径（`LOCALAPPDATA` / `ProgramFiles` / `C:\`，
+    // 测试里是 tmp 目录），所以这里的 join 必须用真实平台，不能用目标平台的 win32 ——
+    // 在 Linux/macOS 上跑 `platform:'win32'` 的用例时，win32.join 会把 `/tmp/x` 拧成
+    // `\tmp\x`，扫出空数组，CI 就是这么红的。在真 Windows 上两者完全等价。
     return readdirSync(root, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && pattern.test(entry.name))
       .map((entry) => entry.name)
       .sort((a, b) => versionOf(b) - versionOf(a)) // 新版本优先
-      .map((name) => p.join(root, name));
+      .map((name) => join(root, name));
   } catch {
     return [];
   }
@@ -75,10 +79,14 @@ export function pythonInstallDirs({ env = process.env, platform = process.platfo
     if (typeof dir === 'string' && dir !== '' && !dirs.includes(dir)) dirs.push(dir);
   };
   if (platform === 'win32') {
-    const local = env.LOCALAPPDATA || p.join(home, 'AppData', 'Local');
-    for (const dir of versionedDirs(p.join(local, 'Programs', 'Python'), /^Python3\d+$/i, p)) add(dir);
-    for (const dir of versionedDirs('C:\\', /^Python3\d+$/i, p)) add(dir);
-    if (env.ProgramFiles) for (const dir of versionedDirs(env.ProgramFiles, /^Python3\d+$/i, p)) add(dir);
+    // ⚠️ 这一段里的 join 一律用**真实平台**：下面每个 root 都要去 readdirSync 真文件系统。
+    // 用 `p.join`（win32）在 Linux/macOS 上跑本文件的用例会把 tmp 路径拧成反斜杠，
+    // 扫出空数组（python-candidates.test.mjs 的两条 win32 用例就这么红的）。
+    // 真 Windows 上 `join === win32.join`，行为一字不差。
+    const local = env.LOCALAPPDATA || join(home, 'AppData', 'Local');
+    for (const dir of versionedDirs(join(local, 'Programs', 'Python'), /^Python3\d+$/i)) add(dir);
+    for (const dir of versionedDirs('C:\\', /^Python3\d+$/i)) add(dir);
+    if (env.ProgramFiles) for (const dir of versionedDirs(env.ProgramFiles, /^Python3\d+$/i)) add(dir);
     return dirs;
   }
   if (platform === 'darwin') {
@@ -137,9 +145,12 @@ export function pythonCandidates({ config = {}, env = process.env, platform = pr
   // 探测时就多 spawn 一次 ENOENT，报错信息里也多一行噪音。
   const p = pathFor(platform);
   const names = platform === 'win32' ? ['python.exe', 'python'] : ['python3', 'python'];
+  // 候选目录的来源决定怎么拼：win32 那批是**真实文件系统扫出来的**（见 pythonInstallDirs），
+  // 得用真实平台的 join；darwin/linux 那批是"惯例路径"字符串，按目标平台拼才对。
+  const joinFor = platform === 'win32' ? join : p.join;
   for (const dir of pythonInstallDirs({ env, platform })) {
     for (const name of names) {
-      const full = p.join(dir, name);
+      const full = joinFor(dir, name);
       if (probe(full)) push(full);
     }
   }
