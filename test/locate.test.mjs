@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { forgetSegments, formatMatches, matchSegments, recallSegments, rememberSegments } from '../src/storyboard/locate.js';
 
@@ -43,4 +44,18 @@ test('rememberSegments: 同路径覆盖、可跨调用复用', () => {
   rememberSegments('/v/a.mp4', [segs[0]]);
   assert.equal(recallSegments('/v/a.mp4').length, 1);
   assert.equal(recallSegments('/v/b.mp4'), null);
+});
+
+/**
+ * #94 的全部内容：`rememberSegments` 定义得好好的，**pipeline 一次都没调用**。
+ *
+ * 所以上面那条往返测试一直是绿的，而 `video_locate` 每次都在报
+ * "no transcript available"。这里守的是**调用点存在**，不是缓存本身 ——
+ * 写缓存的地方必须在 `runStoryboard()` 里（跑 `tools/locate.js` 那条补跑路径时，
+ * 跑完要靠它把结果塞回缓存），参数写成 `rememberSegments(input, …)`。
+ */
+test('pipeline 真的把转写写进 locate 的缓存（#94）', () => {
+  const src = readFileSync(new URL('../src/storyboard/pipeline.js', import.meta.url), 'utf8');
+  assert.match(src, /rememberSegments\(\s*input\s*,/,
+    'pipeline.js 必须在转写确定之后写缓存，否则 video_locate 永远拿不到台词');
 });

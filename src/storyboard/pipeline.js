@@ -354,6 +354,20 @@ export async function runStoryboard(opts) {
     .map((seg) => ({ ...seg, from: seg.from - winStart, to: seg.to - winStart }))
     .filter((seg) => seg.to > 0 && seg.from < winDur);
   const transcriptChars = relSegments.reduce((n, seg) => n + String(seg.text ?? '').length, 0);
+  /**
+   * 转写 → `locate.js` 的进程内缓存（`video_locate` 全靠它）。
+   *
+   * 以前这里只有一句 `import { rememberSegments }`，**全文件一次都没调用** —— 于是
+   * `recallSegments()` 永远拿到 null，`video_locate` 在刚跑完分镜之后仍然报
+   * "no transcript available"（#94）。写在这里是因为它是所有出图路径的必经点。
+   *
+   * 两处口径不能换：
+   *   - key 用 `input`（= `resolveInput()` 的绝对路径），对端是
+   *     `tools/locate.js` 的 `recallSegments(resolved.path)`；
+   *   - 值用 `transcriptInfo.segments`（**绝对时间轴**）。`relSegments` 已经减过
+   *     `winStart`，喂给 locate 会把匹配到的时间整体提前一个窗口。
+   */
+  if (transcriptInfo?.segments?.length) rememberSegments(input, transcriptInfo.segments);
   const externalSource = sourceInfo?.url ?? info.path ?? null;
   const suspectInjection = findInjection(
     [
