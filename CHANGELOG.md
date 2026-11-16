@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-16
+
+### Fixed — `video_locate` 永远报 no transcript：`pipeline.js` 只 import 从不调用（#94）
+
+`locate.js` 的进程内缓存（`rememberSegments` / `recallSegments`）写得好好的，但
+`pipeline.js` **只有那一行 import，全文件一次都没调用** —— 于是刚跑完 `video_storyboard`
+立刻调 `video_locate`，仍然是 `no transcript available for this file`。
+0.7.2 / 0.7.4 / 0.7.5 三个版本都是这个状态，社区每次 install 后要手工重打一遍补丁。
+
+- 写入点放在 `relSegments` / `transcriptChars` 之后：那是所有出图路径的必经之处，
+  `textOnly` 的补跑（`tools/locate.js` 的第二条路）也走这里。
+- key 用 `input`（`resolveInput()` 的绝对路径），对端是 `recallSegments(resolved.path)`。
+- 值用 `transcriptInfo.segments`（**绝对时间轴**）。`relSegments` 已经减过 `winStart`，
+  喂过去会让命中时间整体提前一个窗口。
+- 回归测试守的是**调用点存在**，不是缓存本身 —— 往返测试一直是绿的，坏的就是"没人调用"。
+
+### Fixed — ubuntu CI 上 2 条 win32 用例红：真实文件系统的路径不能按目标平台拼
+
+上一条跨平台隔离改得过头了：`pythonInstallDirs()` 里 `LOCALAPPDATA` / `ProgramFiles` / `C:\`
+这些 **要拿去 `readdirSync` 的真实路径**也跟着 `pathFor('win32')` 拼。在 Linux/macOS 上跑
+`platform:'win32'` 的用例时，`win32.join('/tmp/x', …)` 会拧成 `\tmp\x`，扫出空数组
+（Actions #317 / #318 的 406、409 两条）。
+
+- 分界：**要去读文件系统的按真实平台拼**，纯字符串的"惯例目录"（Homebrew / pyenv / snap）
+  仍按目标平台拼 —— 后者在 Windows 上跑 darwin 用例时反过来也需要 win32 的反斜杠。
+- 真 Windows 上 `join === win32.join`，行为一字不变；CI 从红转绿（#319）。
+
 ### Fixed — yt-dlp 读用户的全局 config：`--embed-subs` 让第一次下载必挂，缓存又把失败盖住（#91）
 
 用户 `yt-dlp` 全局配置里一句 `--embed-subs`，在 C站 上就会去取"字幕"（实为 danmaku XML），
