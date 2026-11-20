@@ -28,7 +28,8 @@ import {
   packPrints, packedFps, scanShots, unpackPrints,
 } from './scan.js';
 // 切点链路（5 个阶段的顺序 + 准入门槛）全部收口在 cuts.js
-import { resolveCuts } from './cuts.js';
+import { capToOneSheet, resolveCuts } from './cuts.js';
+import { tagCuts } from './flash.js';
 import { rememberSegments } from './locate.js';
 import { isOwned, keepAlive, scheduleStop } from './asr-lifecycle.js';
 import {
@@ -52,7 +53,7 @@ import { addAudioStrip, addSheetHeader, clock, composePacked, encodePngBuffer } 
 import { extractFrameWithFallback, extractFramesBatched, mapPool } from './frames.js';
 import { correctByOnScreenSubs } from './ocr-subs.js';
 import { resolveHwaccel } from './hwaccel.js';
-import { shadowLogPath, shadowPass } from './shadow.js';
+import { liquidDecision, shadowLogPath, shadowPass } from './shadow.js';
 
 export const PICK_MODES = ['sharp', 'mid', 'thumb'];// 只有两种：时间码不烧进画面 —— 它占像素、压缩后先糊，而清单里已经有 0.01 秒精度的时间。
 // （历史上 `index+time` 在参数表里但从没实现过，等于一个会静默失效的选项。）
@@ -97,11 +98,11 @@ export async function runStoryboard(opts) {
     // 所以交给调用方（模型/用户）按素材类型选，见 tool-spec 里的说明。
     cutFloor = null,
     /**
-     * 场景检测器：`hsv`（默认）/ `shadow`（并排跑 CfC 的 `cut` 头，**只写日志**）/ `liquid`。
+     * 场景检测器：`hsv`（默认）/ `shadow`（并排跑 CfC 的 `cut` 头，**只写日志**）/ `liquid`（模型出边界）。
      *
-     * `shadow` 的边界**仍然来自 hsv**，模型那条链路出任何错都只在日志里记 `ok:false` ——
-     * 见 `shadow.js` 头注释与 `LNN画面变化-交接-shadow接入-20261120.md`。
-     * `liquid` **还没实现**：设了也按 `hsv` 跑，并在清单里写明 `applied: 'hsv'`。
+     * `shadow` 的边界**仍然来自 hsv**；`liquid` 才真的换，但带兜底闸 ——
+     * 模型跑挂、0 刀、或刀数不到 hsv 的 40%（域不对）就退回 hsv，并在清单里写明
+     * `requested/applied/reason`。见 `shadow.js` 的 `liquidDecision`。
      */
     sceneDetector = 'hsv',
     /** 模型路径（`shadow` 必填）。空 = 记一条 `ok:false` 然后继续导出。 */
@@ -347,24 +348,34 @@ export async function runStoryboard(opts) {
   const trace = cutChain.trace;
   if (hwaccelUsed) trace.unshift(`hwaccel:${hwaccelUsed}`);
 
-  /* ================================================================ 阴影对照
-   * `sceneDetector: 'shadow'` —— CfC 的 `cut` 头和 hsv 判据并排跑，**只写一行 JSONL**。
+  /* ================================================================ 场景检测器
+   * 三档（`~/.dsh/video.json` 的 `sceneDetector`）：
    *
-   * 三条不许动的前提：
-   *  1. `cuts` 一个都不改（输出边界仍然来自 hsv，这是回滚保证）；
-   *  2. 任何异常都被 `shadowPass` 吞掉（它自己写 `ok:false`，永不 throw）；
-   *  3. 预演/纯文本模式不跑 —— 那是"先看刀数"的轻量入口，不该多一次全量解码。
+   *   hsv     现有行为，一行不变（默认）
+   *   shadow  CfC 的 `cut` 头和 hsv 并排跑，**只写一行 JSONL**，`cuts` 一个都不改
+   *   liquid  边界改用模型出；**带兜底闸**（`liquidDecision`）—— 模型跑挂、0 刀、
+   *           或刀数不到 hsv 的 40% 就退回 hsv，并写明原因
+   *
+   * 两个模式共用同一次模型推理（`shadowPass`），所以 liquid 也照样留日志：
+   * "这次为什么切/没切" 必须能事后对上，否则 `liquid` 就是个黑盒。
    *
    * 位置在 `resolveCuts` 之后：要比的是**最终下发给排布的那批切点**，不是粗扫结果 ——
    * 细扫/极静补刀会明显改变刀数与位置，拿粗扫比会低估分歧。
+   * `shadowPass` 永不 throw（自己写 `ok:false`），所以这里不需要 try。
    */
   const wantedScene = String(sceneDetector ?? 'hsv').trim().toLowerCase();
-  const sceneApplied = wantedScene === 'shadow' ? 'shadow' : 'hsv';
+  const sceneMode = wantedScene === 'shadow' || wantedScene === 'liquid' ? wantedScene : 'hsv';
+  let sceneApplied = 'hsv';
+  let sceneNote = sceneMode === 'hsv' && wantedScene && wantedScene !== 'hsv'
+    ? `sceneDetector 不认识：${wantedScene}；这次按 hsv 跑`
+    : null;
   let shadowInfo = null;
-  if (sceneApplied === 'shadow') {
+  let scenePred = null;
+  if (sceneMode !== 'hsv') {
     if (planOnly || textOnly) {
       // 不跑也不写日志：这两条路径没有"处理完一段素材"这回事
       shadowInfo = { ok: false, skipped: planOnly ? 'plan-only' : 'text-only' };
+      sceneNote = sceneNote ?? `预演/纯文本模式不跑模型（${shadowInfo.skipped}），这次按 hsv 跑`;
     } else {
       const logPath = shadowLog || shadowLogPath();
       shadowInfo = await shadowPass({
@@ -374,15 +385,58 @@ export async function runStoryboard(opts) {
         modelPath: liquidModel, stride: shadowStride,
         logPath, ffmpegPath,
       });
+      scenePred = shadowInfo.pred ?? null;
       shadowInfo = { ...shadowInfo, log: logPath };
       mark('shadow');
+
+      if (sceneMode === 'liquid') {
+        const verdict = liquidDecision({
+          ok: shadowInfo.ok === true,
+          cutsHsv: shadowInfo.cutsHsv ?? cuts.length,
+          cutsLiquid: shadowInfo.cutsLiquid ?? 0,
+          error: shadowInfo.error ?? null,
+        });
+        if (!verdict.accept) {
+          sceneNote = verdict.reason;
+          trace.push('scene:liquid-reject');
+        } else if (!scenePred) {
+          sceneNote = '模型出点了但没带回切点，退回 hsv';
+        } else {
+          /**
+           * 接管：用模型的点替换 `cuts`，然后**只补"把刀装进一屏"这一步**（`capToOneSheet`）
+           * 与类型标签。
+           *
+           * 为什么不走整条 `resolveCuts`：那条链路里的极静补刀/爆点细扫都是**hsv 的补丁**
+           * （拿 `scan.stats` 重新推切点），跑一遍等于把模型换掉的结果又改回 hsv 的。
+           * 而"装一屏"是排布问题、跟谁找的刀无关，必须留着，否则 thrifty 档会开一堆图。
+           *
+           * 时间轴：`pred` 是**窗口相对**的，管线里一律用绝对时间，所以加回 `winStart`。
+           */
+          const absModel = scenePred.map((p) => ({
+            t: +(p.t + winStart).toFixed(3),
+            score: Number.isFinite(p.score) ? p.score : 0,
+          }));
+          const capped = capToOneSheet(absModel, { strategy, capGap });
+          let next = capped.cuts;
+          // hsv 链路（极静补刀/爆点细扫/合并）的 trace 与现在的切点无关了，只留硬件解码那条
+          const kept = trace.filter((x) => x.startsWith('hwaccel:'));
+          trace.length = 0;
+          trace.push(...kept);
+          if (capped.trace) trace.push(`scene:${capped.trace}`);
+          if (!textOnly && Array.isArray(scanPrints) && scanPrints.length) {
+            next = tagCuts(next, {
+              prints: scanPrints, means: scanMeans, fps: info.fps,
+              scores: scan.stats?.map((s) => s.score),
+            });
+          }
+          trace.push(`scene:liquid:${cuts.length}->${next.length}`);
+          cuts = next;
+          refinedBursts.length = 0;   // hsv 链路的细扫结果与现在的 cuts 无关了
+          sceneApplied = 'liquid';
+        }
+      }
     }
   }
-  const sceneNote = sceneApplied === 'hsv' && wantedScene && wantedScene !== 'hsv'
-    ? (wantedScene === 'liquid'
-      ? 'liquid 还没实现（等 shadow 日志攒够）；这次按 hsv 跑'
-      : `sceneDetector 不认识：${wantedScene}；这次按 hsv 跑`)
-    : null;
 
   // ---- 台词：显式文件 > 字幕轨 > ASR；三者都没有就静默跳过（绝不让分镜失败）
   const transcriptResult = await transcriptP;

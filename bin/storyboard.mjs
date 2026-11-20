@@ -189,10 +189,16 @@ for (const [i, sheet] of r.sheets.entries()) {
 console.log(`[done] ${Date.now() - t0}ms`);
 
 /**
- * 阴影对照的那一行。**只在开了 `--scene shadow` 时打** —— 默认路径一个字都不多。
+ * 场景检测器的那一行。**只在开了 `--scene` 时打** —— 默认路径一个字都不多。
  *
  * `ok:false` 也要打：那正是"这次分歧率为什么没有"的答案（模型路径写错、版本不符…）。
  */
+if (r.sceneDetector?.requested === 'liquid' || r.sceneDetector?.applied === 'liquid') {
+  const s = r.sceneDetector;
+  console.log(s.applied === 'liquid'
+    ? `[scene] liquid 接管（模型出边界）：hsv ${r.shadow?.cutsHsv ?? '—'} 刀 → 模型 ${r.shadow?.cutsLiquid ?? '—'} 刀`
+    : `[scene] liquid 没接管，按 hsv 跑：${s.note ?? '未知原因'}`);
+}
 if (r.shadow) {
   const s = r.shadow;
   if (s.skipped) console.log(`[shadow] 跳过：${s.skipped}`);

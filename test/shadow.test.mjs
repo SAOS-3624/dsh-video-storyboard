@@ -14,7 +14,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -23,7 +23,8 @@ import { DEFAULT_FFMPEG, probeVideo } from '../src/storyboard/probe.js';
 import { scanShots } from '../src/storyboard/scan.js';
 import { runStoryboard } from '../src/storyboard/pipeline.js';
 import {
-  compareCuts, loadLiquidModel, predictCuts, readSceneConfig, shadowPass, shadowLogPath, TOL_FRAMES,
+  compareCuts, liquidDecision, loadLiquidModel, predictCuts, readSceneConfig, shadowPass,
+  shadowLogPath, TOL_FRAMES,
 } from '../src/storyboard/shadow.js';
 import {
   bucketOf, parseShadowLog, summarizeShadow, verdictOf,
@@ -296,22 +297,6 @@ test('e2e: 纯文本/预演模式下不跑 shadow（那是"先看刀数"的轻�
   }
 });
 
-test('e2e: sceneDetector=liquid 还没实现 → 按 hsv 跑，并在清单里说明', async (t) => {
-  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
-  const dir = await mkdtemp(join(tmpdir(), 'dsh-shadow-liquid-'));
-  try {
-    const file = await makeColorFixture(dir);
-    const r = await runStoryboard({
-      input: file, transcript: 'off', cache: false, textOnly: true, sceneDetector: 'liquid',
-    });
-    assert.equal(r.sceneDetector.applied, 'hsv');
-    assert.match(r.sceneDetector.note, /liquid 还没实现/);
-    assert.equal(r.shadow, undefined, '未实现的档位绝不能产出半真半假的日志');
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
 test('e2e: 窗口起点不为 0 时，时间基准必须对齐（hsv 是绝对时间、模型是窗口相对）', async (t) => {
   if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
   if (!existsSync(DEPLOY_MODEL)) return t.skip(`部署模型不在：${DEPLOY_MODEL}`);
@@ -421,4 +406,191 @@ test('bucketOf / BUCKETS: 边界落在右侧桶（3% 算 3~8%）', () => {
   assert.equal(bucketOf(0.08), '8~15%');
   assert.equal(bucketOf(0.15), '>15%');
   assert.equal(bucketOf(null), null);
+});
+
+// ---------------------------------------------------------------- liquid 接管
+
+/** 造一个偏置模型（`w_cut=0, b_cut=bias`）：-30 ≈ 一刀不出，+6 ≈ 见帧就报。 */
+async function makeBiasedModel(dir, bias) {
+  const raw = JSON.parse(await readFile(DEPLOY_MODEL, 'utf8'));
+  const n = raw.params.w_cut.length;
+  raw.params.w_cut = new Array(n).fill(0);
+  raw.params.b_cut = [bias];
+  const out = join(dir, `model-bias${bias}.json`);
+  await writeFile(out, JSON.stringify(raw), 'utf8');
+  return out;
+}
+
+test('liquidDecision: 跑挂 / 0 刀 / 刀数不到 40% 都不许接管', () => {
+  assert.deepEqual(liquidDecision({ ok: true, cutsHsv: 10, cutsLiquid: 10 }), { accept: true, reason: null });
+  // 模型比 hsv 多（补了 hsv 漏的刀）也照收
+  assert.equal(liquidDecision({ ok: true, cutsHsv: 10, cutsLiquid: 14 }).accept, true);
+  // hsv 一个都没出、模型出了 → 也该收
+  assert.equal(liquidDecision({ ok: true, cutsHsv: 0, cutsLiquid: 3 }).accept, true);
+
+  const fail = liquidDecision({ ok: false, error: '模型文件不存在' });
+  assert.equal(fail.accept, false);
+  assert.match(fail.reason, /模型没跑成/);
+
+  const zero = liquidDecision({ ok: true, cutsHsv: 213, cutsLiquid: 0 });
+  assert.equal(zero.accept, false);
+  assert.match(zero.reason, /0 刀/);
+
+  const both = liquidDecision({ ok: true, cutsHsv: 0, cutsLiquid: 0 });
+  assert.equal(both.accept, false, '两边都没出点就别换，换了也没有区别');
+
+  // 39% 拒、40% 收（边界按 >= 算）
+  assert.equal(liquidDecision({ ok: true, cutsHsv: 100, cutsLiquid: 39 }).accept, false);
+  assert.equal(liquidDecision({ ok: true, cutsHsv: 100, cutsLiquid: 40 }).accept, true);
+});
+
+test('e2e: liquid 接管 —— 边界真的来自模型，不是 hsv', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  if (!existsSync(DEPLOY_MODEL)) return t.skip(`部署模型不在：${DEPLOY_MODEL}`);
+
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-liquid-'));
+  try {
+    const file = await makeColorFixture(dir);
+    const base = {
+      input: file, transcript: 'off', cache: false, audioStrip: false, encode: true,
+    };
+    const plain = await runStoryboard({ ...base });
+    const log = join(dir, 'shadow-cuts.jsonl');
+
+    // ① 真模型：接管，且刀数就等于模型那侧（hsv 那侧只是对照）
+    const r = await runStoryboard({
+      ...base, sceneDetector: 'liquid', liquidModel: DEPLOY_MODEL, shadowLog: log,
+    });
+    assert.equal(r.sceneDetector.requested, 'liquid');
+    assert.equal(r.sceneDetector.applied, 'liquid', r.sceneDetector.note);
+    assert.equal(r.shadow.ok, true);
+    assert.equal(r.cuts.length, r.shadow.cutsLiquid);
+    // 模型在纯色片上出的是 1/2/3/4 秒 —— 每个切点都落在整数秒附近
+    for (const c of r.cuts) {
+      assert.ok(Math.abs(c.t - Math.round(c.t)) < 0.2, `切点 ${c.t} 不像来自模型`);
+    }
+    assert.equal(JSON.parse((await readFile(log, 'utf8')).trim()).ok, true);
+
+    /**
+     * ② 偏置模型（见帧就报）：刀数必须跟着模型走。
+     *
+     * 这条才是"边界真的换了"的证据 —— ① 里模型和 hsv 恰好都是 4 刀，说明不了问题。
+     * ⚠️ 别断言"格数 = 刀数 + 1"：`fillGaps` 会把一屏内的段重新等分去填满，
+     * 那是排布的事（hsv 跑同一段也是 4 个格子），跟切点无关。
+     */
+    const many = await makeBiasedModel(dir, 6);
+    const r2 = await runStoryboard({
+      ...base, sceneDetector: 'liquid', liquidModel: many, shadowLog: join(dir, 'b.jsonl'),
+    });
+    assert.equal(r2.sceneDetector.applied, 'liquid', r2.sceneDetector.note);
+    assert.ok(r2.shadow.cutsLiquid >= 10, `偏置模型应该出很多刀，实际 ${r2.shadow.cutsLiquid}`);
+    assert.equal(r2.cuts.length, r2.shadow.cutsLiquid);
+    assert.notEqual(r2.cuts.length, plain.cuts.length, '刀数必须与 hsv 不同，否则模型没真的接管');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('e2e: liquid 模型不出点时兜回 hsv，导出照常、清单写明原因', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  if (!existsSync(DEPLOY_MODEL)) return t.skip(`部署模型不在：${DEPLOY_MODEL}`);
+
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-liquid-zero-'));
+  try {
+    const file = await makeColorFixture(dir);
+    const broken = await makeBiasedModel(dir, -30);      // sigmoid(-30) ≈ 0 → 一刀不出
+    const r = await runStoryboard({
+      input: file, transcript: 'off', cache: false, audioStrip: false, encode: true,
+      sceneDetector: 'liquid', liquidModel: broken, shadowLog: join(dir, 'l.jsonl'),
+    });
+    assert.equal(r.sceneDetector.applied, 'hsv');
+    assert.match(r.sceneDetector.note, /0 刀/);
+    assert.ok(r.cuts.length > 0, '退回 hsv 之后刀还得在');
+    assert.equal(r.sheets.length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('e2e: liquid 模型文件不存在 → 退回 hsv，导出照常', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-liquid-miss-'));
+  try {
+    const file = await makeColorFixture(dir);
+    const r = await runStoryboard({
+      input: file, transcript: 'off', cache: false, audioStrip: false, encode: true,
+      sceneDetector: 'liquid', liquidModel: join(dir, 'nope.json'), shadowLog: join(dir, 'l.jsonl'),
+    });
+    assert.equal(r.sceneDetector.applied, 'hsv');
+    assert.match(r.sceneDetector.note, /模型没跑成/);
+    assert.ok(r.sheets.length >= 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('capToOneSheet: 只有 brief（一图）档才合并，合并量记在 trace 里', async () => {
+  const { capToOneSheet } = await import('../src/storyboard/cuts.js');
+  // 120 刀、每 0.1 秒一个 —— 任何策略都装不进一屏，但只有 brief 会动手
+  const many = Array.from({ length: 120 }, (_, i) => ({ t: +(i * 0.1).toFixed(2), score: 90 }));
+
+  const plain = capToOneSheet(many, { strategy: 'compact', capGap: 0 });
+  assert.equal(plain.cuts.length, 120);
+  assert.equal(plain.trace, null);
+
+  const brief = capToOneSheet(many, { strategy: 'brief', capGap: 0 });
+  assert.ok(brief.cuts.length < 120, 'brief 要把刀压进一屏');
+  assert.ok(brief.cuts.length + 1 <= 56, `一屏最多 56 格，实际 ${brief.cuts.length + 1}`);
+  assert.match(brief.trace, /^merge:120->\d+@[\d.]+s$/);
+  // 合并只是删点，不改时间戳
+  for (const c of brief.cuts) assert.ok(many.some((m) => m.t === c.t));
+});
+
+test('接线：video.json 的 sceneDetector/liquidModel 会变成 runStoryboard 的入参', async () => {
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const { boardOptions } = await import('../src/storyboard/board.js');
+  const { runOptionsFromCli } = await import('../src/storyboard/cli-options.js');
+
+  const home = await mkdtemp(join(tmpdir(), 'dsh-scene-cfg-'));
+  const prev = process.env.DSH_HOME;
+  try {
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, 'video.json'), JSON.stringify({
+      sceneDetector: 'liquid',
+      liquidModel: 'D:/models/x.json',
+      shadowStride: 2,
+    }), 'utf8');
+    process.env.DSH_HOME = home;
+
+    // 工具路径（board）：默认 kind 也要带上——三条工具入口共用同一份 options
+    const o = boardOptions({ input: 'a.mp4' }, { kind: 'board' });
+    assert.equal(o.sceneDetector, 'liquid');
+    assert.equal(o.liquidModel, 'D:/models/x.json');
+    assert.equal(o.shadowStride, 2);
+    assert.ok(o.shadowLog, '日志路径要显式传下去，别让下游再猜一次');
+
+    // 没配时一个字段都不许塞（这是"默认输出逐字节不变"的前提）
+    writeFileSync(join(home, 'video.json'), JSON.stringify({}), 'utf8');
+    const plain = boardOptions({ input: 'a.mp4' }, { kind: 'board' });
+    assert.equal('sceneDetector' in plain, false);
+    assert.equal('liquidModel' in plain, false);
+    assert.equal('shadowLog' in plain, false);
+
+    // CLI 路径：显式开关才透传（CLI 一贯不读 video.json 的 storyboard.*）
+    const cli = runOptionsFromCli({
+      opt: { scene: 'liquid', model: 'D:/m.json', 'shadow-stride': 3, 'shadow-log': 'D:/l.jsonl' },
+      geom: { budget: 1000, maxCanvasSide: 800 },
+      input: 'a.mp4',
+      fetchOptions: {},
+    });
+    assert.equal(cli.sceneDetector, 'liquid');
+    assert.equal(cli.liquidModel, 'D:/m.json');
+    assert.equal(cli.shadowStride, 3);
+    assert.equal(cli.shadowLog, 'D:/l.jsonl');
+    const bare = runOptionsFromCli({ opt: {}, geom: { budget: 1000, maxCanvasSide: 800 }, input: 'a.mp4', fetchOptions: {} });
+    assert.equal('sceneDetector' in bare, false, '没给 --scene 就该和以前完全一样');
+  } finally {
+    if (prev === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prev;
+    await rm(home, { recursive: true, force: true });
+  }
 });

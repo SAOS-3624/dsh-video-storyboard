@@ -124,6 +124,11 @@ video_storyboard({ input: "https://example.com/some-video" })   // 任意 yt-dlp
 `{"storyboard": {"auto": false}}`，退回 `compact`。清单里会写清 `auto chose …` 和"别的档要几张"。
 不知道一部片有多少刀时，先 `dryRun: true` 问一次（扫描有缓存），再决定出不出图。
 
+> **切点还能换成模型出**（可选，默认关）：`~/.dsh/video.json` 里设 `sceneDetector` ——
+> `shadow` 让一个 14 维 CfC 模型和现有判据**并排跑但只写日志**，`liquid` 才真的用它出边界
+> （模型跑挂、0 刀、或刀数不到 hsv 的 40% 会自动退回 hsv）。代价是多解一遍码、需要一个模型文件。
+> 见 [docs/CONFIG.zh.md](docs/CONFIG.zh.md) 的 §3.2。
+
 800 宽画布上每档的实际像素（16:9 源）：
 
 | 档位 | 格子 | 能看清 |

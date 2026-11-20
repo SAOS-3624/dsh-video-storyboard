@@ -65,6 +65,33 @@ export function shouldTakeSpikes({
 }
 
 /**
+ * 「丐中丐」档的装一屏：自适应加大最小间隔，直到整段能装进一张图。
+ *
+ * 抽成独立函数是因为**两条检测链路都要用它**：hsv 的切点（`resolveCuts`）和
+ * 模型出的切点（`liquid`）。它属于"把刀装进一屏"，不属于"怎么找刀" ——
+ * 所以 `liquid` 换了找刀的办法，这一步照样要跑，否则 thrifty 档会开出一堆图。
+ *
+ * @param {Array<{t:number, score?:number}>} cuts
+ * @param {{strategy?:string, capGap?:number}} o
+ * @returns {{cuts:Array, trace:string|null}} `trace` 里有合并记录时才非 null
+ */
+export function capToOneSheet(cuts, { strategy, capGap = 0 } = {}) {
+  if (!STRATEGIES[strategy]?.fitOneSheet || cuts.length + 1 <= ONE_SHEET_CAP) {
+    return { cuts, trace: null };
+  }
+  let gap = capGap > 0 ? capGap : 0.2;
+  let fitted = suppressClose(cuts, gap);
+  let rounds = 0;
+  while (fitted.length + 1 > ONE_SHEET_CAP && gap < 120 && rounds < 60) {
+    gap *= 1.3;
+    fitted = suppressClose(cuts, gap);
+    rounds += 1;
+  }
+  if (fitted.length >= cuts.length) return { cuts, trace: null };
+  return { cuts: fitted, trace: `merge:${cuts.length}->${fitted.length}@${gap.toFixed(1)}s` };
+}
+
+/**
  * 跑完整条切点链路。
  *
  * @param {object} o
@@ -121,19 +148,11 @@ export function resolveCuts({
   }
 
   // ---- 3. 丐中丐档：自适应加大最小间隔，直到整段能装进一张图
-  if (STRATEGIES[strategy]?.fitOneSheet && cuts.length + 1 > ONE_SHEET_CAP) {
-    let gap = capGap > 0 ? capGap : 0.2;
-    let fitted = suppressClose(cuts, gap);
-    let rounds = 0;
-    while (fitted.length + 1 > ONE_SHEET_CAP && gap < 120 && rounds < 60) {
-      gap *= 1.3;
-      fitted = suppressClose(cuts, gap);
-      rounds += 1;
-    }
-    if (fitted.length < cuts.length) {
-      trace.push(`merge:${cuts.length}->${fitted.length}@${gap.toFixed(1)}s`);
-      cuts = fitted;
-    }
+  // （实现搬到 `capToOneSheet()`：liquid 链路也要用它，两份会漂）
+  {
+    const capped = capToOneSheet(cuts, { strategy, capGap });
+    if (capped.trace) trace.push(capped.trace);
+    cuts = capped.cuts;
   }
 
   // ---- 4. 打标签：**一个都不删**（删掉误检会让这段在插件眼里变成"完全静止"）

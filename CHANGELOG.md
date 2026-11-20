@@ -2,27 +2,36 @@
 
 ## [Unreleased]
 
-### Added — `sceneDetector: "shadow"`：CfC 的 `cut` 头和线上判据并排跑，**只写日志、不改输出**
+### Added — `sceneDetector: "shadow" | "liquid"`：CfC 的 `cut` 头并排跑，或者真的接管
 
-把一个训好的切点模型接进来看它和现有 HSV 判据差多少。三档开关
-（`~/.dsh/video.json` 的顶层字段，不走工具参数）：
+把一个训好的切点模型接进来：先看它和现有 HSV 判据差多少（`shadow`），确认了再让它出边界
+（`liquid`）。三档开关（`~/.dsh/video.json` 的顶层字段，不走工具参数）：
 
 | 值 | 行为 |
 |---|---|
 | `hsv` | 现有行为，一行不变（**默认**，也是唯一已上线的路径） |
 | `shadow` | 两条都跑，只追加一行 JSONL；**边界仍然来自 hsv** |
-| `liquid` | 边界改用模型出 —— **还没实现**，设了也按 `hsv` 跑，清单里写明 `applied: "hsv"` |
+| `liquid` | 边界改用模型出，**带兜底闸**：跑挂 / 0 刀 / 刀数不到 hsv 的 40% 就退回 `hsv` |
 
 ```json
-{ "sceneDetector": "shadow", "liquidModel": "D:/models/model-bbc-fold1.json" }
+{ "sceneDetector": "liquid", "liquidModel": "D:/models/model-bbc-fold1.json" }
 ```
 
-CLI 对应 `--scene shadow --model <path> [--shadow-stride N] [--shadow-log <path>]`。
+CLI 对应 `--scene shadow|liquid --model <path> [--shadow-stride N] [--shadow-log <path>]`。
 日志默认写到 `cacheDir()/shadow-cuts.jsonl`（和 `seen.jsonl` 同目录，`pruneCache` 只清 `*.json`）。
+清单里两个档位都会写明 `sceneDetector: { requested, applied, note }` ——"我明明开了 liquid"
+和"其实一直在跑 hsv"必须能对上。
 
 **不碰 hsv 路径的办法是"再解一遍码"，不是挂在 `scanShots` 上。** 多花一次全量解码，换来三件事：
-扫描命中缓存时也有帧可用、降采样只发生在 shadow 里、回滚只需要把配置改回 `hsv`
+扫描命中缓存时也有帧可用、降采样只发生在这一层、回滚只需要把配置改回 `hsv`
 （不需要回滚代码）。回归测试直接比对"同一段素材开/关 shadow 的 PNG 是否逐字节相同"。
+
+`liquid` 只换"怎么找刀"：**不动**"把刀装进一屏"（`capToOneSheet`，与 hsv 共用）与类型标签，
+也不跑极静补刀/爆点细扫 —— 那两个是 hsv 的补丁，跑一遍等于把结果又改回去。
+
+兜底闸的 40% 不是调出来的阈值，是"域不对"的吹哨：模型只在 BBC/SHOT 这类有硬切的真人剪辑上
+验过，拿它切录屏/动效素材会几乎不出点（实测一支 29 分钟解析片：hsv 213 刀、模型 4 刀）。
+没有这道闸，`liquid` 会把整片压成几帧 —— 那不是"效果差一点"，是输出直接不可用。
 
 分歧率口径：`divergenceRate = 1 - 2·agreed/(cutsHsv + cutsLiquid)`，一致 = 时间差 **≤ 2 帧**
 （与评测的 `TOL_FRAMES` 同一把尺子），一对一贪心配对；两边都是 0 个切点时兜底成 **0**（不是 NaN）。

@@ -1,24 +1,26 @@
 /**
- * shadow.js — 阴影模式：让 CfC 的 `cut` 头和线上的 HSV 判据**并排跑**，只写日志、不改任何输出。
+ * shadow.js — CfC 的 `cut` 头**推理**（`predictCuts`）+ 阴影对照（`shadowPass`）+ 接管闸（`liquidDecision`）。
  *
  * ## 它解决的问题
  *
  * `cut` 头在 BBC / SHOT 上是 96.4 / 73.6（±2 帧），线上运动补偿基线是 90.1 / 69.1。
  * 但那是**别人的素材**。要回答"换到我自己的片子上会不会更差"，只有一个诚实的办法：
- * 两边同时跑，逐段记下它们分歧多少。这就是 shadow。
+ * 两边同时跑，逐段记下它们分歧多少。这就是 shadow —— 不改输出，只攒证据。
  *
  * ## 三档开关（`~/.dsh/video.json` 的 `sceneDetector`）
  *
- *   `hsv`     现有行为，一行不变（默认，也是唯一已上线的路径）
+ *   `hsv`     现有行为，一行不变（默认）
  *   `shadow`  两条都跑，**只写日志**；输出边界仍然来自 `hsv`
- *   `liquid`  边界改用模型出（**还没做**，等日志攒够再说）
+ *   `liquid`  边界改用模型出；**带兜底闸**（`liquidDecision`）—— 跑挂 / 0 刀 /
+ *             刀数不到 hsv 的 40% 就退回 `hsv` 并写明原因。模型只验过"有硬切的
+ *             真人剪辑"，拿它去切录屏/动效素材会几乎不出点（实测 213 刀 → 4 刀）。
  *
  * ## 两条硬约束
  *
  * 1. **不碰 hsv 路径**。所以这里不挂在 `scanShots` 的回调上，而是**自己再解一遍码**。
- *    代价是 shadow 模式多一次全量解码（≈ 扫描本身的耗时），换来的是：
+ *    代价是 shadow/liquid 各多一次全量解码（≈ 扫描本身的耗时），换来的是：
  *      - 扫描命中缓存、或 `precomputed` 复用时，依然有帧可用（挂在扫描上时那种情况根本没有帧）；
- *      - 降采样只发生在 shadow 里，不污染线上扫描；
+ *      - 降采样只发生在这一层，不污染线上扫描；
  *      - 回滚只需要把配置改回 `hsv`，不需要回滚代码。
  * 2. **任何错误都必须吞掉**。模型缺失、版本不符、OOM、ffmpeg 挂了 —— 一律记一条
  *    `ok:false` 的日志然后返回，绝不让导出失败。见 `shadowPass()` 的 catch。
@@ -30,7 +32,7 @@
  * 3. **`dt` 置零 + `dropped` 置零**：训练时它们就是 0（防帧率/片内位置泄漏），推理必须同样。
  *
  * 这三条和 `bench/eval/detectors/liquid.mjs` 是同一个口径 —— 验证办法是拿同一段素材
- * 两条路各跑一次，`predCuts` 必须逐位相同（见交接 §5 的验收）。
+ * 两条路各跑一次，`predCuts` 必须逐位相同（见交接 §4 的验收）。
  */
 
 import { spawn } from 'node:child_process';
@@ -46,7 +48,6 @@ import { cacheDir } from './cache.js';
 
 /** 允许的 `sceneDetector` 取值。**顺序即优先级**：第一个是默认值。 */
 export const SCENE_DETECTORS = Object.freeze(['hsv', 'shadow', 'liquid']);
-
 /**
  * 「两个切点算一致」的容差（帧）。**必须等于 `bench/eval/datasets.mjs` 的 `TOL_FRAMES`**：
  * 分歧率的判据要和 96.4 / 73.6 那两个数字同一把尺子，否则"分歧 5%"和"F1 掉 5 个点"
@@ -56,6 +57,43 @@ export const TOL_FRAMES = 2;
 
 /** 一次 shadow 最多收多少帧。再长就要求把 `shadowStride` 调大（不自动降采样，见文件头）。 */
 export const MAX_SHADOW_FRAMES = 1_200_000;
+
+/**
+ * `liquid` 的兜底闸：模型出的刀数不到 hsv 的这个比例就不许接管。
+ *
+ * 为什么需要：模型只在 BBC/SHOT 这类"有硬切的真人剪辑"上验过。切到录屏/动效素材上
+ * 它会**几乎不出点**（实测一支 29 分钟的 motion-graphics 解析片：hsv 213 刀、模型 4 刀，
+ * 比值 1.9%）。没有这道闸，`liquid` 会把整片压成几帧 —— 这不是"效果差一点"，
+ * 是**输出直接不可用**。
+ *
+ * 0.4 不是调出来的阈值，是"吹哨"用的：真剪辑片上模型与 hsv 的刀数一直在同一量级
+ * （BBC 31 vs 29、SHOT 12 vs 12），掉到 40% 以下只可能是域不对。
+ */
+export const LIQUID_MIN_RATIO = 0.4;
+
+/**
+ * `liquid` 该不该接管。**纯函数** —— 判据和日志分开，才测得动。
+ *
+ * 注意这里**只看"能不能用"，不看"谁更准"**：更准与否是 shadow 日志要回答的问题，
+ * 而这条闸只回答"让模型出边界会不会把这一段搞坏"。
+ *
+ * @param {{ok?:boolean, cutsHsv?:number, cutsLiquid?:number, error?:string|null}} o
+ * @returns {{accept:boolean, reason:string|null}}
+ */
+export function liquidDecision({
+  ok = true, cutsHsv = 0, cutsLiquid = 0, error = null,
+} = {}) {
+  if (!ok) return { accept: false, reason: `模型没跑成：${error ?? '未知原因'}` };
+  if (cutsLiquid === 0 && cutsHsv === 0) return { accept: false, reason: '两边都没出点，没必要换' };
+  if (cutsLiquid === 0) return { accept: false, reason: `模型 0 刀（hsv 有 ${cutsHsv} 刀），这类素材它不认` };
+  if (cutsHsv > 0 && cutsLiquid < cutsHsv * LIQUID_MIN_RATIO) {
+    return {
+      accept: false,
+      reason: `模型只出 ${cutsLiquid} 刀，不到 hsv ${cutsHsv} 刀的 ${Math.round(LIQUID_MIN_RATIO * 100)}%（域不对，退回 hsv）`,
+    };
+  }
+  return { accept: true, reason: null };
+}
 
 /**
  * 默认日志位置：`cacheDir()/shadow-cuts.jsonl`。
@@ -346,8 +384,20 @@ export async function predictCuts({
 
   // 时间轴换算：第 i 个样本对应 `i / fpsEff` 秒；decodeCuts 用 fpsEff 就是为了这一点
   const predCuts = decodeCuts(out.cut, { fps: fps / matrix.stride, theta: md.theta });
+  /**
+   * 出点连同**它自己的概率**一起带出去。
+   *
+   * `liquid` 接管时要拿这批点去排布，而 `suppressClose`（丐中丐档的近邻合并）比的是
+   * `cut.score` —— 没有分数就只能"留第一个"，那会把模型的置信度丢掉。
+   */
+  const fpsEff = fps / matrix.stride;
+  const pred = predCuts.map((t) => {
+    const i = Math.min(out.cut.length - 1, Math.max(0, Math.round(t * fpsEff)));
+    return { t, score: out.cut[i] };
+  });
   return {
     predCuts,
+    pred,
     sampled: matrix.n,
     stride: matrix.stride,
     truncated: matrix.truncated,
@@ -464,7 +514,11 @@ export async function shadowPass(o) {
     }
     if (notes.length) record.note = notes.join('；');
     if (writeLog) await appendShadowLog(logPath, record);
-    return record;
+    /**
+     * `pred` **只在返回值里，不进日志**：`liquid` 接管时要拿它去排布（还带着概率），
+     * 而日志是给人看的、也是要攒的 —— 几百个 {t, score} 塞进去只会让它变成二进制。
+     */
+    return { ...record, pred: r.pred };
   } catch (e) {
     const record = {
       ...base,

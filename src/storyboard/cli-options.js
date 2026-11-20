@@ -84,6 +84,9 @@ export function manifestFromCli({ input, r }) {
     ...(r.ocr ? { ocr: r.ocr } : {}),
     // 阴影对照（只在开了 `--scene shadow` 时出现）：分歧率是给人看的数字，必须进清单
     ...(r.shadow ? { shadow: r.shadow } : {}),
+    // 场景检测器的结论（`liquid` 有没有接管、没接管的原因）—— 清单里必须能对上，
+    // 否则"我明明开了 liquid"和"其实一直在跑 hsv"在文件里区分不出来
+    ...(r.sceneDetector ? { sceneDetector: r.sceneDetector } : {}),
     sheets: r.sheets.map((s) => ({
       sheet: s.sheet, width: s.width, height: s.height,
       stripH: s.stripH ?? null, cells: s.cells,
