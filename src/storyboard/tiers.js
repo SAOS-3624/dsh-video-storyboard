@@ -644,7 +644,24 @@ export const INTEGRAL_BASE_FPS = BASE_FPS;
  *          fps?:number}} o
  * @returns {number[]} 采样时刻（绝对秒，升序）
  */
-export function integralMarks({
+export function integralMarks({ duration, ...rest } = {}) {
+  return integralAccum({ duration, ...rest }).marks;
+}
+
+/**
+ * 积分器的**完整轨迹**：出点 + 每一帧的"攒了多少"。
+ *
+ * `integralMarks` 就是这个函数的 `.marks` —— **只有一份累加实现**。
+ * 拆出来是为了训练：`q` 头如果只学"出点＝1、其余＝0"的二分类，它可以用
+ * "哪一帧变化大"这个捷径蒙过去（因为阈值穿越点常常和变化尖峰重合），
+ * 学不到真正的累加相位 —— 实测出点把时间轴切成的各段，累计变化的变异系数是
+ * 积分器的 3~10 倍。改用 `frac` 当回归目标，排位就由累加量本身定义，绕不过去。
+ *
+ * @returns {{marks:number[], frac:Float64Array, t:Float64Array, T:number}}
+ *   `frac[i]` 是第 i 个有效采样点（`clean` 过滤后）的 `min(1, acc/T)`，
+ *   触发时归零重新积 —— 也就是"距上次出点攒了多少"。
+ */
+export function integralAccum({
   duration, series = [], cuts = [], start = 0,
   equivSeconds = 6, minGap = 0.8, skipNearCut = 0.35, fps, timeNormalize = true,
 } = {}) {
@@ -665,21 +682,30 @@ export function integralMarks({
       : 12);
   // 折算：用基准帧率，不用实际 fps（关掉 timeNormalize 就退回旧口径）
   const T = INTEGRAL_REF_SCORE * (timeNormalize ? INTEGRAL_BASE_FPS : rate) * equivSeconds;
-  if (!(T > 0)) return [];
 
-  const out = [];
+  const marks = [];
+  const n = clean.length;
+  const frac = new Float64Array(n);
+  const t = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) t[i] = clean[i].t;
+  if (!(T > 0)) return { marks, frac, t, T: 0 };
+
   let acc = 0;
   let last = -Infinity;
-  for (const p of clean) {
+  for (let i = 0; i < n; i += 1) {
+    const p = clean[i];
     acc += Math.max(0, Number(p.score) || 0);
+    frac[i] = Math.min(1, acc / T);
     if (acc < T) continue;
     acc = 0;                                   // 触发即清零，重新积
+    // 注意：minGap / 近切点这两道只是"这个点不记"，**清零已经发生了** ——
+    // 这是线上既有行为，不要"顺手改成先判后清"，那会让密度整体变高。
     if (p.t - last < minGap) continue;
     if (real.some((c) => Math.abs(c - p.t) < skipNearCut)) continue;
-    out.push(+p.t.toFixed(3));
+    marks.push(+p.t.toFixed(3));
     last = p.t;
   }
-  return out;
+  return { marks, frac, t, T };
 }
 
 /* ------------------------------------------------------------------ 帧序列 */
