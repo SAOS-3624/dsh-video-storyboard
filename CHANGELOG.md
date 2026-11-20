@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+### Added — `sceneDetector: "shadow"`：CfC 的 `cut` 头和线上判据并排跑，**只写日志、不改输出**
+
+把一个训好的切点模型接进来看它和现有 HSV 判据差多少。三档开关
+（`~/.dsh/video.json` 的顶层字段，不走工具参数）：
+
+| 值 | 行为 |
+|---|---|
+| `hsv` | 现有行为，一行不变（**默认**，也是唯一已上线的路径） |
+| `shadow` | 两条都跑，只追加一行 JSONL；**边界仍然来自 hsv** |
+| `liquid` | 边界改用模型出 —— **还没实现**，设了也按 `hsv` 跑，清单里写明 `applied: "hsv"` |
+
+```json
+{ "sceneDetector": "shadow", "liquidModel": "D:/models/model-bbc-fold1.json" }
+```
+
+CLI 对应 `--scene shadow --model <path> [--shadow-stride N] [--shadow-log <path>]`。
+日志默认写到 `cacheDir()/shadow-cuts.jsonl`（和 `seen.jsonl` 同目录，`pruneCache` 只清 `*.json`）。
+
+**不碰 hsv 路径的办法是"再解一遍码"，不是挂在 `scanShots` 上。** 多花一次全量解码，换来三件事：
+扫描命中缓存时也有帧可用、降采样只发生在 shadow 里、回滚只需要把配置改回 `hsv`
+（不需要回滚代码）。回归测试直接比对"同一段素材开/关 shadow 的 PNG 是否逐字节相同"。
+
+分歧率口径：`divergenceRate = 1 - 2·agreed/(cutsHsv + cutsLiquid)`，一致 = 时间差 **≤ 2 帧**
+（与评测的 `TOL_FRAMES` 同一把尺子），一对一贪心配对；两边都是 0 个切点时兜底成 **0**（不是 NaN）。
+判据：3%~8% 正常，>15% 说明模型在这类素材上不适用 —— 那时要看 `onlyHsv` 里的样本是不是假切点。
+
+同时把 **CfC 前向搬进 `src/storyboard/cfc.js`**（`bench/eval/train/cfc.mjs` 改成 re-export，
+`decodeCuts` 从 `bench/eval/probe/lr.mjs` 搬过去）—— `bench/` 不进 npm 包，而线上要用同一份前向。
+训练与推理各写一份必然漂，这类漂在评测上看不出来。
+
+实测（本机，6 段素材）：BBC 窗口 6.7%、鱼眼教程 11.1%、两条 SHOT 短视频 4.0% / 14.3%、
+三条自家发布视频 0%（0/0，两边都没出点，录屏没有硬切）、一支 motion-graphics 解析片 96.3%
+（hsv 213 刀里混着大量"同一镜头里元素进场"，模型对这类素材基本不出点）。
+
 ## [0.7.6] - 2026-11-16
 
 ### Fixed — `video_locate` 永远报 no transcript：`pipeline.js` 只 import 从不调用（#94）

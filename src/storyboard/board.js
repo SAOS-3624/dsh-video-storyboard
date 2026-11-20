@@ -15,6 +15,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { configuredNumber, configuredText, readVideoFile } from './user-config.js';
+import { readSceneConfig } from './shadow.js';
 
 import {
   AUTO_STRATEGY, DEFAULT_STRATEGY, STRATEGIES, resolveStrategy,
@@ -157,6 +158,22 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
   const sbCfg = userCfg && typeof userCfg.storyboard === 'object' && !Array.isArray(userCfg.storyboard)
     ? userCfg.storyboard
     : {};
+  /**
+   * 场景检测器（`~/.dsh/video.json` 的顶层 `sceneDetector` / `liquidModel`）。
+   *
+   * **默认 `hsv`，而且默认时一个字段都不往 options 里塞** —— 这是"默认配置下输出
+   * 与改动前逐字节一致"的保证：下游 `runStoryboard` 拿到的参数集合和以前完全相同。
+   * `shadow` 的语义与日志格式见 `shadow.js`。
+   */
+  const scene = readSceneConfig(userCfg);
+  const sceneOpts = scene.mode === 'hsv'
+    ? {}
+    : {
+      sceneDetector: scene.mode,
+      ...(scene.model ? { liquidModel: scene.model } : {}),
+      ...(scene.stride > 1 ? { shadowStride: scene.stride } : {}),
+      shadowLog: scene.logPath,
+    };
   const wanted = resolveStrategy(args.strategy);
   const configuredStrategy = resolveStrategy(sbCfg.strategy);
   // 不点名 → auto（可被关掉，见 autoStrategyEnabled）；点名就照办，`auto` 也是合法值。
@@ -170,6 +187,8 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
     from: args.from ?? 0,
     to: args.to ?? 0,
     pick: args.pick ?? 'mid',
+    // 场景检测器（默认 hsv 时这里什么都不加，见上面 sceneOpts）
+    ...sceneOpts,
     // 三个调试旋钮原样透传（undefined 时 pipeline 用自己的默认值）
     ...(args.scanGap !== undefined ? { scanGap: args.scanGap } : {}),
     ...(args.integral !== undefined ? { integral: args.integral } : {}),

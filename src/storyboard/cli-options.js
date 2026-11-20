@@ -53,6 +53,15 @@ export function runOptionsFromCli({
     textOnly,
     // --dry-run：只扫描+排布，回报切点数与每档张数，不出图（与工具的 dryRun 同一路径）
     planOnly: opt['dry-run'] === true,
+    /**
+     * 阴影对照（`--scene shadow --model <模型.json>`）。CLI 一贯只认显式开关
+     * （它也不读 video.json 的 `storyboard.*`），所以这里不做任何配置兜底 ——
+     * 没给 `--scene` 就跟以前完全一样。
+     */
+    ...(opt.scene ? { sceneDetector: String(opt.scene) } : {}),
+    ...(opt.model ? { liquidModel: String(opt.model) } : {}),
+    ...(Number(opt['shadow-stride']) > 1 ? { shadowStride: Math.round(Number(opt['shadow-stride'])) } : {}),
+    ...(opt['shadow-log'] ? { shadowLog: String(opt['shadow-log']) } : {}),
     // 这一段是 #44 的核心：detail=high 必须把 ocr=true 交给 pipeline，
     // 否则 CLI 只改了清单字数，硬字幕校正从入口起就没开。
     ocr: cliOcr(opt),
@@ -73,6 +82,8 @@ export function manifestFromCli({ input, r }) {
     // 清单正文在 fixed=0 时故意不写（省 token），但机器可读的 manifest 不能跟着丢：
     // 否则“OCR 跑过但一条没改”和“根本没开 OCR”在文件里无法区分。
     ...(r.ocr ? { ocr: r.ocr } : {}),
+    // 阴影对照（只在开了 `--scene shadow` 时出现）：分歧率是给人看的数字，必须进清单
+    ...(r.shadow ? { shadow: r.shadow } : {}),
     sheets: r.sheets.map((s) => ({
       sheet: s.sheet, width: s.width, height: s.height,
       stripH: s.stripH ?? null, cells: s.cells,

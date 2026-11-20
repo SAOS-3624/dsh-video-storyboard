@@ -34,6 +34,8 @@ const opt = parse(process.argv.slice(2), {
   // scan-height 默认 0 = 按格子最大尺寸推（1 档整幅 800×450，720p 已是 2.5 倍超采样）
   cookies: null, 'allow-anonymous': false, 'scan-height': 0, 'zoom-height': 1080,
   'transcript-file': null, 'source-hash': false, quality: 'medium',
+  // 阴影对照：两边都跑、只写日志（见 src/storyboard/shadow.js）。不给 --scene 就与以前完全一样
+  scene: null, model: null, 'shadow-stride': 0, 'shadow-log': null,
 });
 const input = opt._[0];
 // 不认识的开关要喊一声：0.6 删了 --cells / --sheets / --need，而外面的教程、脚本还是老写法，
@@ -185,6 +187,23 @@ for (const [i, sheet] of r.sheets.entries()) {
     `  cell>=${sheet.cellW}x${sheet.cellH}${sheet.stripH ? `  strip=${sheet.stripH}px` : ''}`);
 }
 console.log(`[done] ${Date.now() - t0}ms`);
+
+/**
+ * 阴影对照的那一行。**只在开了 `--scene shadow` 时打** —— 默认路径一个字都不多。
+ *
+ * `ok:false` 也要打：那正是"这次分歧率为什么没有"的答案（模型路径写错、版本不符…）。
+ */
+if (r.shadow) {
+  const s = r.shadow;
+  if (s.skipped) console.log(`[shadow] 跳过：${s.skipped}`);
+  else if (s.ok) {
+    console.log(`[shadow] 分歧率 ${(s.divergenceRate * 100).toFixed(1)}%`
+      + `  hsv ${s.cutsHsv} / liquid ${s.cutsLiquid} / 一致 ${s.agreed}`
+      + `  → ${s.log ?? 'shadow-cuts.jsonl'}`);
+  } else {
+    console.log(`[shadow] 失败（导出不受影响）：${s.error ?? '未知原因'}`);
+  }
+}
 
 if (opt.manifest) {
   const payload = manifestFromCli({ input, r });

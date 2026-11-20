@@ -67,6 +67,8 @@ D:/asr/                          # 语音服务目录（任意位置，建议独
 | `zoomHeight` | `video_zoom` 回原流取的清晰度 |
 | `storyboard.auto` | 关掉只影响"自动生成分镜"，显式调用工具照常 |
 | `storyboard.cutFloor` | 切点灵敏度默认值（1–255）。不写 = 80。见下 |
+| `sceneDetector` | `hsv`（默认）/ `shadow`。见 §3.2 —— **诊断开关，平时别开** |
+| `liquidModel` | `shadow` 模式要用的模型 json 路径 |
 
 ### 3.1 `cutFloor`：切点灵敏度该设多少
 
@@ -86,6 +88,41 @@ D:/asr/                          # 语音服务目录（任意位置，建议独
 
 > 实测过"让算法自己判断该用哪档"（按分数分位数、按高分帧占比两种判据）——**都不成立**，
 > 判定结果和真正的最优门槛没有相关性。所以这个决定交给调用方，而不是藏在算法里。
+
+### 3.2 `sceneDetector`：让模型和线上判据并排跑（只写日志）
+
+```json
+{
+  "sceneDetector": "shadow",
+  "liquidModel": "D:/models/model-bbc-fold1.json",
+  "shadowStride": 1,
+  "shadowLog": "D:/dsh/shadow-cuts.jsonl"
+}
+```
+
+后两个可缺省（步长默认 1，日志默认 `cacheDir()/shadow-cuts.jsonl`）。
+
+- **`shadow` 不改任何输出**：切点、图、清单都和 `hsv` 一模一样，只是多一次解码 + 多一行日志。
+  想回滚就把 `sceneDetector` 删掉或改成 `hsv`，**不需要动代码**。
+- 每处理完一段素材追加一行 JSONL：`cutsHsv` / `cutsLiquid` / `agreed` / `divergenceRate` /
+  前 10 个 `onlyHsv` / `onlyLiquid` 时间（**窗口相对秒**，加 `window.from` 就是绝对时间）/ 耗时。
+- 判据：分歧率 **3%~8% 正常**；**> 15%** 说明模型不认这类素材 —— 去翻 `onlyHsv` 的样本，
+  看是不是"同一镜头里元素进场 / 字幕弹出 / 闪白"这类假切点。
+- 模型路径写错、特征版本不符、解码失败：**导出照常完成**，日志里只有一行 `ok:false` + 原因。
+- `shadowStride > 1` 是给长片省时间的：**只用来读分歧率**，不能用它出边界（`s_adj` 会被抬高、
+  模型的阈值不再成立）。日志里会带 `note`。
+- `--scene liquid`（或配置里写 `liquid`）目前**没有实现**，会按 `hsv` 跑并在清单里写明。
+
+日志长这样（一行一条）：
+
+```json
+{"ts":"2026-11-20T11:41:15.716Z","video":"bbc_01.mp4","fps":25,"duration":2955.041,
+ "window":{"from":300,"to":600},"frames":7501,"sampled":7501,"stride":1,
+ "thetaHsv":80,"thetaLiquid":0.92,"model":"model-bbc-fold1.json",
+ "cutsHsv":29,"cutsLiquid":31,"agreed":28,"divergent":4,"divergenceRate":0.067,
+ "onlyHsv":[10.8],"onlyLiquid":[2.44,148.16,193.4],
+ "onlyHsvTotal":1,"onlyLiquidTotal":3,"msFeature":2811,"msForward":117,"ok":true}
+```
 
 ## 4. 热词：按片子传，别写全局
 

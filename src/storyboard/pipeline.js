@@ -52,6 +52,7 @@ import { addAudioStrip, addSheetHeader, clock, composePacked, encodePngBuffer } 
 import { extractFrameWithFallback, extractFramesBatched, mapPool } from './frames.js';
 import { correctByOnScreenSubs } from './ocr-subs.js';
 import { resolveHwaccel } from './hwaccel.js';
+import { shadowLogPath, shadowPass } from './shadow.js';
 
 export const PICK_MODES = ['sharp', 'mid', 'thumb'];// 只有两种：时间码不烧进画面 —— 它占像素、压缩后先糊，而清单里已经有 0.01 秒精度的时间。
 // （历史上 `index+time` 在参数表里但从没实现过，等于一个会静默失效的选项。）
@@ -95,6 +96,20 @@ export async function runStoryboard(opts) {
     // 刀数 +13%；BBC 11 集反过来，60 比 80 掉 3.2 个点。没有一个常数能两头讨好，
     // 所以交给调用方（模型/用户）按素材类型选，见 tool-spec 里的说明。
     cutFloor = null,
+    /**
+     * 场景检测器：`hsv`（默认）/ `shadow`（并排跑 CfC 的 `cut` 头，**只写日志**）/ `liquid`。
+     *
+     * `shadow` 的边界**仍然来自 hsv**，模型那条链路出任何错都只在日志里记 `ok:false` ——
+     * 见 `shadow.js` 头注释与 `LNN画面变化-交接-shadow接入-20261120.md`。
+     * `liquid` **还没实现**：设了也按 `hsv` 跑，并在清单里写明 `applied: 'hsv'`。
+     */
+    sceneDetector = 'hsv',
+    /** 模型路径（`shadow` 必填）。空 = 记一条 `ok:false` 然后继续导出。 */
+    liquidModel = null,
+    /** shadow 的降采样步长。>1 只能看分歧率（`s_adj` 会抬高、`theta` 不成立）。 */
+    shadowStride = 1,
+    /** shadow 日志路径。空 = `cacheDir()/shadow-cuts.jsonl`。 */
+    shadowLog = null,
     // 取帧并发数：每路 ffmpeg 只解一帧，互不依赖。实测 154 帧（16 核 i9-12900HX）：
     // 4 路 9.65s / 8 路 6.58s / 12 路 5.68s / 16 路 5.56s / 24 路 6.44s（过了 16 就抢不到核）。
     // 取 0.75×核数：16 核 → 12，比 8 快 14%，又不像 24 那样把机械盘和内存带宽打满。
@@ -331,6 +346,43 @@ export async function runStoryboard(opts) {
   const refinedBursts = cutChain.refinedBursts;
   const trace = cutChain.trace;
   if (hwaccelUsed) trace.unshift(`hwaccel:${hwaccelUsed}`);
+
+  /* ================================================================ 阴影对照
+   * `sceneDetector: 'shadow'` —— CfC 的 `cut` 头和 hsv 判据并排跑，**只写一行 JSONL**。
+   *
+   * 三条不许动的前提：
+   *  1. `cuts` 一个都不改（输出边界仍然来自 hsv，这是回滚保证）；
+   *  2. 任何异常都被 `shadowPass` 吞掉（它自己写 `ok:false`，永不 throw）；
+   *  3. 预演/纯文本模式不跑 —— 那是"先看刀数"的轻量入口，不该多一次全量解码。
+   *
+   * 位置在 `resolveCuts` 之后：要比的是**最终下发给排布的那批切点**，不是粗扫结果 ——
+   * 细扫/极静补刀会明显改变刀数与位置，拿粗扫比会低估分歧。
+   */
+  const wantedScene = String(sceneDetector ?? 'hsv').trim().toLowerCase();
+  const sceneApplied = wantedScene === 'shadow' ? 'shadow' : 'hsv';
+  let shadowInfo = null;
+  if (sceneApplied === 'shadow') {
+    if (planOnly || textOnly) {
+      // 不跑也不写日志：这两条路径没有"处理完一段素材"这回事
+      shadowInfo = { ok: false, skipped: planOnly ? 'plan-only' : 'text-only' };
+    } else {
+      const logPath = shadowLog || shadowLogPath();
+      shadowInfo = await shadowPass({
+        input, fps: info.fps, start: winStart, end: winStart + winDur,
+        duration: info.duration, frames: scan.frames ?? null,
+        cuts, thetaHsv: scan.threshold ?? null,
+        modelPath: liquidModel, stride: shadowStride,
+        logPath, ffmpegPath,
+      });
+      shadowInfo = { ...shadowInfo, log: logPath };
+      mark('shadow');
+    }
+  }
+  const sceneNote = sceneApplied === 'hsv' && wantedScene && wantedScene !== 'hsv'
+    ? (wantedScene === 'liquid'
+      ? 'liquid 还没实现（等 shadow 日志攒够）；这次按 hsv 跑'
+      : `sceneDetector 不认识：${wantedScene}；这次按 hsv 跑`)
+    : null;
 
   // ---- 台词：显式文件 > 字幕轨 > ASR；三者都没有就静默跳过（绝不让分镜失败）
   const transcriptResult = await transcriptP;
@@ -1026,6 +1078,15 @@ export async function runStoryboard(opts) {
       threshold: scan.threshold,
       ...(scan.degraded ? { degraded: scan.degraded } : {}),
       cached: Boolean(scan.cached),
+      // 场景检测器/阴影对照的说明也要跟着走 —— 否则纯文本模式下"为什么没跑 shadow"没有答案
+      ...(sceneApplied !== 'hsv' || sceneNote ? {
+        sceneDetector: {
+          requested: wantedScene || 'hsv',
+          applied: sceneApplied,
+          ...(sceneNote ? { note: sceneNote } : {}),
+        },
+      } : {}),
+      ...(shadowInfo ? { shadow: shadowInfo } : {}),
       audio: null,
       transcript: transcriptInfo
         ? { source: transcriptInfo.source, model: transcriptInfo.model ?? null,
@@ -1231,6 +1292,16 @@ export async function runStoryboard(opts) {
     ...(ocrReport ? { ocr: ocrReport } : {}),
     info,
     provenance,
+    // 场景检测器：只在**不是默认值**时才出现在清单里（默认配置的清单一个字都不变）
+    ...(sceneApplied !== 'hsv' || sceneNote ? {
+      sceneDetector: {
+        requested: wantedScene || 'hsv',
+        applied: sceneApplied,
+        ...(sceneNote ? { note: sceneNote } : {}),
+      },
+    } : {}),
+    // 阴影对照的那一行（`ok:false` 也照写：失败本身就是要看的东西）
+    ...(shadowInfo ? { shadow: shadowInfo } : {}),
     window: { from: winStart, to: winStart + winDur, duration: winDur },
     cuts,
     summary: scan.summary,
