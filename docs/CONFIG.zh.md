@@ -124,6 +124,17 @@ D:/asr/                          # 语音服务目录（任意位置，建议独
  "onlyHsvTotal":1,"onlyLiquidTotal":3,"msFeature":2811,"msForward":117,"ok":true}
 ```
 
+攒够几条之后别肉眼对时间戳，用汇总工具：
+
+```bash
+node bin/shadow-report.mjs                        # 默认读 cacheDir()/shadow-cuts.jsonl
+node bin/shadow-report.mjs --log d:/logs/x.jsonl --montage d:/logs/montage
+```
+
+它会把 `ok:false`、两边都是 0 刀（录屏素材，看着"完全一致"其实没信息）、截断、降采样的行
+标出来**且不计入**加权分歧率；`--montage` 抽 `onlyHsv` 点的前后帧对照图，
+用来判断"分歧大是不是 hsv 的假切点"。
+
 ## 4. 热词：按片子传，别写全局
 
 ```js

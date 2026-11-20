@@ -25,6 +25,9 @@ import { runStoryboard } from '../src/storyboard/pipeline.js';
 import {
   compareCuts, loadLiquidModel, predictCuts, readSceneConfig, shadowPass, shadowLogPath, TOL_FRAMES,
 } from '../src/storyboard/shadow.js';
+import {
+  bucketOf, parseShadowLog, summarizeShadow, verdictOf,
+} from '../src/storyboard/shadow-report.js';
 
 const run = promisify(execFile);
 
@@ -336,4 +339,86 @@ test('e2e: 窗口起点不为 0 时，时间基准必须对齐（hsv 是绝对�
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------- 日志汇总
+
+/** 造一条日志记录（v1 口径）。 */
+const rec = (over = {}) => ({
+  v: 1,
+  ts: '2026-11-20T11:00:00.000Z',
+  video: 'a.mp4',
+  fps: 25,
+  cutsHsv: 10,
+  cutsLiquid: 10,
+  agreed: 9,
+  divergenceRate: 0.1,
+  ok: true,
+  ...over,
+});
+
+test('parseShadowLog: 坏行跳过，好行照收', () => {
+  const text = [
+    JSON.stringify(rec()),
+    '{"broken":',                    // 写到一半被掐断的行
+    '',
+    JSON.stringify(rec({ video: 'b.mp4' })),
+  ].join('\n');
+  const rows = parseShadowLog(text);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.video), ['a.mp4', 'b.mp4']);
+});
+
+test('summarizeShadow: 0/0 与失败行都不算有效读数', () => {
+  const s = summarizeShadow([
+    rec(),
+    rec({ cutsHsv: 0, cutsLiquid: 0, agreed: 0, divergenceRate: 0 }),  // 录屏：看着"完全一致"，其实没信息
+    rec({ ok: false, error: '模型文件不存在' }),
+    rec({ v: undefined }),                                            // 旧口径
+  ]);
+  assert.equal(s.totals.records, 4);
+  assert.equal(s.totals.usable, 1, '只有第一条能拿来判断');
+  assert.equal(s.totals.failed, 1);
+  assert.match(s.rows[1].flags.join(), /0 刀/);
+  assert.match(s.rows[3].flags.join(), /旧口径/);
+});
+
+test('summarizeShadow: 加权分歧率按刀数加权，不是若干百分比取平均', () => {
+  // 两段：100 刀那段落 10%，1 刀那段落 100% —— 平均会是 55%，加权是 ~11.9%
+  const s = summarizeShadow([
+    rec({ cutsHsv: 50, cutsLiquid: 50, agreed: 45, divergenceRate: 0.1 }),
+    rec({ cutsHsv: 1, cutsLiquid: 1, agreed: 0, divergenceRate: 1 }),
+  ]);
+  assert.equal(s.totals.sumHsv, 51);
+  assert.equal(s.totals.sumAgreed, 45);
+  assert.equal(s.totals.rate, +(1 - 90 / 102).toFixed(3));
+  assert.equal(s.totals.rate, 0.118);
+});
+
+test('verdictOf: 三档 + 读数不够四档都说清楚', () => {
+  assert.equal(verdictOf({ usable: 0 }).level, 'insufficient');
+  const few = verdictOf({ usable: 5, rate: 0.05 });
+  assert.equal(few.level, 'insufficient');
+  assert.match(few.text, /5 条/);
+
+  // 每段 20/20 刀、只对一半 → 加权分歧率正好 0.5，稳稳落在 >15%
+  const many = (agreed) => Array.from({ length: 20 }, () => rec({
+    cutsHsv: 20, cutsLiquid: 20, agreed, divergenceRate: 1 - (2 * agreed) / 40, v: 1,
+  }));
+  const good = summarizeShadow(many(19));       // 1 - 38/40 = 0.05
+  assert.equal(good.totals.usable, 20);
+  assert.equal(good.totals.rate, 0.05);
+  assert.equal(good.verdict.level, 'promising', `rate=${good.totals.rate}`);
+
+  const bad = summarizeShadow(many(10));        // 1 - 20/40 = 0.5
+  assert.equal(bad.totals.rate, 0.5);
+  assert.equal(bad.verdict.level, 'risky');
+});
+
+test('bucketOf / BUCKETS: 边界落在右侧桶（3% 算 3~8%）', () => {
+  assert.equal(bucketOf(0.029), '<3%');
+  assert.equal(bucketOf(0.03), '3~8%');
+  assert.equal(bucketOf(0.08), '8~15%');
+  assert.equal(bucketOf(0.15), '>15%');
+  assert.equal(bucketOf(null), null);
 });

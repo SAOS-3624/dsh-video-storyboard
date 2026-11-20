@@ -388,8 +388,18 @@ export async function shadowPass(o) {
   } = o;
 
   const base = {
+    /**
+     * 日志口径版本。**字段含义一变就得加 1**（和 `FEATURE_VERSION` 一个道理）：
+     *   v1：`onlyHsv` / `onlyLiquid` 是**窗口相对**秒；多了 `path`（抽帧要用）。
+     * 加它是因为踩过一次：早先时间没减 `window.from`，同一批日志里两种基准混着，
+     * 而报告完全看不出来 —— 旧行只能在 `shadow-report` 里被标成"旧口径"。
+     */
+    v: 1,
     ts: new Date().toISOString(),
     video: input ? basename(String(input)) : null,
+    // 全路径也留着：`shadow-report --montage` 要拿它抽"分歧点前后帧"，
+    // 只有 basename 的话那一步就得人肉找片
+    path: input ? String(input) : null,
     fps: Number(fps) || null,
     duration: Number.isFinite(Number(duration)) ? +Number(duration).toFixed(3) : null,
     window: { from: +Number(start).toFixed(3), to: Number.isFinite(Number(end)) ? +Number(end).toFixed(3) : null },
