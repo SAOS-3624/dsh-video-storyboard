@@ -12,6 +12,8 @@ manifest*.json
 
 # 本地临时/调试产物
 .tmp/
+.tmp-textgap/
+.tmp-probe-text/
 _probe/
 
 # 凭证与本地配置：永远不要进仓库

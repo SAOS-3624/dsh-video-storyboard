@@ -186,6 +186,34 @@ def read(paths):
     print(json.dumps({"ok": True, "engine": engine_name, "items": out}, ensure_ascii=False))
 
 
+def frames(paths):
+    """**整帧完整 OCR（det+cls+rec）**，逐图返回该帧里所有文字拼起来的串。
+
+    和 `read` 的区别：`read` 走 `use_det=False`，是把整张图当成一行来识别，
+    只能用于**已经裁好的字幕带** —— 拿它读全帧永远返回空串（踩过：
+    30 张游戏/讲座截图全空，一开始还以为是片子没字）。
+
+    和 `detect` 的区别：`detect` 只返回"像字幕"的那几条 box，而且是**跨图混在一起**的，
+    没法归到某一帧。这里每张图一条，用于离线统计"哪一秒有可读内容"。
+    """
+    RapidOCR, engine_name = _load()
+    ocr = _make(RapidOCR, engine_name)
+    out = []
+    for p in paths:
+        try:
+            rows = _rows(_run(ocr, engine_name, p))
+            texts = [t for _, t, _ in rows if t]
+            confs = [c for _, t, c in rows if t]
+            out.append({
+                "text": " ".join(texts).strip(),
+                "conf": round(sum(confs) / len(confs), 3) if confs else 0.0,
+                "n": len(texts),
+            })
+        except Exception as e:          # noqa: BLE001
+            out.append({"text": "", "conf": 0.0, "n": 0, "error": str(e)[:120]})
+    print(json.dumps({"ok": True, "engine": engine_name, "items": out}, ensure_ascii=False))
+
+
 def subs(probe_n, paths):
     """一次进程做完 detect + read。
 
@@ -282,6 +310,8 @@ if __name__ == "__main__":
         detect(imgs)
     elif mode == "read":
         read(imgs)
+    elif mode == "frames":
+        frames(imgs)
     elif mode == "subs":
         # subs <probeCount> <img...>
         if not imgs or not imgs[0].isdigit():
