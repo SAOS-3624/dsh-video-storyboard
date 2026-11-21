@@ -16,6 +16,7 @@ import { join } from 'node:path';
 
 import { DEFAULT_FFMPEG, DEFAULT_FFPROBE, mediaCandidates } from '../src/storyboard/binaries.js';
 import { canTranscribe, describeAsrTarget, resolveAsrConfig } from '../src/storyboard/asr.js';
+import { ensureAsr, lifecycleConfig } from '../src/storyboard/asr-lifecycle.js';
 import { mediaDir } from '../src/storyboard/media-store.js';
 import { discoverYtdlp } from '../src/storyboard/ytdlp.js';
 import { execFile } from 'node:child_process';
@@ -91,7 +92,20 @@ if (canTranscribe(cfg)) {
   const reachable = await fetch(probeUrl, { signal: AbortSignal.timeout(3000) })
     .then((r) => r.ok || r.status < 500).catch(() => false);
   if (reachable) ok('ASR 端点可达，会自动转写');
-  else {
+  else if (lifecycleConfig(cfg)) {
+    // 配了 manage.start 的机器，端点**平时就是关的**（idleMs 到了会自己停）。
+    // 只探测不拉起，等于每次体检都报一次假故障，用户会以为 ASR 坏了。
+    console.log('     端点没在跑；asr.json 配了 manage.start，拉起一次验证…');
+    try {
+      await ensureAsr({ baseUrl: cfg.baseUrl, config: cfg, log: (m) => console.log(`     ${m}`) });
+    } catch (e) {
+      warn(`manage.start 拉起失败：${e.message}`);
+    }
+    const again = await fetch(probeUrl, { signal: AbortSignal.timeout(5000) })
+      .then((r) => r.ok || r.status < 500).catch(() => false);
+    if (again) ok('本机 ASR 已按 manage.start 拉起，转写可用（闲下来会自己关）');
+    else warn(`拉起后仍连不上 ${probeUrl} —— 手动跑一次 asr.json 里的 start 命令看报错`);
+  } else {
     warn(`连不上 ${probeUrl}（3 秒超时）`);
     console.log('     → 本机服务没起来？先启动它（例如 D:\\asr-local\\start-asr.cmd）');
     console.log('       远端服务：检查 ~/.dsh/asr.json 里的 baseUrl');
