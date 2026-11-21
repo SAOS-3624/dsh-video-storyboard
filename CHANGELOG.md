@@ -63,6 +63,21 @@ node bin/shadow-report.mjs [--log <path>] [--json] [--montage <dir>]
 三条自家发布视频 0%（0/0，两边都没出点，录屏没有硬切）、一支 motion-graphics 解析片 96.3%
 （hsv 213 刀里混着大量"同一镜头里元素进场"，模型对这类素材基本不出点）。
 
+### Fixed — `--text` 每次都报"未识别的参数"，doctor 把 `manage.start` 的 ASR 报成连不上（#96）
+
+两个都是"命令说错了话"，不影响出图，但会把人（和 agent）带去修错的东西：
+
+- `bin/storyboard.mjs` 的默认值表补 `text: false`。解析器对表外的键**照收值**、但会进 `$unknown`
+  并打一条"未识别的参数（已忽略）"—— 值是对的、话是错的，README / SKILL.md 里每条 `--text`
+  命令都自带一条假警告。只消除警告，语义不变（`--text` 出图+清单，`--text-only` 不出图）。
+- `bin/doctor.mjs`：`manage.start` 的语义是"用到才起、闲下来就关"，体检时端点正关着是常态。
+  原来只探测一次就报 ⚠️，等于每次让用户手动启动一个本该由工具拉起的进程。现在探测失败且配了
+  `manage.start` 时先 `ensureAsr()` 拉一次再探：起来报 ✅（说明会自动关），起不来才 ⚠️。
+
+两个已知边界（下个版本再收）：`ensureAsr` 的等待上限取用户 `waitMs`（默认 120s），start 命令
+写错时 doctor 会静默卡两分钟，体检场景应封 30s；`baseUrl` 走环境变量、`manage` 只从文件读，
+两条来源不一致时会拉起文件里那个、去探环境变量那个。
+
 ## [0.7.6] - 2026-11-16
 
 ### Fixed — `video_locate` 永远报 no transcript：`pipeline.js` 只 import 从不调用（#94）
