@@ -27,7 +27,7 @@ const opt = parse(process.argv.slice(2), {
   frames: 0, 'max-frames': 0, 'max-sheets': 0, 'tier-map': null, from: 0, to: 0, threshold: 'auto',
   'scan-gap': 0, integral: null, 'integral-seconds': 0,
   strategy: null, pick: 'mid', burn: 'index', transcript: 'auto',
-  out: 'storyboard.png', manifest: null, plan: 0, 'text-only': false, 'cell-range': null,
+  out: 'storyboard.png', manifest: null, plan: 0, 'text-only': false, text: false, 'cell-range': null,
   // 只预演：回报切点数与每档要几张图，不出图（与工具的 dryRun 同一条路径）
   'dry-run': false,
   batch: 0, detail: 'med',
