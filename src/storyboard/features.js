@@ -69,10 +69,14 @@ export const DIM = FEATURES.length;
  * v2：`s_mc` 从恒 0 变为真实的运动补偿分（v1 的样本里它是一列常数，等于没有这一维）。
  * v3：**`s_adj` / `s_long` 开始真正写入**（v1/v2 的样本里这两列恒为 0，见 `push()` 里的说明）。
  *     v1/v2 的 `.feat` 缓存必须重抽，v2 的权重不能再加载。
+ * v4：**修 `s_long` 的环形缓冲预热 bug**（见 `push()` 里"读在写前"那段注释）。
+ *     v3 的样本里，每段开头 `lag .. 2lag-2` 帧（25fps 下是第 10~18 帧）的 `s_long`
+ *     是拿**全 0 缓冲**比出来的，量级约 50 而正常 `s_adj` 只有 5~20 —— 等于每段开头
+ *     塞给模型一串"假巨变"。**语义变了，所以 v3 的缓存和权重全部作废**。
  *
- * v4 试过又撤了（24 维绝对块亮度），实测对切点零收益，理由见 `FEATURES` 上方注释。
+ * v4 之前试过又撤了的：24 维绝对块亮度（实测对切点零收益，理由见 `FEATURES` 上方注释）。
  */
-export const FEATURE_VERSION = 3;
+export const FEATURE_VERSION = 4;
 
 /** 色相直方图 bin 数。12 个（每 30°）够区分"换色系"，再多就被编码噪声填满。 */
 export const HUE_BINS = 12;
@@ -99,6 +103,43 @@ export function createFeatures({
   const hueBins = HUE_BINS;
   const svBins = SV_BINS * 2;
 
+  /**
+   * ---- 构造期算一次的表 ------------------------------------------------
+   *
+   * 原来这三个映射都是**每个像素**现算的（`Math.floor((x * BLK_W) / w)` 等），
+   * 2304 像素 × 每帧 = 每帧四千多次除法和取整。尺寸在一份素材里是常数，
+   * 没有理由每帧重算。三个表的取值与原式逐位一致（同一公式、同一 Math.floor）。
+   */
+  const byOf = new Int32Array(h);
+  for (let y = 0; y < h; y += 1) byOf[y] = Math.min(BLK_H - 1, Math.floor((y * BLK_H) / h));
+  const bxOf = new Int32Array(w);
+  for (let x = 0; x < w; x += 1) bxOf[x] = Math.min(BLK_W - 1, Math.floor((x * BLK_W) / w));
+  /** 每块的像素数。原实现是在热循环里 `+= 1` 数出来的，其实只取决于尺寸。 */
+  const blkCnt = new Float64Array(blkCells);
+  for (let y = 0; y < h; y += 1) {
+    const base = byOf[y] * BLK_W;
+    for (let x = 0; x < w; x += 1) blkCnt[base + bxOf[x]] += 1;
+  }
+  /**
+   * 每个块列的右边界（行内 3 倍像素坐标）。
+   *
+   * 用它可以把一行拆成"按块连续读"：游标 `i` 一直往前推进，不再需要每像素算
+   * `bi = by * BLK_W + bx`，也不需要算 `(y*w+x)*3`。
+   */
+  const xStop3 = new Int32Array(BLK_W);
+  let xCursor = 0;
+  for (let bx = 0; bx < BLK_W; bx += 1) {
+    for (let x = 0; x < w; x += 1) if (bxOf[x] === bx) xCursor = x + 1;
+    // 空块（BLK_W > w 时可能出现）沿用上一块的右边界，保证游标单调
+    xStop3[bx] = xCursor * 3;
+  }
+  /** `bins / 255` 折叠成一次乘法；`| 0` 代替 `Math.floor`（hh/ss/vv 都非负）。 */
+  const KH = hueBins / 255;
+  const KS = SV_BINS / 255;
+  const hLast = hueBins - 1;
+  const svLast = SV_BINS - 1;
+  const edge = Math.max(1, Math.round(h * 0.08));
+
   const prev = new Float32Array(n * 3);
   let hasPrev = false;
 
@@ -114,57 +155,67 @@ export function createFeatures({
 
   const prevBlk = new Float32Array(blkCells);
   const curBlk = new Float32Array(blkCells);
+  /** 块差。原来每帧 `new Float32Array(blkCells)` —— 每秒 25 次小对象分配。 */
+  const diffs = new Float64Array(blkCells);
 
   const out = new Float32Array(DIM);
   let lastT = null;
   let lastDischarge = null;
 
-  /** HSV → 直方图 + 块亮度。一次遍历，两个产物。 */
+  /**
+   * HSV → 直方图 + 块亮度。一次遍历，两个产物。
+   *
+   * 结构：`行 → 块列 → 该块在本行覆盖的像素`。三个好处：
+   *   1. 块下标 `bi` 是循环变量，不用每像素算；
+   *   2. 像素下标就是一个只加 3 的游标 `i`；
+   *   3. 每行一次 `rowSum`，黑边判定不必再维护 `rowV[h]` 数组。
+   * 遍历顺序与"逐像素行主序"完全一致，所以累加顺序不变、结果逐位相同。
+   */
   function analyze(buf) {
     curHue.fill(0);
     curSv.fill(0);
     curBlk.fill(0);
-    const blkCnt = new Float64Array(blkCells);
-    const rowV = new Float64Array(h);
     let vSum = 0;
-
-    for (let y = 0; y < h; y += 1) {
-      const by = Math.min(BLK_H - 1, Math.floor((y * BLK_H) / h));
-      let rowSum = 0;
-      for (let x = 0; x < w; x += 1) {
-        const i = (y * w + x) * 3;
-        const hh = buf[i];
-        const ss = buf[i + 1];
-        const vv = buf[i + 2];
-        vSum += vv;
-        rowSum += vv;
-
-        const hb = Math.min(hueBins - 1, Math.floor((hh / 255) * hueBins));
-        curHue[hb] += 1;
-        const sb = Math.min(SV_BINS - 1, Math.floor((ss / 255) * SV_BINS));
-        const vb = Math.min(SV_BINS - 1, Math.floor((vv / 255) * SV_BINS));
-        curSv[sb] += 1;
-        curSv[SV_BINS + vb] += 1;
-
-        const bx = Math.min(BLK_W - 1, Math.floor((x * BLK_W) / w));
-        const bi = by * BLK_W + bx;
-        curBlk[bi] += vv;
-        blkCnt[bi] += 1;
-      }
-      rowV[y] = rowSum / w;
-    }
-
-    for (let i = 0; i < blkCells; i += 1) curBlk[i] /= (blkCnt[i] || 1);
-    for (let i = 0; i < hueBins; i += 1) curHue[i] /= n;
-    for (let i = 0; i < svBins; i += 1) curSv[i] /= n;
-
-    // 黑边：只数最上/最下 3 行。中间的黑不算（舞台剧、夜景会误判）。
-    const edge = Math.max(1, Math.round(h * 0.08));
     let darkRows = 0;
-    for (let y = 0; y < edge; y += 1) {
-      if (rowV[y] < BAR_MEAN) darkRows += 1;
-      if (rowV[h - 1 - y] < BAR_MEAN) darkRows += 1;
+    let i = 0;
+    for (let y = 0; y < h; y += 1) {
+      const rowBase = y * w * 3;
+      const byBase = byOf[y] * BLK_W;
+      let rowSum = 0;
+      for (let bx = 0; bx < BLK_W; bx += 1) {
+        const stop = rowBase + xStop3[bx];
+        let acc = 0;
+        while (i < stop) {
+          const hh = buf[i];
+          const ss = buf[i + 1];
+          const vv = buf[i + 2];
+          i += 3;
+          acc += vv;
+
+          let hb = (hh * KH) | 0;
+          if (hb > hLast) hb = hLast;
+          curHue[hb] += 1;
+          let sb = (ss * KS) | 0;
+          if (sb > svLast) sb = svLast;
+          curSv[sb] += 1;
+          let vb = (vv * KS) | 0;
+          if (vb > svLast) vb = svLast;
+          curSv[SV_BINS + vb] += 1;
+        }
+        curBlk[byBase + bx] += acc;
+        rowSum += acc;
+      }
+      vSum += rowSum;
+      // 黑边：只数最上/最下 edge 行。中间的黑不算（舞台剧、夜景会误判）。
+      if (y < edge || y >= h - edge) {
+        if (rowSum / w < BAR_MEAN) darkRows += 1;
+      }
     }
+
+    for (let k = 0; k < blkCells; k += 1) curBlk[k] /= (blkCnt[k] || 1);
+    for (let k = 0; k < hueBins; k += 1) curHue[k] /= n;
+    for (let k = 0; k < svBins; k += 1) curSv[k] /= n;
+
     return { vMean: vSum / n, bar: darkRows / (edge * 2) };
   }
 
@@ -202,35 +253,61 @@ export function createFeatures({
         // 相邻帧：交给调用方传进来的 scorePair（与 scan.js 同一度量）
         sAdj = scorePair ? scorePair(prev, hsv) : fallbackPair(prev, hsv);
 
-        if (ringWarm >= lag) {
-          const old = ring[ringIdx];
-          sLong = scorePair ? scorePair(old, hsv) : fallbackPair(old, hsv);
-        }
+      /**
+       * 环形缓冲：**无条件写**，读在写前。
+       *
+       * ## 这里修过一个真 bug（v4，2026-11-22）
+       *
+       * 原写法是
+       *   `if (warm) ring[idx].set(); else warm += 1; if (warm >= lag) ring[idx].set();`
+       * 预热那几帧**一帧都不写**，可 `ringWarm` 一满就立刻开始读 —— 于是第
+       * `lag .. 2lag-2` 帧的 `s_long` 是拿**全 0 缓冲**跟当前帧比出来的，
+       * 量级约 `(mean_S + mean_V)/3 ≈ 50`，而正常 `s_adj` 只有 5~20。
+       * 也就是每段开头 0.4 秒会塞给模型一串"假巨变"。
+       *
+       * `scan.js` 的同名逻辑一直是无条件写的，所以**它没有这个问题**（那边的 `longStats` 是对的）。
+       *
+       * ## 为什么"读在写前"正好是 lag 帧之前那一帧
+       *
+       * 处理第 f 帧时 `ringIdx === f % lag`，而 `ring[f % lag]` 上一次被写是第 `f-lag` 帧
+       * （`(f-lag) % lag === f % lag`）。所以先读后写拿到的就是 `hsv_{f-lag}`。
+       */
+      if (ringWarm >= lag) {
+        const old = ring[ringIdx];
+        sLong = scorePair ? scorePair(old, hsv) : fallbackPair(old, hsv);
+      }
 
-        // 块级：先算每块的 V 差，再出四个统计量
-        const diffs = new Float32Array(blkCells);
+        // 块级：先算每块的 V 差，再出四个统计量。
+        // 两遍扫描（先求均值、再求方差）是原实现就有的，这里只把
+        // 每帧的 `new Float32Array` 换成复用缓冲，并把 `** 2` 写成 `z * z`。
         let sum = 0;
         for (let i = 0; i < blkCells; i += 1) {
           const d = Math.abs(curBlk[i] - prevBlk[i]);
           diffs[i] = d;
           sum += d;
+          if (d > blkMax) blkMax = d;
         }
         blkMean = sum / blkCells;
         let varSum = 0;
         let changed = 0;
         for (let i = 0; i < blkCells; i += 1) {
-          varSum += (diffs[i] - blkMean) ** 2;
-          if (diffs[i] > 12) changed += 1;           // 12 = 单块"明显变了"的地板
-          if (diffs[i] > blkMax) blkMax = diffs[i];
+          const d = diffs[i];
+          const z = d - blkMean;
+          varSum += z * z;
+          if (d > 12) changed += 1;                  // 12 = 单块"明显变了"的地板
         }
         blkStd = Math.sqrt(varSum / blkCells);
         blkFrac = changed / blkCells;
 
-        // 指纹距离：块亮度的平均绝对差（与 s_adj 的区别是它先空间平均再相减，
-        // 对高频噪声不敏感 —— 正好用来区分"结构变了"和"噪点跳了"）
-        let fpSum = 0;
-        for (let i = 0; i < blkCells; i += 1) fpSum += Math.abs(curBlk[i] - prevBlk[i]);
-        fpDist = fpSum / blkCells;
+        /**
+         * 指纹距离 `fp_dist` 与 `blk_mean` **是同一个数**：两者都是
+         * `Σ|curBlk[i] - prevBlk[i]| / 24`，只是原来算了两遍。
+         *
+         * （所以 14 维里实际只有 13 个互不相同；这不影响已训好的权重 ——
+         * 一列重复对网络就是"同一条信息出现在两个位置"，删掉才会破坏契约。）
+         * 这里直接复用，省掉第三遍 24 次取绝对值。
+         */
+        fpDist = blkMean;
 
         histH = histDist(curHue, prevHue);
         histSv = histDist(curSv, prevSv);
@@ -295,10 +372,14 @@ export function createFeatures({
       prevHue.set(curHue);
       prevSv.set(curSv);
       hasPrev = true;
-      if (ringWarm < lag) ringWarm += 1;
-      else ring[ringIdx].set(hsv);
-      if (ringWarm >= lag) ring[ringIdx].set(hsv);
+      /**
+       * 环形缓冲**无条件写**，且只写一次。
+       * 原写法在预热期跳过写入（那是上面那个 bug 的根源），预热结束后又因为两个 `if`
+       * 同时成立而每帧白拷两遍 27 KB。现在一个 set。
+       */
+      ring[ringIdx].set(hsv);
       ringIdx = (ringIdx + 1) % lag;
+      if (ringWarm < lag) ringWarm += 1;
       lastT = t;
 
       return out;

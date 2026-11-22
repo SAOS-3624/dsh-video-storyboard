@@ -77,55 +77,136 @@ export function rgbToHsv(r, g, b) {
 }
 
 /**
+ * `i / 255` 的查找表。**必须逐位等于 `i / 255`**，不是"约等于"。
+ *
+ * 热路径上它替掉了 3 次除法：`rn/gn/bn` 各一次。除法在这台机器上 ~20 周期，
+ * 2304 像素就是 7k 次，实测占了 `frameToHsv` 的一半以上。表里存的是**和除法
+ * 完全相同的那一个浮点数**，所以换成查表不会让特征漂一个 ulp。
+ *
+ * 只能对**整数**下标用。HSV 的 S/V 出来是 `(d/max)*255`，一般不是整数，
+ * 那里只能退成乘 `1/255`（见 `scorePair`）。
+ */
+const INV255 = new Float64Array(256);
+/** `1 / (i / 255)`，同样逐位对齐 `1 / max`（下标 0 用不到：max=0 走单独分支）。 */
+const INV255_RECIP = new Float64Array(256);
+for (let i = 0; i < 256; i += 1) {
+  INV255[i] = i / 255;
+  INV255_RECIP[i] = i === 0 ? 0 : 1 / INV255[i];
+}
+/** `255/360`：`(h/360)*255` 里的常量折叠。 */
+const HUE_TO_255 = 255 / 360;
+
+/**
  * 把整帧 RGB 缓冲转成 HSV 缓冲。out 可复用，避免每帧分配。
+ *
+ * 这是整条链路最热的函数（线上扫描每帧都要跑）。优化点与"为什么还是同一个数"：
+ *
+ *   1. **max/min 在整数上比**。`/255` 单调，所以 argmax/argmin 与浮点比较完全一致，
+ *      连并列时的取舍都一样（`r>g? (r>b?r:b) : (g>b?g:b)` 与原来那串三元式同构）。
+ *   2. **`/255` 换成查表**（`INV255`，逐位相同）。
+ *   3. **`(gn-bn)/d` 三次除法合成一次倒数**。`d` 只有 255 种取值，但
+ *      `1/(maxI/255 - minI/255)` 与 `1/d` 并非同一个浮点数，所以这里**老实算一次除法**
+ *      —— 一次/像素，而不是三次。
+ *   4. **`% 6` 删掉**。`(gn-bn)/d ∈ [-1,1]`，`% 6` 是恒等运算，去掉不改值。
+ *   5. `d/max` 用 `1/(i/255)` 的表（`INV255_RECIP`）。
+ *
  * @param {Uint8Array|Buffer} rgb 长度 = pixels*3
  * @param {Float32Array} [out]    长度 = pixels*3
  */
 export function frameToHsv(rgb, out = new Float32Array((rgb.length / 3) * 3)) {
   for (let i = 0, j = 0; i < rgb.length; i += 3, j += 3) {
-    const rn = rgb[i] / 255;
-    const gn = rgb[i + 1] / 255;
-    const bn = rgb[i + 2] / 255;
-    const max = rn > gn ? (rn > bn ? rn : bn) : gn > bn ? gn : bn;
-    const min = rn < gn ? (rn < bn ? rn : bn) : gn < bn ? gn : bn;
-    const d = max - min;
+    const ri = rgb[i];
+    const gi = rgb[i + 1];
+    const bi = rgb[i + 2];
+    const maxI = ri > gi ? (ri > bi ? ri : bi) : gi > bi ? gi : bi;
+    const minI = ri < gi ? (ri < bi ? ri : bi) : gi < bi ? gi : bi;
+    const max = INV255[maxI];
+    const d = max - INV255[minI];
     let h = 0;
     if (d !== 0) {
-      if (max === rn) h = ((gn - bn) / d) % 6;
-      else if (max === gn) h = (bn - rn) / d + 2;
-      else h = (rn - gn) / d + 4;
+      const invD = 1 / d;
+      if (maxI === ri) h = (INV255[gi] - INV255[bi]) * invD;
+      else if (maxI === gi) h = (INV255[bi] - INV255[ri]) * invD + 2;
+      else h = (INV255[ri] - INV255[gi]) * invD + 4;
       h *= 60;
       if (h < 0) h += 360;
     }
-    out[j] = (h / 360) * 255;
-    out[j + 1] = max === 0 ? 0 : (d / max) * 255;
+    out[j] = h * HUE_TO_255;
+    out[j + 1] = maxI === 0 ? 0 : d * INV255_RECIP[maxI] * 255;
     out[j + 2] = max * 255;
   }
   return out;
 }
 
+/** `1/255`。HSV 的 S/V 不是整数，没法查表，只能乘倒数（与除法差 ≤1 ulp）。 */
+const INV_255F = 1 / 255;
+
 /** 两帧 HSV 的加权绝对差均值，0–255。全权重大于 1 时按权重和归一。 */
 export function scorePair(prev, cur) {
-  if (prev.length !== cur.length) throw new RangeError('frames must have the same length');
+  const len = cur.length;
+  if (prev.length !== len) throw new RangeError('frames must have the same length');
   let sum = 0;
-  for (let i = 0; i < cur.length; i += 3) {
+  for (let i = 0; i < len; i += 3) {
     // 色相是**环形**的：0° 和 359° 只差 1°，但直接相减会算成 359。
     // 不做这一步，红色渐变到品红（跨越 0°）会被判成一次巨大的"画面变化"，
     // 于是夜景霓虹、日落、色轮转场这些地方会凭空多出切点。
-    const dh = Math.abs(cur[i] - prev[i]);
-    const hueDiff = Math.min(dh, 255 - dh);
+    const dh = cur[i] - prev[i];
+    const adh = dh < 0 ? -dh : dh;
+    const hueDiff = adh < 255 - adh ? adh : 255 - adh;
     // 低饱和像素的色相没有意义：近灰的色相会被编码噪声甩到色环另一端。
     // 实测 rgb(128,128,127) → rgb(128,127,128)（肉眼完全一样）色相差 85、整帧分数 28，
     // 而常用阈值只有 12–58 —— 于是"画面没变"被记成一次切镜。
     // 用两帧中较低的那个饱和度给色相项降权：灰的地方色相说了不算，亮色地方照常。
-    const hueWeight = Math.min(cur[i + 1], prev[i + 1]) / 255;
+    const cs = cur[i + 1];
+    const ps = prev[i + 1];
+    /**
+     * **这里必须是除法，不能换成乘 `1/255`。**
+     *
+     * 试过（能省 2304 次除法/帧），但实测 1000 帧里会有 1 个 `longStats` 值差 1 ulp
+     * （8.88e-16）—— 这个数直接喂 `quantile` 定阈值，落在边界上就会多/少一刀，
+     * 而且是"看不出来哪里错"的那种。省下来的时间只占扫描的 0.5%，不值得。
+     */
+    const hueWeight = (cs < ps ? cs : ps) / 255;
+    const dv = cur[i + 2] - prev[i + 2];
     sum += hueDiff * hueWeight * HUE_WEIGHT
-      + Math.abs(cur[i + 1] - prev[i + 1]) * SAT_WEIGHT
-      + Math.abs(cur[i + 2] - prev[i + 2]) * VAL_WEIGHT;
+      + (cs < ps ? ps - cs : cs - ps) * SAT_WEIGHT
+      + (dv < 0 ? -dv : dv) * VAL_WEIGHT;
   }
   const totalWeight = HUE_WEIGHT + SAT_WEIGHT + VAL_WEIGHT;
-  return sum / ((cur.length / 3) * totalWeight);
+  return sum / ((len / 3) * totalWeight);
 }
+
+/**
+ * 邻域偏移表，**按"从中心往外"的螺旋顺序**排，按半径缓存。
+ *
+ * 判据只问"有没有 ≤ tau 的匹配"，所以顺序不影响结果，但**影响提前收工的时机**：
+ * 原来从左上角 (-r,-r) 开始扫，静帧/慢摇也要先白算 24 个才轮到中心；
+ * 现在第一步就是自己，静帧 1 次比较就出结果。
+ *
+ * 存成两个平行 Int32Array（而不是 `[dx,dy]` 的数组的数组）：热循环里每省一次二级索引，
+ * 2304×25 次就是 5.7 万次。按半径缓存是因为 `radius` 在一份素材里是常数，
+ * 而按调用重建表格会让 `radius≠2` 的路径白白每次分配。
+ */
+const MC_OFFSET_CACHE = new Map();
+function mcOffsets(radius) {
+  const hit = MC_OFFSET_CACHE.get(radius);
+  if (hit) return hit;
+  const dx = [];
+  const dy = [];
+  for (let r = 0; r <= radius; r += 1) {
+    for (let oy = -r; oy <= r; oy += 1) {
+      for (let ox = -r; ox <= r; ox += 1) {
+        if (Math.max(ox < 0 ? -ox : ox, oy < 0 ? -oy : oy) !== r) continue;
+        dx.push(ox); dy.push(oy);
+      }
+    }
+  }
+  const t = { dx: Int32Array.from(dx), dy: Int32Array.from(dy), k: dx.length };
+  MC_OFFSET_CACHE.set(radius, t);
+  return t;
+}
+/** r=2（线上唯一用的那一档）预生成一次，避免首次调用落在计时里。 */
+mcOffsets(2);
 
 /**
  * **运动补偿差异**：返回"变了多少像素"的占比（0–1）。
@@ -135,27 +216,63 @@ export function scorePair(prev, cur) {
  *
  * **提前收工**：判据只关心"有没有 ≤ tau 的匹配"，找到就能跳出该格子的搜索。
  * 实测 64×36、r=2 下 1.0 ms → 0.155 ms，而算出的占比与全量求最小**完全一致**。
+ *
+ * 优化都**不改变结果**（判据是"存在 ≤ tau"，与求值顺序无关）：
+ *   - 邻域**中心优先**（`MC_R2`），静帧第一次比较就命中；
+ *   - 中心的 prev 三通道 hoist 出循环；
+ *   - **内部像素单独一条无边界检查的路径**（60×32 里占 83%），边界像素才走带钳位的环路；
+ *   - `x*3`、`y*width*3` 预计算，邻域寻址退化成一次加法 `pc + off3[k]`；
+ *   - `* 1/3` 代替 `/3`。
  */
 export function mcRatioScore(prev, cur, width, height, { tau = 15, radius = 2 } = {}) {
   const n = width * height;
+  const third = 1 / 3;
+  const { dx: ODX, dy: ODY, k: K } = mcOffsets(radius);
+
+  // 行起点（3 倍像素坐标）与每个邻域偏移的 3 倍像素差
+  const row3 = new Int32Array(height);
+  for (let y = 0; y < height; y += 1) row3[y] = y * width * 3;
+  const off3 = new Int32Array(K);
+  for (let k = 0; k < K; k += 1) off3[k] = ODY[k] * width * 3 + ODX[k] * 3;
+
+  const R = radius;
   let changed = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const p3 = (y * width + x) * 3;
+  for (let y = 0; y < height; y += 1) {
+    const pRow = row3[y];
+    const interiorY = y >= R && y < height - R;
+    for (let x = 0; x < width; x += 1) {
+      const pc = pRow + x * 3;
+      const pv0 = prev[pc];
+      const pv1 = prev[pc + 1];
+      const pv2 = prev[pc + 2];
       let matched = false;
-      for (let dy = -radius; dy <= radius && !matched; dy++) {
-        const yy = y + dy;
-        if (yy < 0 || yy >= height) continue;
-        for (let dx = -radius; dx <= radius; dx++) {
-          const xx = x + dx;
-          if (xx < 0 || xx >= width) continue;
-          const q3 = (yy * width + xx) * 3;
-          const dh = Math.abs(cur[q3] - prev[p3]);
-          const hueDiff = Math.min(dh, 255 - dh);
-          const hueWeight = Math.min(cur[q3 + 1], prev[p3 + 1]) / 255;
-          const d = (hueDiff * hueWeight
-            + Math.abs(cur[q3 + 1] - prev[p3 + 1])
-            + Math.abs(cur[q3 + 2] - prev[p3 + 2])) / 3;
+      if (interiorY && x >= R && x < width - R) {
+        for (let k = 0; k < K; k += 1) {
+          const qc = pc + off3[k];
+          const cs = cur[qc + 1];
+          const dh = cur[qc] - pv0;
+          const adh = dh < 0 ? -dh : dh;
+          const ds = cs - pv1;
+          const dv = cur[qc + 2] - pv2;
+          const d = ((adh < 255 - adh ? adh : 255 - adh) * ((cs < pv1 ? cs : pv1) * INV_255F)
+            + (ds < 0 ? -ds : ds)
+            + (dv < 0 ? -dv : dv)) * third;
+          if (d <= tau) { matched = true; break; }
+        }
+      } else {
+        for (let k = 0; k < K; k += 1) {
+          const xx = x + ODX[k];
+          const yy = y + ODY[k];
+          if (xx < 0 || xx >= width || yy < 0 || yy >= height) continue;
+          const qc = row3[yy] + xx * 3;
+          const cs = cur[qc + 1];
+          const dh = cur[qc] - pv0;
+          const adh = dh < 0 ? -dh : dh;
+          const ds = cs - pv1;
+          const dv = cur[qc + 2] - pv2;
+          const d = ((adh < 255 - adh ? adh : 255 - adh) * ((cs < pv1 ? cs : pv1) * INV_255F)
+            + (ds < 0 ? -ds : ds)
+            + (dv < 0 ? -dv : dv)) * third;
           if (d <= tau) { matched = true; break; }
         }
       }
@@ -664,6 +781,15 @@ export function scanShots(opts) {
     // 分数做鲁棒归一化（z = 相对本片噪声几倍 σ）。开启后阈值/下限都以 σ 为单位。
     normalize = false,
     zWindow = 300,
+    /**
+     * **只读帧出口**：每解出一帧就回调一次（参数是 `cur` 这个复用的 HSV 缓冲）。
+     *
+     * 加它是为了让模型那一遍**不必再解一次码**（`shadow.js`）。三条纪律：
+     *   1. 回调**只能读**，不许改缓冲，也不许留着——下一帧就覆盖了；
+     *   2. 回调抛错**只是把出口关掉**，扫描照常跑完（返回值里 `tapError` 记原因）；
+     *   3. 不传就是 `null`，一行不加、一次判断都不多（默认 `hsv` 路径完全不受影响）。
+     */
+    onFrame = null,
   } = opts;
 
   // 判定下限随口径走：abs=12（历史值）、mc=按底噪自适应（见下）、z=10（10 倍噪声）。
@@ -707,6 +833,9 @@ export function scanShots(opts) {
     let cur = new Float32Array(n * 3);
     let hasPrev = false;
     let frame = 0;
+    /** 帧出口。一旦回调抛错就置 null —— 模型/特征的任何毛病都不许传染给扫描。 */
+    let tap = typeof onFrame === 'function' ? onFrame : null;
+    let tapError = null;
     const stats = [];
     // 顺便采集两个几乎免费的量，供 flash.js 判断「亮度闪一下又回来」：
     //   means[i]  整帧 V 均值（平移/摇镜不改变它）
@@ -718,6 +847,22 @@ export function scanShots(opts) {
     // 峰值也永远不高，和"这一帧恰好是黑的"能分开。
     const rowV = new Float64Array(height);
     const rowVMax = new Float64Array(height);
+    /**
+     * 16×9 指纹的列/行映射表 + 每格像素数。
+     *
+     * 原来每个像素都要 `Math.floor((x * FP_W) / width)` 一次（2304 次除法/帧），
+     * 每帧还新分配 `acc`/`cnt` 两个数组。尺寸在这份素材里是常数 —— 全部提到外面。
+     */
+    const fpX = new Int32Array(width);
+    for (let x = 0; x < width; x++) fpX[x] = Math.min(FP_W - 1, Math.floor((x * FP_W) / width));
+    const fpY = new Int32Array(height);
+    for (let y = 0; y < height; y++) fpY[y] = Math.min(FP_H - 1, Math.floor((y * FP_H) / height));
+    const fpCnt = new Float64Array(FP_W * FP_H);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) fpCnt[fpY[y] * FP_W + fpX[x]] += 1;
+    }
+    for (let i = 0; i < fpCnt.length; i++) if (!fpCnt[i]) fpCnt[i] = 1;
+    const fpAcc = new Float64Array(FP_W * FP_H);
     // 长时差：相邻帧差看不见叠化（1s 的变化摊到 25 帧上只有 1.6 分/帧），
     // 但隔着 0.4s 看，一次完整换场仍然是满格差。环形缓冲只占 lag×9KB，
     // 每帧多算一次 scorePair（约等于打分成本 ×2，占总耗时 1–2%）。
@@ -734,6 +879,9 @@ export function scanShots(opts) {
         const slice = pending.subarray(0, frameBytes);
         pending = pending.subarray(frameBytes);
         frameToHsv(slice, cur);
+        if (tap !== null) {
+          try { tap(cur, frame); } catch (e) { tap = null; tapError = String(e?.message ?? e).slice(0, 200); }
+        }
         const t = start + frame / fps;
         if (hasPrev) {
           // mc 口径返回 0–1 占比，×255 是为了让下游（自适应阈值/细扫/护栏）继续在 0–255 量级工作
@@ -751,27 +899,27 @@ export function scanShots(opts) {
         ringIdx = (ringIdx + 1) % lag;
         {
           let sum = 0;
-          const acc = new Float64Array(FP_W * FP_H);
-          const cnt = new Uint16Array(FP_W * FP_H);
+          const acc = fpAcc;
+          acc.fill(0);
           for (let y = 0; y < height; y++) {
-            const by = Math.min(FP_H - 1, Math.floor((y * FP_H) / height));
+            const byBase = fpY[y] * FP_W;
             let rowSum = 0;
             let rowMax = 0;
+            const i0 = y * width * 3;
             for (let x = 0; x < width; x++) {
-              const i = (y * width + x) * 3;
+              const i = i0 + x * 3;
               const v = Math.max(slice[i], slice[i + 1], slice[i + 2]);
               sum += v;
               rowSum += v;
               if (v > rowMax) rowMax = v;
-              const bi = by * FP_W + Math.min(FP_W - 1, Math.floor((x * FP_W) / width));
-              acc[bi] += v;
-              cnt[bi] += 1;
+              acc[byBase + fpX[x]] += v;
             }
             rowV[y] += rowSum / width;
             if (rowMax > rowVMax[y]) rowVMax[y] = rowMax;
           }
           const fp = new Uint8Array(FP_W * FP_H);
-          for (let i = 0; i < FP_W * FP_H; i++) fp[i] = Math.round(acc[i] / (cnt[i] || 1));
+          // 每格像素数是常数（原来每帧用 Uint16Array 数一遍）
+          for (let i = 0; i < FP_W * FP_H; i++) fp[i] = Math.round(acc[i] / fpCnt[i]);
           means.push(sum / n);
           prints.push(fp);
         }
@@ -840,6 +988,8 @@ export function scanShots(opts) {
         prints,
         // 黑边占比（0 = 没检测到）。清单能据此说明"这是 2.39:1 的遮幅片"
         bars: bar,
+        // 帧出口被关掉的原因（回调抛错）。正常是 null，调用方据此决定要不要自己再解一遍。
+        tapError,
       });
     });
   });

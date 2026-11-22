@@ -53,7 +53,10 @@ import { addAudioStrip, addSheetHeader, clock, composePacked, encodePngBuffer } 
 import { extractFrameWithFallback, extractFramesBatched, mapPool } from './frames.js';
 import { correctByOnScreenSubs } from './ocr-subs.js';
 import { resolveHwaccel } from './hwaccel.js';
-import { liquidDecision, shadowLogPath, shadowPass } from './shadow.js';
+import {
+  DEFAULT_SCENE_DETECTOR, liquidDecision, normalizeSceneDetector, openFrameTap,
+  sceneAlgorithmLabel, shadowLogPath, shadowPass,
+} from './shadow.js';
 
 export const PICK_MODES = ['sharp', 'mid', 'thumb'];// 只有两种：时间码不烧进画面 —— 它占像素、压缩后先糊，而清单里已经有 0.01 秒精度的时间。
 // （历史上 `index+time` 在参数表里但从没实现过，等于一个会静默失效的选项。）
@@ -98,19 +101,27 @@ export async function runStoryboard(opts) {
     // 所以交给调用方（模型/用户）按素材类型选，见 tool-spec 里的说明。
     cutFloor = null,
     /**
-     * 场景检测器：`hsv`（默认）/ `shadow`（并排跑 CfC 的 `cut` 头，**只写日志**）/ `liquid`（模型出边界）。
+     * 取帧算法（设置页上那个下拉）：`lnn`（默认，CfC 切点模型）/ `hsv`（像素差分）/
+     * `shadow`（并排跑模型但**只写日志**，边界仍来自 hsv）。
      *
-     * `shadow` 的边界**仍然来自 hsv**；`liquid` 才真的换，但带兜底闸 ——
-     * 模型跑挂、0 刀、或刀数不到 hsv 的 40%（域不对）就退回 hsv，并在清单里写明
-     * `requested/applied/reason`。见 `shadow.js` 的 `liquidDecision`。
+     * 默认值是 `lnn`（`shadow.js:DEFAULT_SCENE_DETECTOR`）—— 2026-11-22 由用户拍板改的，
+     * 代价是淡入/黑场开头那一段会退化，所以 `hsv` 必须一直能一键退回。
+     * 模型出的点带兜底闸：跑挂、0 刀、或刀数不到 hsv 的 40%（域不对）就退回 hsv，
+     * 并在清单里写明 `requested/applied/note`。见 `shadow.js` 的 `liquidDecision`。
      */
-    sceneDetector = 'hsv',
-    /** 模型路径（`shadow` 必填）。空 = 记一条 `ok:false` 然后继续导出。 */
+    sceneDetector = DEFAULT_SCENE_DETECTOR,
+    /** 模型路径。空 = 用**内置模型**（`shadow.js:BUNDLED_MODEL`）；填了才覆盖。 */
     liquidModel = null,
     /** shadow 的降采样步长。>1 只能看分歧率（`s_adj` 会抬高、`theta` 不成立）。 */
     shadowStride = 1,
     /** shadow 日志路径。空 = `cacheDir()/shadow-cuts.jsonl`。 */
     shadowLog = null,
+    /**
+     * 模型那一遍的帧从哪来。
+     *   `tap`（默认）  扫描时顺便喂给模型，**模型不再单独解码**（实测整条链路 6777ms → ≈2000ms / 60s）
+     *   `decode`       老行为：模型自己再解一遍。想单独回滚这一条时用。
+     */
+    shadowFrames = 'tap',
     // 取帧并发数：每路 ffmpeg 只解一帧，互不依赖。实测 154 帧（16 核 i9-12900HX）：
     // 4 路 9.65s / 8 路 6.58s / 12 路 5.68s / 16 路 5.56s / 24 路 6.44s（过了 16 就抢不到核）。
     // 取 0.75×核数：16 核 → 12，比 8 快 14%，又不像 24 那样把机械盘和内存带宽打满。
@@ -287,6 +298,35 @@ export async function runStoryboard(opts) {
   let scanPrints = null;
   let printFps = 0;
   let hwaccelUsed = null;
+  /**
+   * 取帧算法的三档，**在扫描之前就要算出来**（帧出口要不要开取决于它）。
+   *
+   * 取值：`lnn`（默认）/ `hsv` / `shadow`（只记日志）。
+   * `lnn` 与 `liquid` 都认，规范化（含"空值走默认"）收在 `shadow.js:normalizeSceneDetector` 一处 ——
+   * 以前这里是手写的 `wantedScene === 'liquid'` 判断，加别名时漏改就会"选了 lnn 却还是 hsv"。
+   */
+  const wantedScene = String(sceneDetector ?? '').trim().toLowerCase();
+  const sceneMode = normalizeSceneDetector(wantedScene);
+  /**
+   * 帧出口：扫描那一遍顺便把帧喂给模型，模型就不必再解一次码（见 `shadow.openFrameTap`）。
+   *
+   * **必须在扫描之前打开**。只在三种情况之外打开：`hsv`（默认，一行不加）、
+   * 预演/纯文本（那两条路本来不跑模型）、以及显式 `shadowFrames: 'decode'`（回滚用）。
+   *
+   * 模型加载失败时 `tap.md` 为 null、`onFrame` 为 null —— 扫描照常跑，
+   * 后面的 `shadowPass` 会自己再加载一次并记一条 `ok:false`。
+   */
+  let frameTap = null;
+  // `precomputed` 时没有扫描、也就没有帧可喂；模型压根不会跑（见下面"接管"那段的 note），
+  // 所以连模型都别加载 —— 白读 210 KB。
+  if (sceneMode !== 'hsv' && !planOnly && !textOnly && !precomputed && shadowFrames !== 'decode') {
+    frameTap = await openFrameTap({
+      modelPath: liquidModel,
+      fps: info.fps,
+      stride: shadowStride,
+      estimate: Number.isFinite(winDur) ? Math.ceil((winDur * info.fps) / Math.max(1, shadowStride)) + 8 : 4096,
+    });
+  }
   const scan = precomputed
     ? {
       cuts: (precomputed.cuts ?? []).filter((c) => c.t >= winStart && c.t < winStart + winDur),
@@ -304,6 +344,8 @@ export async function runStoryboard(opts) {
       const s = await scanShots({
         input, fps: info.fps, threshold, start: winStart, end: winStart + winDur,
         minGap: capGap, ffmpegPath, hwaccel, onProgress,
+        // 只在真的开了模型时才挂帧出口；`hsv` 模式下它是 null，扫描里连一次判断都不多做
+        ...(frameTap?.onFrame ? { onFrame: frameTap.onFrame } : {}),
         // 运动补偿口径（见 scan.js 头注释与 docs/REFERENCES.md）：
         // 短视频 69.8→74.4、纪录片 86.1→89.4；代价是每帧打分 0.04→0.155 ms（整段扫描 +5%）。
         // 想回到旧口径：runStoryboard({ scanMode: 'abs' })。
@@ -362,9 +404,9 @@ export async function runStoryboard(opts) {
    * 位置在 `resolveCuts` 之后：要比的是**最终下发给排布的那批切点**，不是粗扫结果 ——
    * 细扫/极静补刀会明显改变刀数与位置，拿粗扫比会低估分歧。
    * `shadowPass` 永不 throw（自己写 `ok:false`），所以这里不需要 try。
+   *
+   * `wantedScene` / `sceneMode` 在上面（帧出口之前）就算好了，这里不再重算。
    */
-  const wantedScene = String(sceneDetector ?? 'hsv').trim().toLowerCase();
-  const sceneMode = wantedScene === 'shadow' || wantedScene === 'liquid' ? wantedScene : 'hsv';
   let sceneApplied = 'hsv';
   let sceneNote = sceneMode === 'hsv' && wantedScene && wantedScene !== 'hsv'
     ? `sceneDetector 不认识：${wantedScene}；这次按 hsv 跑`
@@ -372,7 +414,18 @@ export async function runStoryboard(opts) {
   let shadowInfo = null;
   let scenePred = null;
   if (sceneMode !== 'hsv') {
-    if (planOnly || textOnly) {
+    if (precomputed) {
+      /**
+       * `precomputed` 的契约是"切点由调用方给定，`resolveCuts` 原样返回、一个阶段都不跑"
+       * （见 `cuts.js:resolveCuts` 的注释）。而模型接管发生在它**之后** ——
+       * 不管的话，注入的 2 刀会被换成模型的十几刀，那条契约就名存实亡了。
+       *
+       * 实测过这个坑：默认改成 lnn 之后，`precomputed` 的 2 刀直接变成 12 刀。
+       * 所以这里干脆不跑模型：帧复用拿不到帧（没扫描），单为记录再解一遍码不值。
+       */
+      shadowInfo = { ok: false, skipped: 'precomputed' };
+      sceneNote = sceneNote ?? '切点由 precomputed 给定，不跑模型接管';
+    } else if (planOnly || textOnly) {
       // 不跑也不写日志：这两条路径没有"处理完一段素材"这回事
       shadowInfo = { ok: false, skipped: planOnly ? 'plan-only' : 'text-only' };
       sceneNote = sceneNote ?? `预演/纯文本模式不跑模型（${shadowInfo.skipped}），这次按 hsv 跑`;
@@ -384,6 +437,9 @@ export async function runStoryboard(opts) {
         cuts, thetaHsv: scan.threshold ?? null,
         modelPath: liquidModel, stride: shadowStride,
         logPath, ffmpegPath,
+        tap: frameTap,
+        // 只在"自己解码"那条路上用到；与扫描同一档，避免缓存命中前后拿到两套像素
+        hwaccel: hwaccelUsed,
       });
       scenePred = shadowInfo.pred ?? null;
       shadowInfo = { ...shadowInfo, log: logPath };
@@ -1135,6 +1191,8 @@ export async function runStoryboard(opts) {
       // 场景检测器/阴影对照的说明也要跟着走 —— 否则纯文本模式下"为什么没跑 shadow"没有答案
       ...(sceneApplied !== 'hsv' || sceneNote ? {
         sceneDetector: {
+          // 面向用户的算法名：内部叫 liquid，设置页和清单里都叫 lnn
+          algorithm: sceneAlgorithmLabel(sceneMode),
           requested: wantedScene || 'hsv',
           applied: sceneApplied,
           ...(sceneNote ? { note: sceneNote } : {}),
@@ -1349,6 +1407,8 @@ export async function runStoryboard(opts) {
     // 场景检测器：只在**不是默认值**时才出现在清单里（默认配置的清单一个字都不变）
     ...(sceneApplied !== 'hsv' || sceneNote ? {
       sceneDetector: {
+        // 面向用户的算法名：内部叫 liquid，设置页和清单里都叫 lnn
+        algorithm: sceneAlgorithmLabel(sceneMode),
         requested: wantedScene || 'hsv',
         applied: sceneApplied,
         ...(sceneNote ? { note: sceneNote } : {}),

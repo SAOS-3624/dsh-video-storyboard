@@ -23,8 +23,8 @@ import { DEFAULT_FFMPEG, probeVideo } from '../src/storyboard/probe.js';
 import { scanShots } from '../src/storyboard/scan.js';
 import { runStoryboard } from '../src/storyboard/pipeline.js';
 import {
-  compareCuts, liquidDecision, loadLiquidModel, predictCuts, readSceneConfig, shadowPass,
-  shadowLogPath, TOL_FRAMES,
+  compareCuts, liquidDecision, loadLiquidModel, normalizeSceneDetector, openFrameTap, predictCuts,
+  readSceneConfig, sceneAlgorithmLabel, shadowPass, shadowLogPath, TOL_FRAMES,
 } from '../src/storyboard/shadow.js';
 import {
   bucketOf, parseShadowLog, summarizeShadow, verdictOf,
@@ -40,7 +40,7 @@ const run = promisify(execFile);
 process.env.DSH_VIDEO_CACHE_DIR = await mkdtemp(join(tmpdir(), 'dsh-shadow-cache-'));
 
 /** 部署模型（bench 是本地目录，npm 包里没有 —— 缺了就让 e2e 跳过，不算失败）。 */
-const DEPLOY_MODEL = 'bench/eval/train/out-deploy-cut/model-bbc-fold1.json';
+const DEPLOY_MODEL = 'bench/eval/legacy/out/deploy-joint-v4/model-bbc-fold1.json';
 
 let hasFfmpeg = false;
 try {
@@ -113,10 +113,16 @@ test('compareCuts: 输入乱序也照算（切点表没保证有序）', () => {
 
 // ---------------------------------------------------------------- 三档开关
 
-test('readSceneConfig: 什么都没配 → hsv（默认行为与今天完全一致）', () => {
+test('readSceneConfig: 什么都没配 → 默认算法（lnn）', () => {
   const c = readSceneConfig({}, { env: { DSH_HOME: 'X:/nope' } });
+  assert.equal(c.mode, 'liquid', '默认是 lnn（内部名 liquid），见 DEFAULT_SCENE_DETECTOR');
+  assert.equal(c.model, null, '模型路径不填 = 用内置模型');
+  assert.equal(c.note, null);
+});
+
+test('readSceneConfig: 显式 hsv 才关掉模型', () => {
+  const c = readSceneConfig({ sceneDetector: 'hsv' }, { env: { DSH_HOME: 'X:/nope' } });
   assert.equal(c.mode, 'hsv');
-  assert.equal(c.model, null);
   assert.equal(c.note, null);
 });
 
@@ -130,9 +136,10 @@ test('readSceneConfig: shadow + 模型路径 + stride', () => {
   assert.equal(c.stride, 3);
 });
 
-test('readSceneConfig: 认不出来的值退回 hsv，但留下 note（不许静默）', () => {
-  const c = readSceneConfig({ sceneDetector: 'lnn' }, { env: { DSH_HOME: 'X:/nope' } });
-  assert.equal(c.mode, 'hsv');
+test('readSceneConfig: 认不出来的值退回默认，但留下 note（不许静默）', () => {
+  // 别拿 lnn 当反例：它是 liquid 的合法别名（见文件末尾「取帧算法的对外名字」那一组）
+  const c = readSceneConfig({ sceneDetector: 'canny' }, { env: { DSH_HOME: 'X:/nope' } });
+  assert.equal(c.mode, 'liquid', '认不出来 = 和没配一样，走默认');
   assert.match(c.note, /不认识/);
 });
 
@@ -167,14 +174,19 @@ test('shadowPass: 模型路径不存在 → ok:false，**不抛**，导出不受
   }
 });
 
-test('shadowPass: 没配模型 → ok:false，提示要配 liquidModel', async () => {
+test('shadowPass: 显式给了错的模型路径 → ok:false，导出照常', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-shadow-'));
   try {
+    /**
+     * ⚠️ 别再用 `modelPath: null` 当反例 —— 现在 null = 用**内置模型**
+     * （`BUNDLED_MODEL`），那是"设置页里选 lnn 就能用"的前提。
+     * 要测失败路径得显式给一个不存在的路径。
+     */
     const r = await shadowPass({
-      input: 'nope.mp4', fps: 25, cuts: [], modelPath: null, logPath: join(dir, 'l.jsonl'),
+      input: 'nope.mp4', fps: 25, cuts: [], modelPath: 'X:/no-such-model.json', logPath: join(dir, 'l.jsonl'),
     });
     assert.equal(r.ok, false);
-    assert.match(r.error, /liquidModel/);
+    assert.match(r.error, /模型文件不存在/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -243,13 +255,14 @@ test('e2e: 开 shadow 不改变任何输出 —— 切点与 PNG 都和 hsv 逐�
     const common = {
       input: file, transcript: 'off', cache: false, audioStrip: false, encode: true,
     };
-    const plain = await runStoryboard({ ...common });
+    // 基线必须**显式**是 hsv：默认已经改成 lnn，不传就不是纯像素差分那一版了
+    const plain = await runStoryboard({ ...common, sceneDetector: 'hsv' });
     const log = join(dir, 'shadow-cuts.jsonl');
     const shadowed = await runStoryboard({
       ...common, sceneDetector: 'shadow', liquidModel: DEPLOY_MODEL, shadowLog: log,
     });
 
-    // ① 默认那一跑，清单里既没有 sceneDetector 也没有 shadow（默认配置的输出一个字都不多）
+    // ① hsv 那一跑，清单里既没有 sceneDetector 也没有 shadow（hsv 的输出一个字都不多）
     assert.equal(plain.shadow, undefined);
     assert.equal(plain.sceneDetector, undefined);
 
@@ -569,12 +582,25 @@ test('接线：video.json 的 sceneDetector/liquidModel 会变成 runStoryboard 
     assert.equal(o.shadowStride, 2);
     assert.ok(o.shadowLog, '日志路径要显式传下去，别让下游再猜一次');
 
-    // 没配时一个字段都不许塞（这是"默认输出逐字节不变"的前提）
+    /**
+     * 没配时带的是**默认算法**（lnn → 内部名 liquid）。
+     *
+     * 这条以前断言的是"一个字段都不塞"（当时默认 hsv，塞了就等于改了行为）。
+     * 2026-11-22 默认改成 lnn 之后，"什么都不配"本身就是要开模型，所以必须显式往下传 ——
+     * 否则 `runStoryboard` 那头还得自己再猜一次默认值，两处迟早会漂。
+     */
     writeFileSync(join(home, 'video.json'), JSON.stringify({}), 'utf8');
     const plain = boardOptions({ input: 'a.mp4' }, { kind: 'board' });
-    assert.equal('sceneDetector' in plain, false);
-    assert.equal('liquidModel' in plain, false);
-    assert.equal('shadowLog' in plain, false);
+    assert.equal(plain.sceneDetector, 'liquid', '空配置 = 默认 lnn');
+    assert.equal('liquidModel' in plain, false, '模型路径没配就往下传空，由 shadow 兜内置模型');
+    assert.ok(plain.shadowLog, '日志路径要显式传下去');
+
+    // 显式写 hsv 才是"关掉模型"，而且此时才回到"不多塞字段"的老形态
+    writeFileSync(join(home, 'video.json'), JSON.stringify({ sceneDetector: 'hsv' }), 'utf8');
+    const off = boardOptions({ input: 'a.mp4' }, { kind: 'board' });
+    assert.equal('sceneDetector' in off, false, '显式 hsv = 与改动前逐字节一致');
+    assert.equal('liquidModel' in off, false);
+    assert.equal('shadowLog' in off, false);
 
     // CLI 路径：显式开关才透传（CLI 一贯不读 video.json 的 storyboard.*）
     const cli = runOptionsFromCli({
@@ -593,4 +619,137 @@ test('接线：video.json 的 sceneDetector/liquidModel 会变成 runStoryboard 
     if (prev === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prev;
     await rm(home, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------- 帧复用（帧出口）
+
+/**
+ * 帧复用是"扫描顺便把帧喂给模型"的那条路（`shadow.openFrameTap`）。
+ * 它省掉了模型那一遍的**整次解码**（实测 60s 素材 6779ms → 1522ms），
+ * 但踩坏任何一条保证都会很难查，所以这里把四条钉住：
+ *
+ *   ① 默认开（`shadowFrames` 缺省 = `tap`），写 `decode` 才是老行为；
+ *   ② 模型加载失败不抛错，`onFrame` 为 null，扫描照常；
+ *   ③ 喂过帧 → `framesFrom: 'tap'`，且切点与"自己解码"**逐点相同**；
+ *   ④ 一帧都没喂（缓存命中的样子）→ 自动退回自己解码；
+ *   ⑤ 回调抛错 → 扫描照常跑完，`tapError` 记下原因。
+ */
+
+test('readSceneConfig: shadowFrames 缺省 tap，只有显式 decode 才回退', () => {
+  const env = { DSH_HOME: 'X:/nope' };
+  assert.equal(readSceneConfig({}, { env }).frames, 'tap');
+  assert.equal(readSceneConfig({ sceneDetector: 'shadow' }, { env }).frames, 'tap');
+  assert.equal(readSceneConfig({ shadowFrames: 'decode' }, { env }).frames, 'decode');
+  assert.equal(readSceneConfig({ shadowFrames: 'DECODE' }, { env }).frames, 'decode');
+  // 认不出来的值不许当成 decode（静默变慢 = 看起来"优化没生效"）
+  assert.equal(readSceneConfig({ shadowFrames: 'nope' }, { env }).frames, 'tap');
+});
+
+test('openFrameTap: 模型不存在 → 不抛错、onFrame 为 null、result 为 null', async () => {
+  const tap = await openFrameTap({ modelPath: 'X:/definitely-not-here.json', fps: 25 });
+  assert.equal(tap.md, null);
+  assert.equal(tap.onFrame, null);
+  assert.equal(tap.result(), null);
+  assert.ok(tap.error && /模型文件不存在/.test(tap.error), `error=${tap.error}`);
+});
+
+test('e2e: 帧复用 —— 切点与自己解码逐点相同，且确实没再解码', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  if (!existsSync(DEPLOY_MODEL)) return t.skip(`部署模型不在：${DEPLOY_MODEL}`);
+
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-tap-'));
+  try {
+    const file = await makeColorFixture(dir);          // 5 段纯色各 1s
+    const md = await loadLiquidModel(DEPLOY_MODEL);
+    // 窗口必须与下面扫描那段**完全一致**：不然比的是两段不同的时间轴
+    const win = { input: file, fps: 25, start: 0, end: 4 };
+
+    // 基线：模型自己解一遍
+    const plain = await predictCuts({ ...win, md });
+    assert.equal(plain.framesFrom, 'decode');
+    assert.equal(plain.sampled, 100);
+
+    // 帧复用：扫描顺便喂
+    const tap = await openFrameTap({ modelPath: DEPLOY_MODEL, fps: 25 });
+    const scan = await scanShots({
+      input: file, fps: 25, threshold: 15, start: 0, end: 4, minGap: 0.35,
+      ffmpegPath: DEFAULT_FFMPEG, scoreMode: 'mc', onFrame: tap.onFrame,
+    });
+    assert.equal(scan.tapError, null, `帧出口被关掉了：${scan.tapError}`);
+    assert.equal(tap.seen, scan.frames, '帧出口应当看到每一帧（stride=1）');
+
+    const reused = await predictCuts({ ...win, md: tap.md, tapped: tap.result() });
+    assert.equal(reused.framesFrom, 'tap');
+    assert.equal(reused.sampled, plain.sampled);
+    assert.deepEqual(reused.predCuts, plain.predCuts, '两条路的切点必须逐点相同');
+
+    // ④ 一帧都没喂（= 扫描命中缓存）→ 必须自己解码，而不是报"0 帧"
+    const empty = await openFrameTap({ modelPath: DEPLOY_MODEL, fps: 25 });
+    assert.equal(empty.result(), null);
+    const fallback = await predictCuts({ ...win, md: empty.md, tapped: empty.result() });
+    assert.equal(fallback.framesFrom, 'decode');
+    assert.deepEqual(fallback.predCuts, plain.predCuts);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('e2e: 帧出口回调抛错 → 扫描照常跑完，tapError 记原因', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-tap-boom-'));
+  try {
+    const file = await makeColorFixture(dir);
+    let calls = 0;
+    const s = await scanShots({
+      input: file, fps: 25, threshold: 15, start: 0, end: 4, minGap: 0.35,
+      ffmpegPath: DEFAULT_FFMPEG, scoreMode: 'mc',
+      onFrame: () => { calls += 1; throw new Error('模型这边炸了'); },
+    });
+    // 抛错只关掉出口，扫描的产出一个都不能少
+    assert.equal(calls, 1, '第一帧抛错后就不该再调');
+    assert.equal(s.tapError, '模型这边炸了');
+    assert.equal(s.frames, 100);
+    assert.ok(s.cuts.length >= 3, `hsv 那侧仍应出点，实际 ${s.cuts.length}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- 取帧算法的对外名字
+
+/**
+ * 设置页、清单里都说 **`lnn`**；内部实现叫 `liquid`。这层映射只该有一处
+ * （`normalizeSceneDetector`）—— 以前 pipeline 里是手写的 `=== 'liquid'` 判断，
+ * 加别名时漏改一处就会"选了 lnn 却还是 hsv"，而且看不出来。
+ */
+test('取帧算法：lnn 是 liquid 的别名，且认得大小写与空白', () => {
+  assert.equal(normalizeSceneDetector('lnn'), 'liquid');
+  assert.equal(normalizeSceneDetector(' LNN '), 'liquid');
+  assert.equal(normalizeSceneDetector('liquid'), 'liquid');
+  assert.equal(normalizeSceneDetector('hsv'), 'hsv');
+  assert.equal(normalizeSceneDetector('shadow'), 'shadow');
+  // 认不出来的值走**默认**（lnn）：写错字和没写对用户是同一件事
+  assert.equal(normalizeSceneDetector('canny'), 'liquid');
+  assert.equal(normalizeSceneDetector(''), 'liquid', '空值 = 默认算法，不再是 hsv');
+  assert.equal(normalizeSceneDetector(undefined), 'liquid');
+});
+
+test('取帧算法：清单里显示 lnn，不显示内部名 liquid', () => {
+  assert.equal(sceneAlgorithmLabel('liquid'), 'lnn');
+  assert.equal(sceneAlgorithmLabel('hsv'), 'hsv');
+  assert.equal(sceneAlgorithmLabel('shadow'), 'shadow');
+});
+
+test('readSceneConfig: sceneDetector 写 lnn 也能开模型', () => {
+  const c = readSceneConfig({ sceneDetector: 'lnn' }, { env: { DSH_HOME: 'X:/nope' } });
+  assert.equal(c.mode, 'liquid');
+  assert.equal(c.note, null);
+});
+
+test('内置模型：没配路径时 loadLiquidModel 用它，且路径是真实的', async () => {
+  const md = await loadLiquidModel(null);
+  assert.ok(md.path.endsWith('lnn-model.json'), md.path);
+  assert.ok(md.model.heads.includes('cut'));
+  assert.equal(md.model.dim, md.dim);
 });

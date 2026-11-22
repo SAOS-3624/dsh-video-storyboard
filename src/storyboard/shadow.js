@@ -39,15 +39,81 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { DIM, FEATURES, FEATURE_VERSION, createFeatures } from './features.js';
 import { SCAN_H, SCAN_W, frameToHsv, mcRatioScore, scorePair } from './scan.js';
 import { DEFAULT_FFMPEG } from './probe.js';
-import { decodeCuts, forward } from './cfc.js';
+import { decodeCuts, forward, pickTheta } from './cfc.js';
 import { cacheDir } from './cache.js';
 
-/** 允许的 `sceneDetector` 取值。**顺序即优先级**：第一个是默认值。 */
-export const SCENE_DETECTORS = Object.freeze(['hsv', 'shadow', 'liquid']);
+/**
+ * 允许的 `sceneDetector` 取值。
+ *
+ * ⚠️ **顺序不再代表默认值** —— 默认由 `DEFAULT_SCENE_DETECTOR` 决定（见下）。
+ * 以前这里靠"第一个就是默认"隐式表达，改默认时得连带挪数组，容易漏。
+ */
+export const SCENE_DETECTORS = Object.freeze(['hsv', 'shadow', 'liquid', 'lnn']);
+
+/**
+ * 用户可见的名字 → 内部名字。
+ *
+ * 设置页和文档里说的是 **`lnn`**（"取帧算法：hsv / lnn"），而内部实现一开始叫
+ * `liquid`（因为它接管边界、hsv 退成影子）。名字换了但**值不换** ——
+ * 旧配置、旧日志、`bench/` 里那一堆脚本都还写着 `liquid`，一次全改会牵连几十处
+ * 而没有任何行为收益。所以 `lnn` 只是入口别名，读到就规范成 `liquid`。
+ */
+const SCENE_ALIASES = Object.freeze({ lnn: 'liquid' });
+
+/**
+ * **默认取帧算法。**
+ *
+ * 2026-11-22 由用户拍板从 `hsv` 改成 `lnn`：真实成片上干净素材 +3.7、
+ * 跨域留出 +5.1/+8.4，而且模型那一遍走帧复用后基本不额外花时间（见
+ * `LNN-优化-交接-20261122.md` §8.4）。
+ *
+ * **已知代价**（选默认前必须知道）：淡入/黑场开头那一段会退化（实测 −8.8），
+ * 而兜底闸是整窗口判的，挡不住局部塌陷。所以 `hsv` 必须一直是**一键可回**的退路：
+ * 设置页里选 hsv、或 `runStoryboard({ sceneDetector: 'hsv' })`。
+ */
+export const DEFAULT_SCENE_DETECTOR = 'lnn';
+
+/**
+ * 把用户写的值规范成内部模式名。
+ *
+ * 空值、认不出来的值**都走默认**（`DEFAULT_SCENE_DETECTOR`）—— "写错了"和"没写"
+ * 对用户来说是同一件事，不该一个用模型一个不用。
+ *
+ * @param {string} value `video.json` 的 `sceneDetector`，或设置页/工具参数传来的值
+ * @returns {'hsv'|'shadow'|'liquid'}
+ */
+export function normalizeSceneDetector(value) {
+  const v = String(value ?? '').trim().toLowerCase();
+  if (!v) return normalizeSceneDetector(DEFAULT_SCENE_DETECTOR);
+  if (!SCENE_DETECTORS.includes(v)) return normalizeSceneDetector(DEFAULT_SCENE_DETECTOR);
+  return SCENE_ALIASES[v] ?? v;
+}
+
+/**
+ * 内部模式名 → 用户可见的算法名。
+ *
+ * 设置页、清单里都说 **`lnn`**；`liquid` 只是内部实现的名字（见 `SCENE_ALIASES`）。
+ */
+export function sceneAlgorithmLabel(mode) {
+  return mode === 'liquid' ? 'lnn' : mode;
+}
+
+/**
+ * **内置模型**（随包分发，约 210 KB）。
+ *
+ * 早先的决定是"包里不带大件，没配 `liquidModel` 就退回 hsv"。那条在"只有开发者会开
+ * liquid"时成立；现在它是一个给用户点的设置项 —— 选了算法还要手填模型路径，
+ * 等于没做。所以把 v4 部署权重放进来，`liquidModel` 留作覆盖（想试别的权重才填）。
+ *
+ * 权重是 `--all-train` 训的（in-sample），所以它**只保证链路不崩**；
+ * 要判断准不准看留出折（`out/joint-v4/`），见 `LNN-优化-交接-20261122.md` §8。
+ */
+export const BUNDLED_MODEL = fileURLToPath(new URL('./lnn-model.json', import.meta.url));
 /**
  * 「两个切点算一致」的容差（帧）。**必须等于 `bench/eval/datasets.mjs` 的 `TOL_FRAMES`**：
  * 分歧率的判据要和 96.4 / 73.6 那两个数字同一把尺子，否则"分歧 5%"和"F1 掉 5 个点"
@@ -109,25 +175,38 @@ export function shadowLogPath(env = process.env) {
 /**
  * 读 `~/.dsh/video.json` 里的阴影配置。**两个键都可缺省**，缺省 = `hsv`（行为与今天完全一致）。
  *
+ * `shadowFrames`：
+ *   `tap`（默认）  扫描那一遍顺便把帧喂给模型，**模型不再单独解码**
+ *   `decode`       老行为：模型自己再解一遍（想单独回滚"帧复用"这一条时用）
+ *
  * @param {object} cfg 已经解析过的 video.json
  * @param {{env?:object}} [o] 只给测试用；`shadowLog` 可覆盖日志路径
  * @returns {{mode:string, model:string|null, stride:number, logPath:string, note:string|null}}
  */
 export function readSceneConfig(cfg = {}, { env = process.env } = {}) {
   const raw = cfg && typeof cfg === 'object' ? cfg : {};
-  const mode = String(raw.sceneDetector ?? '').trim().toLowerCase();
+  const modeRaw = String(raw.sceneDetector ?? '').trim().toLowerCase();
+  const known = !modeRaw || SCENE_DETECTORS.includes(modeRaw);
   const model = typeof raw.liquidModel === 'string' && raw.liquidModel.trim()
     ? raw.liquidModel.trim()
     : null;
   const stride = Math.max(1, Math.min(60, Math.round(Number(raw.shadowStride) || 1)));
+  const framesRaw = String(raw.shadowFrames ?? '').trim().toLowerCase();
+  const frames = framesRaw === 'decode' ? 'decode' : 'tap';
   const logPath = typeof raw.shadowLog === 'string' && raw.shadowLog.trim()
     ? raw.shadowLog.trim()
     : shadowLogPath(env);
-  // 认不出来的名字不静默当 hsv：悄悄降级会让人以为 shadow 开着而一条日志都没有
-  if (mode && !SCENE_DETECTORS.includes(mode)) {
-    return { mode: 'hsv', model, stride, logPath, note: `sceneDetector 不认识：${mode}` };
+  // 认不出来的名字不静默当默认：悄悄降级会让人以为 shadow 开着而一条日志都没有
+  if (!known) {
+    return {
+      mode: normalizeSceneDetector(''),
+      model, stride, frames, logPath,
+      note: `sceneDetector 不认识：${modeRaw}；这次按 ${DEFAULT_SCENE_DETECTOR} 跑`,
+    };
   }
-  return { mode: mode || 'hsv', model, stride, logPath, note: null };
+  return {
+    mode: normalizeSceneDetector(modeRaw), model, stride, frames, logPath, note: null,
+  };
 }
 
 /** 升序数值数组；丢掉 NaN 与非数字。 */
@@ -202,15 +281,21 @@ export function compareCuts(cutsHsv, cutsLiquid, { fps = 25, tolFrames = TOL_FRA
 /**
  * 加载模型并校验。**校验失败就 throw** —— 调用方（`shadowPass`）负责吞掉并记日志。
  *
- * @param {string} path
+ * `path` 为空时用**内置模型**（`BUNDLED_MODEL`）—— 设置页里选 lnn 就不必再填路径。
+ *
+ * @param {string} [path]
  * @returns {Promise<{path:string, model:object, mean:Float64Array, std:Float64Array,
  *                    theta:number, thetaQ:number, format:string, marksUsable:boolean,
  *                    dtIdx:number, dropped:Set<string>, units:number, dim:number}>}
  */
 export async function loadLiquidModel(path) {
-  if (!path) throw new Error('没配 liquidModel（video.json 里给一个 .json 模型路径）');
-  if (!existsSync(path)) throw new Error(`模型文件不存在：${path}`);
-  const j = JSON.parse(await readFile(path, 'utf8'));
+  const target = path || BUNDLED_MODEL;
+  if (!existsSync(target)) {
+    throw new Error(path
+      ? `模型文件不存在：${target}`
+      : `内置模型缺失：${target}（安装包不完整，请重装插件）`);
+  }
+  const j = JSON.parse(await readFile(target, 'utf8'));
   if (j.format !== 'cfc-json-v1' && j.format !== 'cfc-json-v2') {
     throw new Error(`模型格式不认识：${j.format}`);
   }
@@ -229,7 +314,8 @@ export async function loadLiquidModel(path) {
   const m = { dim: j.dim, units: j.units, zdim: j.dim + j.units, heads: j.heads };
   for (const [k, v] of Object.entries(j.params ?? {})) m[k] = Float64Array.from(v);
   return {
-    path,
+    // 一定是**真实**路径（没配时是内置模型那条），日志里 `model` 字段要能一眼看出用的哪个
+    path: target,
     model: m,
     mean: Float64Array.from(j.mean),
     std: Float64Array.from(j.std),
@@ -246,6 +332,113 @@ export async function loadLiquidModel(path) {
 }
 
 /**
+ * 特征收集器：把一帧 HSV 追加成 `n × DIM` 矩阵的一行（含标准化 + dt/dropped 置零）。
+ *
+ * **解码路径和"扫描顺便喂帧"路径共用这一份**。分开写两份的话，
+ * 标准化或置零迟早会漂，而漂了以后分歧率看起来完全正常 —— 这个项目最恨的就是这种错。
+ */
+function createSink({ md, fpsEff, stride, estimate = 4096 }) {
+  const { mean, std, dtIdx, dropped } = md;
+  const feats = createFeatures({
+    w: SCAN_W, h: SCAN_H, fps: fpsEff, longSec: 0.4, scorePair,
+    mcScore: mcRatioScore, mcOpts: { tau: 15, radius: 2 },
+  });
+  let cap = Math.max(1024, Math.min(estimate, MAX_SHADOW_FRAMES + 8));
+  let X = new Float32Array(cap * DIM);
+  let count = 0;
+  let truncated = false;
+  return {
+    stride,
+    get n() { return count; },
+    /** 追加一帧。返回 false = 已经满了（`truncated` 已置位），调用方应当收工。 */
+    push(hsv, t) {
+      if (count >= MAX_SHADOW_FRAMES) { truncated = true; return false; }
+      const f = feats.push(hsv, t);
+      if (count >= cap) {
+        const nextCap = Math.min(MAX_SHADOW_FRAMES + 8, cap * 2);
+        const next = new Float32Array(nextCap * DIM);
+        next.set(X.subarray(0, count * DIM));
+        X = next;
+        cap = nextCap;
+      }
+      const base = count * DIM;
+      for (let d = 0; d < DIM; d += 1) {
+        let v = (f[d] - mean[d]) / std[d];
+        if (d === dtIdx) v = 0;                        // 与训练一致：防帧率泄漏
+        if (dropped.has(FEATURES[d])) v = 0;
+        X[base + d] = v;
+      }
+      count += 1;
+      return true;
+    },
+    done() { return { X, n: count, stride, truncated }; },
+  };
+}
+
+/**
+ * 提前打开"帧出口"，交给 `scanShots` 的 `onFrame`，**模型那一遍就不必再解一次码**。
+ *
+ * ## 为什么值得（实测，60s 640×360）
+ *
+ *   扫描（硬解）        1885 ms
+ *   模型那一遍（软解）  4891 ms   ← 相当于把整条链路的 wall time 翻倍
+ *   复用扫描的帧        ≈ 32 ms    ← 只剩 CfC 前向（特征已经摊在扫描那一遍里了）
+ *
+ * ## 三条保证（文件头"两条硬约束"里那三条，一条都没丢）
+ *
+ * 1. **缓存命中时也能跑**：扫描命中缓存时 `onFrame` 一次都不会被调，
+ *    `result()` 返回 `null`，调用方自动退回自己解码（`collectMatrix`）。
+ * 2. **不污染线上**：这里只**读**扫描给出的 HSV 缓冲，不写；回调抛错只关掉出口
+ *    （`scanShots` 里 try/catch），扫描照常跑完。
+ * 3. **回滚仍然只改配置**：`sceneDetector: 'hsv'` 时这个函数根本不会被调用。
+ *    想单独回滚"帧复用"这一条：`shadowFrames: 'decode'`（见 `readSceneConfig`）。
+ *
+ * @returns {Promise<{md:object|null, error:string|null, onFrame:Function|null,
+ *                    result:Function, seen:number}>} 模型加载失败时 `md=null`，
+ *          此时 `onFrame` 也是 null，`shadowPass` 会照常记一条 `ok:false`。
+ */
+export async function openFrameTap({ modelPath, fps, stride = 1, estimate = 4096 }) {
+  // fps 不合法时不要建（`t = n / (fps/step)` 会算出 Infinity，特征全脏）。返回一个死的。 --
+  if (!(fps > 0)) {
+    return {
+      md: null, error: `fps 不合法：${fps}`, onFrame: null, result: () => null, seen: 0,
+    };
+  }
+  let md;
+  try {
+    md = await loadLiquidModel(modelPath);
+  } catch (e) {
+    return {
+      md: null, error: String(e?.message ?? e).slice(0, 200), onFrame: null, result: () => null, seen: 0,
+    };
+  }
+  const step = Math.max(1, Math.round(stride));
+  const fpsEff = fps / step;
+  const sink = createSink({ md, fpsEff, stride: step, estimate });
+  let seenRaw = 0;
+  let dead = false;
+  return {
+    md,
+    error: null,
+    get seen() { return seenRaw; },
+    /** 交给 `scanShots({ onFrame })`。**永不抛错**，只可能是"静默关掉自己"。 */
+    onFrame(hsv) {
+      if (dead) return;
+      const keep = seenRaw % step === 0;
+      seenRaw += 1;
+      if (!keep) return;
+      try {
+        sink.push(hsv, sink.n / fpsEff);
+      } catch {
+        dead = true;
+      }
+    },
+    /** 扫描结束后取结果。少于 2 帧（缓存命中/解码失败/步长太大）就返回 null → 退回自己解码。 */
+    result() { return dead || sink.n < 2 ? null : sink.done(); },
+  };
+}
+
+/**
  * 第二遍解码 + 抽 14 维 + 标准化，直接写成 `n × DIM` 的矩阵。
  *
  * **spawn 参数必须与 `scan.js:scanShots` 逐字一致**（`-skip_loop_filter all`、
@@ -256,47 +449,41 @@ export async function loadLiquidModel(path) {
  * 这样 `s_long` 的窗口仍是 0.4 秒。**但 `s_adj` 会整体抬高**（相邻样本隔得更远），
  * 模型的 `theta` 不再成立 —— 只可用来"看分歧率"，不可用来出边界。
  *
- * @returns {Promise<{X:Float32Array, n:number, stride:number}>}
+ * `hwaccel`：与扫描同一档硬件解码。**这一遍原本是软解** —— 实测同一支 640×360 的片子
+ * 软解 13.7s / `cuda` 3.9s，等于模型这半边白慢 2.4 倍。⚠️ 硬解出来的 64×36 帧在部分片源上
+ * 与软解**不完全逐字节相同**（实测 4.4% 的字节不同、平均差 0.08/255、最大 15），
+ * 所以要跟 `liquid.mjs` 做"逐位对拍"时，两条路必须走同一条解码路径
+ * （`DSH_HWACCEL=none`，或者干脆用帧复用那条路）。
+ *
+ * @returns {Promise<{X:Float32Array, n:number, stride:number, truncated:boolean}>}
  */
 async function collectMatrix({
-  input, fps, start = 0, end, stride = 1, ffmpegPath = DEFAULT_FFMPEG, signal, md,
+  input, fps, start = 0, end, stride = 1, ffmpegPath = DEFAULT_FFMPEG, signal, md, hwaccel = null,
 }) {
   const step = Math.max(1, Math.round(stride));
   const fpsEff = fps / step;
-  const { mean, std, dtIdx, dropped } = md;
-  const feats = createFeatures({
-    w: SCAN_W, h: SCAN_H, fps: fpsEff, longSec: 0.4, scorePair,
-    mcScore: mcRatioScore, mcOpts: { tau: 15, radius: 2 },
-  });
-
-  const n = SCAN_W * SCAN_H;
-  const frameBytes = n * 3;
   const estimate = Number.isFinite(end) && end > start
     ? Math.ceil(((end - start) * fps) / step) + 8
     : 4096;
-  let cap = Math.max(1024, Math.min(estimate, MAX_SHADOW_FRAMES + 8));
-  let X = new Float32Array(cap * DIM);
-  let count = 0;
-  let truncated = false;
-  const grow = () => {
-    const next = new Float32Array(Math.min(MAX_SHADOW_FRAMES + 8, cap * 2) * DIM);
-    next.set(X.subarray(0, count * DIM));
-    X = next;
-    cap = Math.min(MAX_SHADOW_FRAMES + 8, cap * 2);
-  };
+  const sink = createSink({ md, fpsEff, stride: step, estimate });
+
+  const n = SCAN_W * SCAN_H;
+  const frameBytes = n * 3;
+  const hsv = new Float32Array(n * 3);
 
   await new Promise((resolve, reject) => {
     const child = spawn(ffmpegPath, [
       '-hide_banner', '-v', 'error', '-nostdin',
       ...(start > 0 ? ['-ss', String(start)] : []),
       ...(Number.isFinite(end) ? ['-t', String(Math.max(0.1, end - start))] : []),
+      // 硬件解码必须在 -i 之前（与 scanShots 同一条规矩，见 hwaccel.js）
+      ...(hwaccel ? ['-hwaccel', hwaccel] : []),
       '-skip_loop_filter', 'all',
       '-i', input, '-an', '-sn',
       '-vf', `scale=${SCAN_W}:${SCAN_H}:flags=area,format=rgb24`, '-f', 'rawvideo', '-',
     ], { stdio: ['ignore', 'pipe', 'pipe'], signal, windowsHide: true });
 
     let pending = Buffer.alloc(0);
-    const hsv = new Float32Array(n * 3);
     let seen = 0;
     let killedByUs = false;
     let stderr = '';
@@ -309,26 +496,14 @@ async function collectMatrix({
         const keep = seen % step === 0;
         seen += 1;
         if (!keep) continue;
-        if (count >= MAX_SHADOW_FRAMES) {
+        frameToHsv(slice, hsv);
+        if (!sink.push(hsv, sink.n / fpsEff)) {
           // 到上限就收工。**必须记下来** —— 拿半条时间轴算出来的分歧率是残的，
           // 而它看起来和完整的一样（这个项目最恨的就是"看不出哪里错"）。
-          truncated = true;
           killedByUs = true;
           child.kill('SIGKILL');
           return;
         }
-        frameToHsv(slice, hsv);
-        const t = count / fpsEff;
-        const f = feats.push(hsv, t);
-        if (count >= cap) grow();
-        const base = count * DIM;
-        for (let d = 0; d < DIM; d += 1) {
-          let v = (f[d] - mean[d]) / std[d];
-          if (d === dtIdx) v = 0;                        // 与训练一致：防帧率泄漏
-          if (dropped.has(FEATURES[d])) v = 0;
-          X[base + d] = v;
-        }
-        count += 1;
       }
     });
     child.stderr.on('data', (d) => { if (stderr.length < 8192) stderr += d; });
@@ -346,8 +521,8 @@ async function collectMatrix({
     });
   });
 
-  if (count === 0) throw new Error('一帧都没解出来');
-  return { X, n: count, stride: step, truncated };
+  if (sink.n === 0) throw new Error('一帧都没解出来');
+  return sink.done();
 }
 
 /** 时间戳只留前 10 个（对齐到毫秒），避免日志爆掉；总数另记。 */
@@ -361,17 +536,33 @@ const headOf = (arr) => arr.slice(0, HEAD).map((v) => +Number(v).toFixed(3));
  *
  * @param {object} o 同 `shadowPass`，但要求先 `loadLiquidModel` 得到的 `md`
  * @param {object} o.md `loadLiquidModel()` 的返回值
- * @returns {Promise<{predCuts:number[], sampled:number, stride:number, msPass:number, msForward:number}>}
+ * @param {{X:Float32Array,n:number,stride:number,truncated:boolean}|null} [o.tapped]
+ *   扫描顺便喂过来的帧（`openFrameTap().result()`）。给了就用它，**不再解码**；
+ *   为 null / 帧数不足时自动退回 `collectMatrix`。
+ * @returns {Promise<{predCuts:number[], pred:Array, theta:number, sampled:number,
+ *                    stride:number, msPass:number, msForward:number, framesFrom:string}>}
  */
 export async function predictCuts({
   input, fps, start = 0, end, stride = 1, ffmpegPath = DEFAULT_FFMPEG, signal, md,
+  tapped = null, hwaccel = null,
 }) {
   const t0 = Date.now();
-  const matrix = await collectMatrix({
-    input, fps, start, end: Number.isFinite(Number(end)) ? Number(end) : undefined,
-    stride, ffmpegPath, signal, md,
+  const useTap = Boolean(tapped && tapped.n >= 2);
+  const matrix = useTap ? tapped : await collectMatrix({
+    input,
+    fps,
+    start,
+    end: Number.isFinite(Number(end)) ? Number(end) : undefined,
+    stride,
+    ffmpegPath,
+    signal,
+    md,
+    hwaccel,
   });
-  const msPass = Date.now() - t0;
+  // `framesFrom` 进日志与返回：`tap` 表示这一遍一帧都没解（wall time 里没有解码），
+  // `decode` 表示扫描没喂帧（缓存命中/帧出口被关掉），自己解了一遍。
+  const framesFrom = useTap ? 'tap' : 'decode';
+  const msPass = useTap ? 0 : Date.now() - t0;
 
   const rows = new Array(matrix.n);
   const dts = new Float64Array(matrix.n);
@@ -382,15 +573,23 @@ export async function predictCuts({
   const { out } = forward(md.model, matrix.X, rows, dts);
   const msForward = Date.now() - fw0;
 
+  const fpsEff = fps / matrix.stride;
+  /**
+   * 阈值**按本片的噪声自适应**，不用模型文件里那个固定值。
+   *
+   * 模型自带的 `md.theta`（部署模型 0.92）是学习期在 BBC 上标的：慢节奏合适，
+   * 快剪素材会欠检（SHOT 上 10 刀只报 1 刀）。实测自适应后 BBC 94.8→95.3、SHOT 69.5→76.9。
+   * 判据只看概率序列（见 `cfc.js:pickTheta`），不碰真值，所以可以在线上直接用。
+   */
+  const thetaAuto = pickTheta(out.cut, { fps: fpsEff });
   // 时间轴换算：第 i 个样本对应 `i / fpsEff` 秒；decodeCuts 用 fpsEff 就是为了这一点
-  const predCuts = decodeCuts(out.cut, { fps: fps / matrix.stride, theta: md.theta });
+  const predCuts = decodeCuts(out.cut, { fps: fpsEff, theta: thetaAuto });
   /**
    * 出点连同**它自己的概率**一起带出去。
    *
    * `liquid` 接管时要拿这批点去排布，而 `suppressClose`（丐中丐档的近邻合并）比的是
    * `cut.score` —— 没有分数就只能"留第一个"，那会把模型的置信度丢掉。
    */
-  const fpsEff = fps / matrix.stride;
   const pred = predCuts.map((t) => {
     const i = Math.min(out.cut.length - 1, Math.max(0, Math.round(t * fpsEff)));
     return { t, score: out.cut[i] };
@@ -398,9 +597,11 @@ export async function predictCuts({
   return {
     predCuts,
     pred,
+    theta: thetaAuto,
     sampled: matrix.n,
     stride: matrix.stride,
     truncated: matrix.truncated,
+    framesFrom,
     msPass,
     msForward,
   };
@@ -435,6 +636,10 @@ export async function shadowPass(o) {
     cuts = [], thetaHsv = null, modelPath = null, stride = 1,
     logPath = shadowLogPath(), ffmpegPath = DEFAULT_FFMPEG,
     signal, writeLog = true,
+    /** `openFrameTap()` 的返回值：扫描已经顺便把帧喂好了，这一遍不再解码。 */
+    tap = null,
+    /** 与扫描同一档硬件解码（只在"自己解码"那条路上生效）。 */
+    hwaccel = null,
   } = o;
 
   const base = {
@@ -458,9 +663,12 @@ export async function shadowPass(o) {
   const t0 = Date.now();
   try {
     if (!(fps > 0)) throw new Error(`fps 不合法：${fps}`);
-    const md = await loadLiquidModel(modelPath);
+    // 模型可能已经在 `openFrameTap()` 里加载过（帧出口需要 mean/std），别加载两次
+    const md = tap?.md ?? await loadLiquidModel(modelPath);
     const r = await predictCuts({
       input, fps, start, end, stride, ffmpegPath, signal, md,
+      tapped: tap ? tap.result() : null,
+      hwaccel,
     });
 
     const hsvTimes = Array.isArray(cuts)
@@ -488,7 +696,9 @@ export async function shadowPass(o) {
       sampled: r.sampled,
       stride: r.stride,
       thetaHsv: Number.isFinite(Number(thetaHsv)) ? Number(thetaHsv) : null,
-      thetaLiquid: md.theta,
+      thetaLiquid: r.theta,
+      // 模型文件里那个固定值也留着：两条数一起看才知道"自适应到底改了什么"
+      thetaModel: md.theta,
       model: basename(String(md.path)),
       cutsHsv: cmp.cutsHsv,
       cutsLiquid: cmp.cutsLiquid,
@@ -500,8 +710,10 @@ export async function shadowPass(o) {
       onlyHsvTotal: cmp.onlyHsv.length,
       onlyLiquidTotal: cmp.onlyLiquid.length,
       // msFeature = 这一遍重扫（解码 + 14 维）**减去**前向；msForward 单独量
+      // `framesFrom: 'tap'` 时没有重扫，msFeature 会接近 0 —— 这是对的，不是没量到
       msFeature: Math.max(0, r.msPass - r.msForward),
       msForward: r.msForward,
+      framesFrom: r.framesFrom,
       ...(r.truncated ? { truncated: true } : {}),
       ok: true,
     };
@@ -511,6 +723,11 @@ export async function shadowPass(o) {
     }
     if (r.stride > 1) {
       notes.push('stride>1：s_adj 被抬高、theta 不成立，只能看分歧率，不能用它出边界');
+    }
+    if (r.framesFrom === 'tap') {
+      notes.push('帧复用：这一遍没有单独解码，用的是扫描那一遍的帧');
+    } else if (tap) {
+      notes.push(`扫描没喂到帧（${tap.error ?? '缓存命中或帧出口被关掉'}），自己解了一遍`);
     }
     if (notes.length) record.note = notes.join('；');
     if (writeLog) await appendShadowLog(logPath, record);

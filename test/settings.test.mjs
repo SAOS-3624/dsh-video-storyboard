@@ -8,7 +8,7 @@ import { runInNewContext } from 'node:vm';
 
 import { canTranscribe } from '../src/storyboard/asr.js';
 import {
-  readAsrSettings, readVideoSettings, writeAsrSettings, writeVideoSettings,
+  lnnModelStatus, readAsrSettings, readVideoSettings, writeAsrSettings, writeVideoSettings,
 } from '../src/settings/config.js';
 import { createSettingsPage } from '../src/settings/server.js';
 
@@ -221,4 +221,42 @@ test('settings: client bundle 只在组合包页面注册，不占用设置 tab'
 
 test('settings server: 没有 webServer 时返回 null', () => {
   assert.equal(createSettingsPage({ ctx: { get: () => undefined }, env: { DSH_HOME: home() } }), null);
+});
+
+// ---------------------------------------------------------------- 取帧算法（hsv / lnn）
+
+/**
+ * 设置页上那一个下拉。三件事必须钉住：
+ *   ① 默认 `lnn`，而且写 `lnn` **删键**（文件里不留冗余默认值）；写 `hsv` 才落盘；
+ *   ② 对外只说 `lnn`，老名字 `liquid` 收到也当 lnn（删键）；
+ *   ③ 内置模型能不能用要能报出来 —— 否则用户选了 lnn、实际退回 hsv，界面上看着"已开启"。
+ */
+test('取帧算法：lnn 是默认值，写 lnn 等于删键；写 hsv 才落盘', () => {
+  const dir = home();
+  const env = envOf(dir);
+  assert.equal(readVideoSettings(env).sceneDetector, 'lnn', '没配就是 lnn');
+  // 写默认值 → 键消失（不是写一个 "lnn" 进去）
+  assert.equal(writeVideoSettings({ sceneDetector: 'lnn' }, env).sceneDetector, 'lnn');
+  assert.equal('sceneDetector' in JSON.parse(readFileSync(join(dir, 'video.json'), 'utf8')), false);
+  // 写 hsv → 必须落盘（那是从默认退回去的选项，读不回来就等于没生效）
+  assert.equal(writeVideoSettings({ sceneDetector: 'hsv' }, env).sceneDetector, 'hsv');
+  assert.equal(JSON.parse(readFileSync(join(dir, 'video.json'), 'utf8')).sceneDetector, 'hsv');
+});
+
+test('取帧算法：老名字 liquid 当 lnn 处理；认不出来的值要报错', () => {
+  const dir = home();
+  const env = envOf(dir);
+  assert.equal(writeVideoSettings({ sceneDetector: 'hsv' }, env).sceneDetector, 'hsv');
+  assert.equal(writeVideoSettings({ sceneDetector: 'liquid' }, env).sceneDetector, 'lnn');
+  assert.equal('sceneDetector' in JSON.parse(readFileSync(join(dir, 'video.json'), 'utf8')), false,
+    'liquid 等于 lnn，等于默认，所以删键');
+  assert.throws(() => writeVideoSettings({ sceneDetector: 'canny' }, env), /只能是 lnn 或 hsv/);
+});
+
+test('取帧算法：内置 LNN 模型必须可用（版本对得上、有 cut 头）', () => {
+  const s = lnnModelStatus();
+  assert.equal(s.ready, true, `内置模型不可用：${s.reason}`);
+  assert.ok(s.path.endsWith('lnn-model.json'), s.path);
+  // 设置页要能读到这个状态
+  assert.equal(readVideoSettings(envOf(home())).lnnModel.ready, true);
 });

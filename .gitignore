@@ -28,3 +28,8 @@ asr.json
 
 # 盲测/打包演示的产物（26MB 视频与图，不能进仓库）
 out-packed/
+
+# 本地实验/内部工作目录：bench 里是 100MB+ 的评测缓存与训练输出，
+# .workbuddy 是内部笔记与临时脚本 —— 都不该进版本库
+bench/
+.workbuddy/

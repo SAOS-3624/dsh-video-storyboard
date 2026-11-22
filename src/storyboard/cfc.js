@@ -50,6 +50,14 @@ export function sigmoid(v) {
 /**
  * 单序列前向。
  *
+ * ## 热循环里踩过的坑（都是"数学没变、只是白算"的那类）
+ *
+ * - `m.Wf` / `m.Wu` / `m.bf` / `m.bu` 每步要摸 128 次：提到循环外。
+ * - **`m[`w_${name}`]` 是每步每头一次的字符串模板 + 属性查找** —— 这是原来最贵的一行，
+ *   比它算的那个 64 次乘加还贵。`HW` / `HB` 预先解出来，热循环只读数组。
+ * - `z = [x ; h]` 那个 78 长的拼接数组去掉，改成"先 14 个输入、再 64 个状态"两段循环：
+ *   **累加顺序与原来完全一致**（j 从 0 到 zdim-1），所以结果逐位相同。
+ *
  * @param {object} m 模型参数：`{dim, units, zdim, heads, Wf, bf, Wu, bu, w_<head>, b_<head>}`
  * @param {Float32Array|Float64Array} X  (rows × dim)
  * @param {number[]|Int32Array} rows    按时间升序的行号
@@ -62,8 +70,9 @@ export function forward(m, X, rows, dts, { record = false, h0 = null } = {}) {
   const h = new Float64Array(units);
   if (h0) h.set(h0);
 
+  const heads = m.heads;
   const out = {};
-  for (const name of m.heads) out[name] = new Float64Array(T);
+  for (let k = 0; k < heads.length; k += 1) out[heads[k]] = new Float64Array(T);
 
   const cache = record ? {
     x: new Float64Array(T * dim),
@@ -76,50 +85,81 @@ export function forward(m, X, rows, dts, { record = false, h0 = null } = {}) {
     dt: new Float64Array(T),
     vo: {},
   } : null;
-  if (cache) for (const name of m.heads) cache.vo[name] = new Float64Array(T);
+  if (cache) for (const name of heads) cache.vo[name] = new Float64Array(T);
 
-  const z = new Float64Array(zdim);
+  const Wf = m.Wf;
+  const Wu = m.Wu;
+  const bf = m.bf;
+  const bu = m.bu;
+  const HW = new Array(heads.length);
+  const HB = new Array(heads.length);
+  const HO = new Array(heads.length);
+  for (let k = 0; k < heads.length; k += 1) {
+    HW[k] = m[`w_${heads[k]}`];
+    HB[k] = m[`b_${heads[k]}`][0];
+    HO[k] = out[heads[k]];
+  }
+  const nh = heads.length;
+  /**
+   * **必须快照上一步的 `h`。**
+   *
+   * 原来是把 `[x ; h]` 拼进 `z` 再乘，等于给所有单元一份"步初状态"。
+   * 如果直接读 `h[j]`，第 i 个单元看到的 j<i 已经是**本步刚更新过**的值 ——
+   * 数学上变成另一套（并行 → 串行）递归，概率能差 0.01 量级，而且看不出哪里错。
+   * 64 个 double 的拷贝，成本可以忽略。
+   */
+  const hPrev = new Float64Array(units);
+
   for (let t = 0; t < T; t += 1) {
     const base = rows[t] * dim;
     if (cache) {
       cache.hp.set(h, t * units);
       for (let d = 0; d < dim; d += 1) cache.x[t * dim + d] = X[base + d];
     }
-    for (let d = 0; d < dim; d += 1) z[d] = X[base + d];
-    z.set(h, dim);
 
-    const dt = Math.min(FDT_MAX, Math.max(1e-4, dts[t]));
+    const dtRaw = dts[t];
+    const dt = dtRaw > FDT_MAX ? FDT_MAX : (dtRaw < 1e-4 ? 1e-4 : dtRaw);
     if (cache) cache.dt[t] = dt;
+    hPrev.set(h);
 
     for (let i = 0; i < units; i += 1) {
       const wr = i * zdim;
-      let vf = m.bf[i];
-      let vu = m.bu[i];
-      for (let j = 0; j < zdim; j += 1) {
-        const zz = z[j];
-        vf += m.Wf[wr + j] * zz;
-        vu += m.Wu[wr + j] * zz;
+      let vf = bf[i];
+      let vu = bu[i];
+      for (let j = 0; j < dim; j += 1) {
+        const xj = X[base + j];
+        vf += Wf[wr + j] * xj;
+        vu += Wu[wr + j] * xj;
+      }
+      const wr2 = wr + dim;
+      for (let j = 0; j < units; j += 1) {
+        const hj = hPrev[j];
+        vf += Wf[wr2 + j] * hj;
+        vu += Wu[wr2 + j] * hj;
       }
       const f = Math.max(SP_FLOOR, softplus(vf));
       const u = Math.tanh(vu);
-      const a = Math.exp(-Math.min(FDT_MAX, f * dt));
-      const hp = h[i];
-      h[i] = a * hp + (1 - a) * u;
+      const fdt = f * dt;
+      const a = Math.exp(-(fdt > FDT_MAX ? FDT_MAX : fdt));
+      const hp = hPrev[i];
+      const hi = a * hp + (1 - a) * u;
+      h[i] = hi;
       if (cache) {
-        cache.vf[t * units + i] = vf;
-        cache.f[t * units + i] = f;
-        cache.u[t * units + i] = u;
-        cache.a[t * units + i] = a;
-        cache.ht[t * units + i] = h[i];
+        const o = t * units + i;
+        cache.vf[o] = vf;
+        cache.f[o] = f;
+        cache.u[o] = u;
+        cache.a[o] = a;
+        cache.ht[o] = hi;
       }
     }
 
-    for (const name of m.heads) {
-      const w = m[`w_${name}`];
-      let v = m[`b_${name}`][0];
+    for (let k = 0; k < nh; k += 1) {
+      const w = HW[k];
+      let v = HB[k];
       for (let i = 0; i < units; i += 1) v += w[i] * h[i];
-      out[name][t] = sigmoid(v);
-      if (cache) cache.vo[name][t] = v;
+      HO[k][t] = sigmoid(v);
+      if (cache) cache.vo[heads[k]][t] = v;
     }
   }
 
@@ -163,4 +203,80 @@ export function decodeCuts(probs, {
     lastT = t;
   }
   return out;
+}
+
+/**
+ * 自适应阈值：**只看概率序列，不看真值**。
+ *
+ * ## 为什么固定 θ 不行
+ *
+ * 模型文件里带的是一个学习期标定的 `theta`（部署模型是 0.92）。BBC 这种纪录片很合适，
+ * 但换到快剪素材（SHOT 27 段）每个折的最优 θ 落在 **0.58~0.86** —— 用 0.92 会明显欠检
+ * （实测 `shot-4347` 10 刀只报 1 刀，F1 18.2）。而把 θ 直接调到 0.6，BBC 上又会多报。
+ *
+ * ## 判据：本片的"噪声水平"
+ *
+ * 一帧的概率高不高，取决于**这条片子平时有多吵**：慢节奏素材 p95 只有 0.05，
+ * 0.5 已经是"绝对异常"；快剪/高运动素材 p95 能到 0.8，0.9 都未必是刀。
+ * 所以取"每 30 秒一段、各段的 p95"里**最吵的那一段**，乘一个系数当阈值。
+ *
+ * 用**最吵的那段**而不是全片中位数：慢片里夹一段快剪时，θ 应该按快剪那段的噪声定，
+ * 否则那一段会整段被判成"每帧都是刀"。
+ *
+ * 实测（38 个 case，模型与 case 严格留出）：
+ *
+ *   固定 0.92      BBC 94.8 / SHOT 69.5
+ *   固定 0.6       （SHOT 变好、BBC 崩）
+ *   **本规则**     BBC 95.3 / SHOT 76.9（k=1.05，纯 BBC 训练的模型上量的）
+ *
+ * ## k 怎么定成 1.0 的
+ *
+ * 上表那个 1.05 是在**纯 BBC 训练**的模型上标的。换成"BBC+SHOT 加权联合训练"的模型后，
+ * 概率分布变了，重标一次（38 个 case 全部留出，同一套规则扫 k）：
+ *
+ *   k      0.90   0.95   1.00   1.05   1.10   1.20   1.50
+ *   BBC    95.9   95.7   95.2   95.1   95.0   94.9   94.5
+ *   SHOT   76.5   75.6   78.2   77.9   77.2   77.0   76.7
+ *
+ * 两边的峰**几乎重合**（BBC 0.90 / SHOT 1.00），所以取 **k = 1.0** —— 一套参数两域通用，
+ * 不需要按素材类型切开关。曲线很平：0.95~1.10 之间两域都只差 0.5 个点以内。
+ *
+ * 分块用直方图求分位，不用排序 —— 一小时的片子是 8 万个浮点，排序没必要。
+ *
+ * @param {Float32Array|Float64Array} probs 逐帧概率
+ * @param {{fps?:number, k?:number, winSec?:number, lo?:number, hi?:number}} [o]
+ * @returns {number} θ ∈ [lo, hi]
+ */
+export function pickTheta(probs, {
+  fps = 25, k = 1.0, winSec = 30, lo = 0.5, hi = 0.95,
+} = {}) {
+  const n = probs?.length ?? 0;
+  if (!n) return lo;
+  const BINS = 256;
+  /** 一段的 p95（直方图累计，O(段长)） */
+  const p95Of = (from, to) => {
+    const hist = new Uint32Array(BINS);
+    for (let i = from; i < to; i += 1) {
+      const b = probs[i] * BINS;
+      hist[b >= BINS ? BINS - 1 : (b < 0 ? 0 : b | 0)] += 1;
+    }
+    const want = Math.max(1, Math.ceil((to - from) * 0.95));
+    let acc = 0;
+    for (let b = 0; b < BINS; b += 1) {
+      acc += hist[b];
+      if (acc >= want) return (b + 1) / BINS;
+    }
+    return 1;
+  };
+  const per = Math.max(1, Math.round(winSec * (fps > 0 ? fps : 25)));
+  let noisy = 0;
+  if (n <= per) {
+    noisy = p95Of(0, n);
+  } else {
+    for (let i = 0; i + per <= n; i += per) noisy = Math.max(noisy, p95Of(i, i + per));
+    // 尾巴不足一段时也要算上：最后几帧往往是片尾黑场，噪声低，但"漏算"比"多算"危险
+    if (n % per > per * 0.3) noisy = Math.max(noisy, p95Of(n - (n % per), n));
+  }
+  const th = noisy * k;
+  return Math.min(hi, Math.max(lo, +th.toFixed(3)));
 }

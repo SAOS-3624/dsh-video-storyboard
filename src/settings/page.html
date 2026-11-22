@@ -76,6 +76,13 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
       <span class="hint">Netscape cookies.txt，给需要登录的 B 站/YouTube 用；也可用 DSH_VIDEO_COOKIES 环境变量。</span>
     </label>
     <label class="check"><input id="storyboardAuto" type="checkbox"> 自动生成分镜（storyboard.auto）</label>
+    <label class="field">取帧算法（video.json 的 sceneDetector）
+      <select id="sceneDetector">
+        <option value="lnn">lnn · 切点模型（默认）</option>
+        <option value="hsv">hsv · 像素差分</option>
+      </select>
+      <span class="hint" id="sceneDetectorHint">hsv 按像素变化定切点；lnn 用自己的切点模型。模型内置，不用另配。</span>
+    </label>
     <label class="field">切点灵敏度默认值（storyboard.cutFloor）
       <select id="cutFloor">
         <option value="">默认 · 80（纪录片 / 电影，长镜头）</option>
@@ -193,6 +200,20 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
     $('launchBrowser').checked = v.launchBrowser === true;
     $('cookies').value = v.cookies || '';
     $('storyboardAuto').checked = v.storyboardAuto !== false;
+    /**
+     * 取帧算法。`shadow` 是调试档（只记日志），手动配过的人仍然看得到，
+     * 但不主动提供 —— 它不解决问题，只攒证据。
+     */
+    const sd = v.sceneDetector === 'hsv' || v.sceneDetector === 'shadow' ? v.sceneDetector : 'lnn';
+    if (!$('sceneDetector').querySelector('option[value="' + sd + '"]')) {
+      const opt = document.createElement('option');
+      opt.value = sd; opt.textContent = sd + '（当前）';
+      $('sceneDetector').appendChild(opt);
+    }
+    $('sceneDetector').value = sd;
+    $('sceneDetectorHint').textContent = sd === 'lnn' && !(v.lnnModel && v.lnnModel.ready)
+      ? '⚠️ 内置模型不可用（' + ((v.lnnModel && v.lnnModel.reason) || '未知原因') + '），实际仍会走 hsv。'
+      : 'hsv 按像素变化定切点；lnn 用自己的切点模型。模型内置，不用另配。';
     $('cutFloor').value = v.cutFloor == null ? '' : String(v.cutFloor);
     $('imageTrigger').value = v.imageTrigger == null ? '' : String(v.imageTrigger);
     $('imageKeep').value = v.imageKeep == null ? '' : String(v.imageKeep);
@@ -264,6 +285,7 @@ code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var
         launchBrowser: $('launchBrowser').checked,
         cookies: $('cookies').value,
         storyboardAuto: $('storyboardAuto').checked,
+        sceneDetector: $('sceneDetector').value,
         cutFloor: $('cutFloor').value === '' ? 0 : Number($('cutFloor').value),
         // 空串 = 恢复默认（删键，走插件默认 300 / 100）；trigger 设 0 = 关掉这个功能
         imageTrigger: $('imageTrigger').value === '' ? '' : Number($('imageTrigger').value),

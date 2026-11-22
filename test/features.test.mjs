@@ -200,3 +200,41 @@ test('尺寸不对要抛错，不要静默算出垃圾', () => {
   assert.throws(() => f.push(new Float32Array(100), 0), /帧长度/);
   assert.throws(() => createFeatures({ w: 0, h: 0 }), /w\/h/);
 });
+
+// ---------------------------------------------------------------- s_long 的环形缓冲（v4）
+
+/**
+ * 这一组是**补一个真 bug**：`s_long` 的环形缓冲原来在预热期**跳过写入**，
+ * 而 `ringWarm` 一满就立刻开始读 —— 于是第 `lag .. 2lag-2` 帧的 `s_long`
+ * 是拿**全 0 缓冲**跟当前帧比出来的（量级 ~50，正常 `s_adj` 只有 5~20）。
+ *
+ * 旧单测只检查"跑够久之后"的那一帧（那时 ring 已经写满了），所以全绿却漏了这个 bug。
+ * `scan.js` 的同名逻辑一直是无条件写的，没这个问题。
+ */
+
+test('s_long 预热：还没攒够 lag 帧时必须是 0，不许拿没写过的缓冲去比', () => {
+  const fps = 10;
+  const lag = 4;                                   // 0.4s × 10fps
+  const f = createFeatures({ w: W, h: H, fps, longSec: 0.4 });
+  // 全片同一个纯色：任何"隔 lag 帧"的比较都应该是 0
+  const frame = solid(0, 0, 120);
+  const seen = [];
+  for (let i = 0; i <= lag; i += 1) seen.push(get(f.push(frame, i / fps), 's_long'));
+  // 前 lag 帧本来就没有"lag 帧之前"，必须是 0
+  for (let i = 0; i < lag; i += 1) assert.equal(seen[i], 0, `第 ${i} 帧 s_long 应为 0，实际 ${seen[i]}`);
+  // 第 lag 帧已经有 lag 帧之前了（同一帧），也必须是 0 —— 旧实现这里是 ~53
+  assert.equal(seen[lag], 0, `第 ${lag} 帧拿的是全 0 缓冲，说明 ring 没写；实际 ${seen[lag]}`);
+});
+
+test('s_long 距离：比的是 lag 帧之前那一帧，不是上一帧', () => {
+  const fps = 10;
+  const lag = 4;
+  const f = createFeatures({ w: W, h: H, fps, longSec: 0.4 });
+  f.push(solid(0, 0, 50), 0);                      // 帧 0：暗
+  // 帧 1..lag：亮且完全不变
+  let x;
+  for (let i = 1; i <= lag; i += 1) x = f.push(solid(0, 0, 200), i / fps);
+  assert.equal(get(x, 's_adj'), 0, '相邻两帧一样，s_adj 必须是 0');
+  assert.ok(get(x, 's_long') > 20,
+    `lag 帧之前是暗的，s_long 应该抓到这次跳变，实际 ${get(x, 's_long')}`);
+});

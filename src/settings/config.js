@@ -7,10 +7,12 @@
  * key 只写不读：GET 永远不返回明文，POST 里空字符串表示“保持原值”。
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { resolveAsrConfig } from '../storyboard/asr.js';
+import { BUNDLED_MODEL } from '../storyboard/shadow.js';
+import { FEATURE_VERSION } from '../storyboard/features.js';
 
 const MAX_TEXT = 200;
 
@@ -124,6 +126,46 @@ export function writeAsrSettings(patch = {}, env = process.env) {
   return readAsrSettings(env);
 }
 
+let lnnCache = null;
+
+/**
+ * 内置 LNN 模型到底能不能用。**设置页要能说实话。**
+ *
+ * 用户勾了 `lnn`、但包里模型缺失或版本对不上时，`liquid` 模式会安静地退回 hsv
+ * （只写一行 `ok:false` 到日志）—— 界面上看着"已开启"，实际跑的还是 hsv。
+ * 那是这个项目最恨的那类错，所以这里直接查一遍告诉界面。
+ *
+ * 按 mtime 缓存：设置页每改一个字段都会回一次 `/state`，而模型有 210 KB ——
+ * 每次都 `JSON.parse` 一遍会让自动保存明显发涩。
+ *
+ * @returns {{ready:boolean, reason:string|null, path:string}}
+ */
+export function lnnModelStatus() {
+  const path = BUNDLED_MODEL;
+  let mtime = 0;
+  try {
+    mtime = statSync(path).mtimeMs;
+  } catch {
+    return { ready: false, reason: '内置模型缺失（安装包不完整）', path };
+  }
+  if (lnnCache && lnnCache.path === path && lnnCache.mtime === mtime) return lnnCache.value;
+  let value;
+  try {
+    const j = JSON.parse(readFileSync(path, 'utf8'));
+    if (j.featureVersion !== FEATURE_VERSION) {
+      value = { ready: false, reason: `模型特征版本 ${j.featureVersion} ≠ 当前 ${FEATURE_VERSION}`, path };
+    } else if (!Array.isArray(j.heads) || !j.heads.includes('cut')) {
+      value = { ready: false, reason: '模型里没有 cut 头', path };
+    } else {
+      value = { ready: true, reason: null, path };
+    }
+  } catch (e) {
+    value = { ready: false, reason: `模型读不了：${String(e?.message ?? e).slice(0, 120)}`, path };
+  }
+  lnnCache = { path, mtime, value };
+  return value;
+}
+
 export function readVideoSettings(env = process.env) {
   const path = videoConfigPath(env);
   const raw = readObject(path);
@@ -137,6 +179,24 @@ export function readVideoSettings(env = process.env) {
     launchBrowser: raw.data.launchBrowser === true,
     cookies: typeof raw.data.cookies === 'string' ? raw.data.cookies : '',
     storyboardAuto: !(storyboard && typeof storyboard === 'object' && storyboard.auto === false),
+    /**
+     * **取帧算法**（设置页上那一个下拉）。
+     *
+     * 面向用户只有 `hsv` / `lnn` 两个值；`shadow` 是调试档（只记日志、不改边界），
+     * 手动改过配置的人还能看到它，但设置页不主动提供 —— 它不解决问题，只攒证据。
+     *
+     * 内部实现把这个模式叫 `liquid`（见 `shadow.js:SCENE_ALIASES`）；这里统一
+     * **对外说 lnn**，落盘也写 `lnn`，免得用户看到两个名字。
+     * 没配 = 默认 `lnn`（`shadow.js:DEFAULT_SCENE_DETECTOR`）。
+     */
+    sceneDetector: (() => {
+      const v = String(raw.data.sceneDetector ?? '').trim().toLowerCase();
+      if (v === 'hsv') return 'hsv';
+      if (v === 'shadow') return 'shadow';
+      return 'lnn';
+    })(),
+    /** 内置模型能不能用；界面据此决定要不要黄字提示。 */
+    lnnModel: lnnModelStatus(),
     // 全局默认切点门槛；null = 没设，走内核默认（mc:80）
     cutFloor: (() => {
       const n = Number(storyboard && typeof storyboard === 'object' ? storyboard.cutFloor : NaN);
@@ -205,6 +265,23 @@ export function writeVideoSettings(patch = {}, env = process.env) {
     else delete next.cookies;
   }
   const storyboardAuto = bool(patch.storyboardAuto, 'storyboardAuto');
+  /**
+   * **取帧算法**。默认是 `lnn`，所以写 `lnn` = **删键**（文件里不留冗余默认值）；
+   * 写 `hsv` 才是显式落盘（那是要从默认退回去的选项，必须能读出来）。
+   * `liquid` 是内部老名字，收到就存成 `lnn`。
+   */
+  if (patch.sceneDetector !== undefined) {
+    const v = String(patch.sceneDetector ?? '').trim().toLowerCase();
+    if (!v || v === 'lnn' || v === 'liquid') {
+      delete next.sceneDetector;
+    } else if (v === 'hsv') {
+      next.sceneDetector = 'hsv';
+    } else if (v === 'shadow') {
+      next.sceneDetector = 'shadow';
+    } else {
+      throw new Error(`取帧算法只能是 lnn 或 hsv（收到 ${v}）`);
+    }
+  }
   const sbPrev = next.storyboard && typeof next.storyboard === 'object' && !Array.isArray(next.storyboard)
     ? next.storyboard
     : {};

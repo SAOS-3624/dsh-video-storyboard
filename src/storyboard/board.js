@@ -159,11 +159,13 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
     ? userCfg.storyboard
     : {};
   /**
-   * 场景检测器（`~/.dsh/video.json` 的顶层 `sceneDetector` / `liquidModel`）。
+   * 取帧算法（`~/.dsh/video.json` 的顶层 `sceneDetector` / `liquidModel`）。
    *
-   * **默认 `hsv`，而且默认时一个字段都不往 options 里塞** —— 这是"默认配置下输出
-   * 与改动前逐字节一致"的保证：下游 `runStoryboard` 拿到的参数集合和以前完全相同。
-   * `shadow` 的语义与日志格式见 `shadow.js`。
+   * **默认是 `lnn`**（`shadow.js:DEFAULT_SCENE_DETECTOR`）。所以"什么都没配"时这里
+   * 也会往下传 `sceneDetector: 'liquid'` —— 以前默认 hsv 时是"一个字段都不加"，
+   * 那条"默认配置下输出逐字节不变"的保证随着改默认一起失效了，别再照旧注释理解。
+   *
+   * 想回到纯像素差分：配置里写 `"sceneDetector": "hsv"`，或工具参数传 `sceneDetector: 'hsv'`。
    */
   const scene = readSceneConfig(userCfg);
   const sceneOpts = scene.mode === 'hsv'
@@ -172,6 +174,8 @@ export function boardOptions(args = {}, { kind = 'board', frameSource = null } =
       sceneDetector: scene.mode,
       ...(scene.model ? { liquidModel: scene.model } : {}),
       ...(scene.stride > 1 ? { shadowStride: scene.stride } : {}),
+      // 默认 `tap`（帧复用）；只有显式写 `decode` 才回退成"模型自己再解一遍"
+      ...(scene.frames === 'decode' ? { shadowFrames: 'decode' } : {}),
       shadowLog: scene.logPath,
     };
   const wanted = resolveStrategy(args.strategy);

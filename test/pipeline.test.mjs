@@ -295,12 +295,14 @@ test('e2e: 传入 precomputed 时不再自己扫描', async (t) => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = await makeFixture(dir);          // 这段测试片本身有切点
 
-  const own = await runStoryboard({ input: file, maxFrames: 4, encode: false });
+  // 显式 `hsv`：这条考的是"注入的切点不许被自己扫描覆盖"，跟取帧算法无关。
+  // （默认已改成 lnn，不指定的话模型会参与，测的就不是同一件事了）
+  const own = await runStoryboard({ input: file, maxFrames: 4, encode: false, sceneDetector: 'hsv' });
   assert.ok(own.cuts.length > 0, '正常扫描应找到切点');
 
   // 注入一份"窗口外的切点"：如果管线自己又扫了一遍，就会找到真实切点，测试失败
   const injected = await runStoryboard({
-    input: file, maxFrames: 4, encode: false,
+    input: file, maxFrames: 4, encode: false, sceneDetector: 'hsv',
     precomputed: { cuts: [{ t: 99 }], summary: { frames: 0, p90: 0 }, threshold: 12 },
   });
   assert.equal(injected.cuts.length, 0, '应完全采用注入的切点（且已按窗口过滤）');
@@ -785,4 +787,26 @@ test('formatPlanPreview: 预算被可读性顶回去时，不许再说"→ 1 ima
     auto: { chosen: 'compact', targetCap: 1, capSheets: 0, options: [] },
   };
   assert.match(formatPlanPreview({ ...base, plan: okPlan }), /→ \*\*1 image\*\*/);
+});
+
+/**
+ * 这条是**默认改成 lnn 之后才发现**的坑：`precomputed` 的契约是"切点由调用方给定、
+ * 一个阶段都不跑"（`cuts.js:resolveCuts`），但模型接管发生在它之后 ——
+ * 不拦的话注入的 2 刀会被换成模型的十几刀（实测 2 → 12）。
+ */
+test('e2e: precomputed 的切点不许被模型接管（默认 lnn 也不行）', async (t) => {
+  if (!hasFfmpeg) return t.skip('ffmpeg not on PATH');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-pre-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await makeFixture(dir);
+
+  const r = await runStoryboard({
+    input: file, transcript: 'off', audioStrip: false, encode: false,
+    cache: false, maxFrames: 4, sceneDetector: 'lnn',
+    // fixture 只有 6 秒 —— 注入点必须落在窗口内，否则会被"窗口过滤"先清掉，测不到接管
+    precomputed: { cuts: [{ t: 1 }, { t: 4 }], summary: { frames: 0, p90: 0 }, threshold: 12 },
+  });
+  assert.deepEqual(r.cuts.map((c) => c.t), [1, 4], '注入的切点必须原样出来');
+  assert.equal(r.sceneDetector.applied, 'hsv', '没接管就不该声称接管了');
+  assert.match(r.sceneDetector.note, /precomputed/, '要写明为什么没跑模型');
 });
