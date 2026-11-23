@@ -260,3 +260,39 @@ test('取帧算法：内置 LNN 模型必须可用（版本对得上、有 cut �
   // 设置页要能读到这个状态
   assert.equal(readVideoSettings(envOf(home())).lnnModel.ready, true);
 });
+
+// ---------------------------------------------------------------- 自动保存的依赖数组
+
+/**
+ * issue #97：档位策略/自定义映射表改完不保存 —— 改完只动本地 state，
+ * 自动保存的 `useEffect` 依赖数组里没有这两个字段 → effect 不重跑 → `save()` 不被调用
+ * → `video.json` 根本没写盘。
+ *
+ * 这里钉一条结构性不变量：**`save()` 读到的每个表单字段，都必须在依赖数组里出现**。
+ * 以前是手抄清单，加了字段忘了加依赖就会静默丢掉那个字段的保存。
+ */
+test('设置页：自动保存的依赖数组覆盖 save() 提交的每个字段（#97）', () => {
+  const src = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
+  const saveAt = src.indexOf('async function save()');
+  assert.ok(saveAt > 0, '找不到 save()');
+  const saveBody = src.slice(saveAt, src.indexOf('useEffect(', saveAt));
+  const submitted = new Set(
+    [...saveBody.matchAll(/\bcurrent\.([A-Za-z0-9_]+)/g)].map((m) => m[1]),
+  );
+  // key / clearKey 走 ref 提交（不在 form 里），不参与自动保存
+  const viaRef = new Set(['key', 'clearKey']);
+  const want = [...submitted].filter((f) => !viaRef.has(f));
+  assert.ok(want.includes('strategy') && want.includes('tierMap'), 'save() 应该提交 strategy / tierMap');
+
+  const effectAt = src.indexOf('void save(); }, 600);');
+  assert.ok(effectAt > 0, '找不到自动保存的 useEffect');
+  const depsText = src.slice(effectAt, src.indexOf(']);', effectAt));
+  const deps = new Set(
+    [...depsText.matchAll(/form\s*&&\s*form\.([A-Za-z0-9_]+)/g)].map((m) => m[1]),
+  );
+  for (const field of want) {
+    assert.ok(deps.has(field), `save() 提交了 ${field}，但依赖数组里没有 form.${field} —— 改它不会触发保存`);
+  }
+  // tierMap 是对象，必须比序列化值，否则每次渲染都是新引用 → 无限自动保存
+  assert.match(depsText, /JSON\.stringify\(form\.tierMap\)/, 'tierMap 要用 JSON.stringify 当依赖');
+});

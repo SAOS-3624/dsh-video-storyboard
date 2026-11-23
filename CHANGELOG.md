@@ -78,6 +78,24 @@ node bin/shadow-report.mjs [--log <path>] [--json] [--montage <dir>]
 写错时 doctor 会静默卡两分钟，体检场景应封 30s；`baseUrl` 走环境变量、`manage` 只从文件读，
 两条来源不一致时会拉起文件里那个、去探环境变量那个。
 
+### Fixed — 设置页改「档位策略」不保存：自动保存的依赖数组漏了 strategy / tierMap（#97）
+
+设置页切「档位策略」或调「自定义」的八个逐档下拉，离开再回来就变回「不指定」；
+同一页改 `browserPort`/`cookies` 却立刻写盘。`~/.dsh/video.json` 的 `mtime` 停在安装那天。
+
+`save()` 和后端本来就是对的（`lib/client.js` 里 `strategy`/`tierMap` 组装完整、
+`src/settings/config.js::writeVideoSettings` 往返正确），断的是**触发器**：
+自动保存的 `useEffect` 依赖数组是手抄的 10 项清单，漏了 `form.strategy` 与
+`form.tierMap`，而下拉框 handler 只 `setForm` 不调 `save()` —— 依赖没变，
+effect 不重跑，`save()` 永远不被调用。
+
+补这两项；`tierMap` 是对象，每次渲染都是新引用、直接进依赖数组会无限触发自动保存，
+所以比 `JSON.stringify(form.tierMap)`。
+
+同一笔加了 `test/settings.test.mjs` 里一条结构性不变量：**`save()` 读到的每个表单字段
+都必须在依赖数组里出现**（`key`/`clearKey` 走 ref 提交，在白名单里）。以后往 `save()` 里
+加字段忘了加依赖，测试直接红 —— 这类"加了字段静默丢保存"的坑不该靠肉眼守。
+
 ## [0.7.6] - 2026-11-16
 
 ### Fixed — `video_locate` 永远报 no transcript：`pipeline.js` 只 import 从不调用（#94）
