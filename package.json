@@ -107,7 +107,8 @@
     "CHANGELOG.md",
     "LICENSE",
     "CREDITS.md",
-    "NOTICE"
+    "NOTICE",
+    "!src/storyboard/native.js"
   ],
   "engines": {
     "node": ">=20"
