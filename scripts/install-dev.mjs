@@ -27,7 +27,18 @@ const PROFILE_DIR = join(DSH_HOME, 'profiles', PROFILE);
 const TARGET = join(PROFILE_DIR, 'node_modules', 'dsh-video-storyboard');
 const PKG_NAME = 'dsh-video-storyboard';
 // `.tmp` 必须跳过：里面有调试输出、Edge 的一次性 profile（Cookies 文件被占用时 cp 会直接失败）
-const SKIP = new Set(['node_modules', '.git', 'test', '.tmp']);
+/**
+ * 不进副本的东西。
+ *
+ * ⚠️ 2026-11-23 实事故：`bench/`（249M 评测缓存）+ `.tmp-textgap`(93M) + `.tmp-probe-text`(35M)
+ * + `out-packed`(26M) 全被拷进 profile，副本 423M；而当时 DSH 正开着，HMR 盯着这份目录，
+ * 边拷边被读到半截文件 → 插件在设置里显示 "Run failed"。**运行时不 import bench/**
+ * （`src` 里没有任何 `bench/` 引用），跳过它是纯赚。
+ *
+ * 规则：显式的几个大目录 + 所有点开头的（.git/.workbuddy/.tmp* 之类都不该外流）。
+ */
+const SKIP = new Set(['node_modules', 'test', 'bench', 'out-packed']);
+const skipName = (name) => SKIP.has(name) || name.startsWith('.');
 
 const mode = process.argv.includes('--remove') ? 'remove'
   : process.argv.includes('--check') ? 'check' : 'install';
@@ -69,7 +80,7 @@ async function syncFiles() {
   await rm(TARGET, { recursive: true, force: true });
   await cp(HERE, TARGET, {
     recursive: true,
-    filter: (src) => !SKIP.has(src.split(/[\\/]/).pop()),
+    filter: (src) => !skipName(src.split(/[\\/]/).pop()),
   });
 }
 
