@@ -173,7 +173,8 @@ export function shadowLogPath(env = process.env) {
 }
 
 /**
- * 读 `~/.dsh/video.json` 里的阴影配置。**两个键都可缺省**，缺省 = `hsv`（行为与今天完全一致）。
+ * 读 `~/.dsh/video.json` 里的取帧算法配置。**两个键都可缺省**，缺省 = `DEFAULT_SCENE_DETECTOR`
+ * （当前是 `lnn`；要回到纯像素差分就显式写 `"sceneDetector": "hsv"`）。
  *
  * `shadowFrames`：
  *   `tap`（默认）  扫描那一遍顺便把帧喂给模型，**模型不再单独解码**
