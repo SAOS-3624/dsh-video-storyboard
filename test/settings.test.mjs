@@ -201,7 +201,7 @@ test('settings server: 页面 token、API token、保存后不回显 key', async
   assert.equal(result.url, page.url);
 });
 
-test('settings: client bundle 只在组合包页面注册，不占用设置 tab', () => {
+test('settings: client bundle 注册组合包页 + 设置侧边栏一栏（不占用插件 tab）', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(pkg.dsh.client.platform, 'web');
   assert.equal(pkg.exports['./client'], './lib/client.js');
@@ -217,6 +217,16 @@ test('settings: client bundle 只在组合包页面注册，不占用设置 tab'
   const bundle = registered.find((entry) => entry.options.name === 'plugins.bundle.config');
   assert.equal(bundle.options.key, 'dsh-video-storyboard');
   assert.equal(bundle.component({ view: 'summary' }), null);
+  /**
+   * 设置侧边栏那一栏：用户按名字找设置页时，"插件 → 组合包配置"是翻不到的
+   * （社区实报"我是不是没装这个插件"）。所以要和 see-now 一样注册 `settings.section`。
+   */
+  const section = registered.find((entry) => entry.options.name === 'settings.section');
+  assert.ok(section, '必须注册 settings.section，否则设置里没有「视频分镜」这一栏');
+  assert.equal(section.options.id, 'video-storyboard');
+  assert.equal(section.options.order, 44, '排在 see-now(43) 后面');
+  assert.equal(section.options.label(), '视频分镜');
+  assert.equal(typeof section.component, 'function');
 });
 
 test('settings server: 没有 webServer 时返回 null', () => {

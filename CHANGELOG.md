@@ -96,6 +96,17 @@ effect 不重跑，`save()` 永远不被调用。
 都必须在依赖数组里出现**（`key`/`clearKey` 走 ref 提交，在白名单里）。以后往 `save()` 里
 加字段忘了加依赖，测试直接红 —— 这类"加了字段静默丢保存"的坑不该靠肉眼守。
 
+### Added — 设置里单独一栏「视频分镜」（和 see-now「看你看的东西」并排）
+
+以前只有 `plugins.bundle.config`，入口在"插件 → 组合包配置"里 —— 用户按名字翻不到，
+社区反馈就是"我是不是没装这个插件"。现在照 see-now 的接法注册 `settings.section`
+（`id: 'video-storyboard'`，`order: 44`，紧挨着 see-now 的 43），渲染的是同一套表单
+（`SettingsTab`），数据源不变：`webserver/index-inject` 已经把带 token 的 URL 注成
+全局 `__DSH_VIDEO_STORYBOARD_SETTINGS__`，所以这一栏里 `apiConfig()` 照样能用。
+
+`test/settings.test.mjs` 那条从"**不**注册设置 tab"改成"组合包页 + `settings.section`
+都要有"（`settings.plugins.tab` 仍然不许占——那是"插件"自己的 tab，语义不同）。
+
 ## [0.7.6] - 2026-11-16
 
 ### Fixed — `video_locate` 永远报 no transcript：`pipeline.js` 只 import 从不调用（#94）
