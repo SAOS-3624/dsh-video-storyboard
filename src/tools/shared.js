@@ -44,34 +44,49 @@ export function serviceOf(ctx, name) {
 }
 
 /**
+ * 把若干张 PNG 提交成附件。**所有出图的工具都走这里**（storyboard / zoom / video_index）。
+ *
+ * @param {object} ctx
+ * @param {{data:Buffer, name:string, mediaType?:string}[]} items
+ * @returns {Promise<object[]>} 宿主回的附件引用
+ */
+export async function attachPngImages(ctx, items) {
+  // **运行期探测，不是 inject 声明**（原因见 src/index.js 的 inject 注释）：
+  // 宿主没注册 attachments 时，插件必须照样能加载、工具照样能跑，只是拿不到图片。
+  const attachments = serviceOf(ctx, 'attachments');
+  const saveImage = attachments?.saveImage;
+  if (typeof saveImage !== 'function') {
+    throw new Error('this DSH build has no `attachments` service, so the image '
+      + 'cannot be shown. Upgrade DSH, or use `video_probe` / `video_locate` (text only).');
+  }
+  const images = [];
+  for (const item of items) {
+    // **必须 `.call(attachments, ...)`**：新版宿主的 saveImage 内部读 `this.compression`，
+    // 把方法从服务上取下来裸调，`this` 就是 undefined ——
+    // 报的是 `Cannot read properties of undefined (reading 'compression')`（0.2.1-rc.5 实报）。
+    images.push(await saveImage.call(attachments, {
+      data: item.data,
+      mediaType: item.mediaType ?? 'image/png',
+      name: item.name,
+    }));
+  }
+  // 图已经进历史了，看一眼要不要把更早的省略掉（**绝不能影响这一轮的交付**）
+  notifyDelivery();
+  return images;
+}
+
+/**
  * 把每张分镜图提交成附件。两个入口各写过一遍这段循环，收成一处 —— mediaType / 命名改一次就够。
  *
  * 交完顺手 `notifyDelivery()`：图上进了会话历史就跟着每一轮请求走，`src/storyboard/offload.js`
  * 会按 `imageKeep` / `imageKeepMB` 把更早的省略掉（异步、不阻塞、失败只记日志）。
  */
 export async function attachSheetImages(ctx, result) {
-  // **运行期探测，不是 inject 声明**（原因见 src/index.js 的 inject 注释）：
-  // 宿主没注册 attachments 时，插件必须照样能加载、工具照样能跑，只是拿不到图片。
-  const attachments = serviceOf(ctx, 'attachments');
-  const saveImage = attachments?.saveImage;
-  if (typeof saveImage !== 'function') {
-    throw new Error('this DSH build has no `attachments` service, so the storyboard image '
-      + 'cannot be shown. Upgrade DSH, or use `video_probe` / `video_locate` (text only).');
-  }
-  const images = [];
-  for (const sheet of result.sheets) {
-    // **必须 `.call(attachments, ...)`**：新版宿主的 saveImage 内部读 `this.compression`，
-    // 把方法从服务上取下来裸调，`this` 就是 undefined ——
-    // 报的是 `Cannot read properties of undefined (reading 'compression')`（0.2.1-rc.5 实报）。
-    images.push(await saveImage.call(attachments, {
-      data: sheet.png,
-      mediaType: 'image/png',
-      name: `storyboard-${sheet.sheet}.png`,
-    }));
-  }
-  // 图已经进历史了，看一眼要不要把更早的省略掉（**绝不能影响这一轮的交付**）
-  notifyDelivery();
-  return images;
+  return attachPngImages(ctx, result.sheets.map((sheet) => ({
+    data: sheet.png,
+    mediaType: 'image/png',
+    name: `storyboard-${sheet.sheet}.png`,
+  })));
 }
 
 /**

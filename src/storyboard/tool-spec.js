@@ -33,6 +33,8 @@ export const ZOOM_TOOL_NAME = 'video_zoom';
 export const PROBE_TOOL_NAME = 'video_probe';
 export const LOCATE_TOOL_NAME = 'video_locate';
 export const HELP_TOOL_NAME = 'video_help';
+export const INDEX_TOOL_NAME = 'video_index';
+export const DANMAKU_TOOL_NAME = 'video_danmaku';
 
 /**
  * `video_help` —— 手册按需取（正文在 `./help.js`）。
@@ -50,7 +52,8 @@ export function helpToolSpec() {
     parameters: {
       topic: {
         type: 'string',
-        description: 'cost | strategy | tiers | cuts | text | links | order | subtitles — omit for all.',
+        description: 'cost | strategy | tiers | cuts | text | links | order | subtitles | index | danmaku'
+          + ' — omit for all.',
       },
     },
     output: {
@@ -399,6 +402,167 @@ export function zoomToolSpec() {
 }
 
 /**
+ * `video_index` —— 用 B 站**已经拼好的**雪碧图做一份全片索引（issue #95）。
+ *
+ * 它和另外五个工具的根本区别：**一次解码都不需要**。所以它的 description 必须先把
+ * "这只是定位、不是读数"说死 —— 一条 18 分钟的视频只花两张图就能覆盖全片，
+ * 代价是每格 480×270（老稿 160×90），传进模型还会再降一次。
+ */
+export function indexToolSpec() {
+  return {
+    name: INDEX_TOOL_NAME,
+    description: [
+      'Bilibili only. Get a whole-video INDEX without downloading or decoding anything: the site has',
+      'already tiled 100 frames per sprite sheet, so an 18-minute video is covered by two images plus a',
+      'table of "the k-th cell = the n-th second".',
+      '',
+      'Use it when the content is all in the picture (rankings, slides, tutorials) and you need to find',
+      'WHICH moments matter before paying for full frames. This is the cheap first pass:',
+      'video_index → pick cells from the table → video_zoom({from, to}) for the ones that matter.',
+      '',
+      '**It is a map, not a page.** Each cell is ~480×270 (older uploads 160×90) and gets downsampled',
+      'again on the way into the model: good enough to recognise "this is the ranking table", not enough',
+      'to read the numbers. Never quote figures off the index image — zoom in first.',
+      '',
+      'The table is positional: the k-th number is the k-th cell, row-major, from 0. The first two cells',
+      'are both 0s but are different pictures — do not deduplicate them, the whole map shifts.',
+      '',
+      'Only the first part of a multi-part video is indexed by default (say `allParts: true` for all).',
+      'If the index is too sparse (a gap wider than `maxGapSec`) it says so — that upload is better read',
+      'with video_storyboard, which decodes and can sample anywhere.',
+    ].join('\n'),
+    parameters: {
+      input: {
+        type: 'string',
+        required: true,
+        description: 'A BV id (BV1xxxxxxxxx) or a bilibili.com/video/BV… link. Required.',
+      },
+      page: {
+        type: 'integer',
+        description: 'Which part to index (1-based, default 1).',
+      },
+      allParts: {
+        type: 'boolean',
+        description: 'Index every part instead of just `page` (default false).',
+      },
+      maxGapSec: {
+        type: 'number',
+        description: 'Warn when the worst sampling gap exceeds this many seconds (default 10).',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: {
+            type: 'string',
+            required: true,
+            description: 'Geometry, sampling gaps, the cell→second table, and what this image cannot do.',
+          },
+          images: { type: 'array', required: true, items: { type: 'json' } },
+        },
+      },
+      render(args, value) {
+        return [
+          ...value.images.map((attachment) => ({ type: 'image', attachment })),
+          { type: 'text', text: value.text },
+        ];
+      },
+    },
+    timeoutMs: 120_000,
+    isConcurrencySafe() {
+      return true;
+    },
+  };
+}
+
+/**
+ * `video_danmaku` —— 把上千条弹幕整理成一张表（issue #98）。
+ *
+ * 和 `video_index` 同类：**不解码的旁路数据**。两条一起进 0.8.0，因为它们共用
+ * "先 pagelist 拿 cid，再打一个公开接口"这一个形状。
+ *
+ * description 的重点不是"怎么调"，而是**告诉模型别怎么用**：
+ * 它不是片子的内容（"观众在敲什么" ≠ "片子讲了什么"）、高频不等于重点。
+ */
+export function danmakuToolSpec() {
+  return {
+    name: DANMAKU_TOOL_NAME,
+    description: [
+      'Bilibili only. Gather the whole comment track (danmaku) of a video and hand it back as ONE table',
+      'instead of thousands of lines — no video download, no decoding.',
+      '',
+      'It merges identical lines (NFKC-normalised, so full-width and half-width punctuation collapse),',
+      'keeps counts and time spans, drops the "2–5 times" middle band, and filters link-farm spam.',
+      'It first measures how concentrated the comments are, because that decides what the content IS:',
+      '',
+      '- concentrated (top-10 groups cover >50% of all comments): a fandom/cheer video — the repeated',
+      '  line IS the content ("阳之力鸣人" ×395); the long tail is leftovers;',
+      '- scattered: a review/talk video — the repeats are noise ("?" ×24, "吓哭了" ×27) and the real',
+      '  information is in long one-off sentences.',
+      '',
+      '**This is what the audience typed, not what the video says.** Never treat it as a transcript or',
+      'a summary of the content, and never assume the most-repeated line is the main point.',
+      '',
+      'Bilibili caps what this endpoint returns: a video with 120k comments may only give ~10k. The',
+      'report says how much it got — if it warns about sampling, do not make claims like "most viewers',
+      'think X" from it.',
+      '',
+      'Only the first part of a multi-part video is read by default (pass `page`).',
+    ].join('\n'),
+    parameters: {
+      input: {
+        type: 'string',
+        required: true,
+        description: 'A BV id (BV1xxxxxxxxx) or a bilibili.com/video/BV… link. Required.',
+      },
+      page: {
+        type: 'integer',
+        description: 'Which part to read (1-based, default 1).',
+      },
+      topShort: {
+        type: 'integer',
+        description: 'How many frequent groups to list (default 20; 0 = none).',
+      },
+      minChars: {
+        type: 'integer',
+        description: 'A one-off line needs at least this many characters to count as "content" (default 10).',
+      },
+      maxLong: {
+        type: 'integer',
+        description: 'Cap on how many long one-off lines are listed, sampled evenly across time '
+          + '(default 60; 0 = none). A fandom video can have 1000+ of them.',
+      },
+      filterAds: {
+        type: 'boolean',
+        description: 'Drop link-farm / contact-info spam (default true); the count is still reported.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: {
+            type: 'string',
+            required: true,
+            description: 'Concentration verdict, the tables, what was left out, and the sampling ratio.',
+          },
+        },
+      },
+      render(args, value) {
+        return [{ type: 'text', text: value.text }];
+      },
+    },
+    timeoutMs: 60_000,
+    isConcurrencySafe() {
+      return true;
+    },
+  };
+}
+
+/**
  * 第三个工具：只读容器头，几毫秒。让模型在花掉第一张图（≈233 token）之前，
  * 先知道"多长、多大、有没有音轨/字幕、按什么粒度读"。
  */
@@ -643,6 +807,48 @@ export function validateToolArgs(args) {
   }
   if (args.ocr !== undefined && typeof args.ocr !== 'boolean') {
     problems.push('ocr must be a boolean');
+  }
+  return problems;
+}
+
+/** video_index 的兜底校验（宿主不支持注解式约束，范围只能在这里判） */
+export function validateIndexArgs(args) {
+  const problems = [];
+  if (!args?.input || typeof args.input !== 'string') problems.push('input is required');
+  if (args?.page !== undefined && (!Number.isInteger(args.page) || args.page < 1)) {
+    problems.push('page must be a positive integer (omit it for part 1)');
+  }
+  if (args?.allParts !== undefined && typeof args.allParts !== 'boolean') {
+    problems.push('allParts must be a boolean');
+  }
+  if (args?.maxGapSec !== undefined
+    && !(Number.isFinite(Number(args.maxGapSec)) && Number(args.maxGapSec) > 0)) {
+    problems.push('maxGapSec must be a positive number of seconds');
+  }
+  return problems;
+}
+
+/** video_danmaku 的兜底校验 */
+export function validateDanmakuArgs(args) {
+  const problems = [];
+  if (!args?.input || typeof args.input !== 'string') problems.push('input is required');
+  if (args?.page !== undefined && (!Number.isInteger(args.page) || args.page < 1)) {
+    problems.push('page must be a positive integer (omit it for part 1)');
+  }
+  if (args?.topShort !== undefined
+    && (!Number.isInteger(args.topShort) || args.topShort < 0 || args.topShort > 200)) {
+    problems.push('topShort must be an integer 0..200 (0 = do not list frequent groups)');
+  }
+  if (args?.minChars !== undefined
+    && (!Number.isInteger(args.minChars) || args.minChars < 0 || args.minChars > 200)) {
+    problems.push('minChars must be an integer 0..200');
+  }
+  if (args?.maxLong !== undefined
+    && (!Number.isInteger(args.maxLong) || args.maxLong < 0 || args.maxLong > 2000)) {
+    problems.push('maxLong must be an integer 0..2000 (0 = do not list long lines)');
+  }
+  if (args?.filterAds !== undefined && typeof args.filterAds !== 'boolean') {
+    problems.push('filterAds must be a boolean');
   }
   return problems;
 }
