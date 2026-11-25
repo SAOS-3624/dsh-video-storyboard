@@ -62,6 +62,50 @@ export function subtitleMissSource({ remote = null, willTranscribe = false } = {
 }
 
 /**
+ * **站点字幕是不是这条片子的**（issue #99）。
+ *
+ * ## 为什么需要这道闸
+ *
+ * 报告人实拍：137 秒的片子，`x/player/wbi/v2` 报了一条 `ai-zh` 轨，取回来的却是
+ * 229 条、止于 421 秒的**手机评测**字幕（另一次是 20 条 / 51 秒的完全无关内容）。
+ * 而清单里写着 `transcript-model="site-cc:ai-zh"`，看起来一切正常 —— 模型于是照着
+ * **别人的台词**讲这条片子。
+ *
+ * 静默的错误数据比"没有字幕"危险得多：后者会让人去配 ASR，前者只会让人抄错。
+ *
+ * ## 判据只用时长，不做内容匹配
+ *
+ * 时长是最硬的量：137 秒的片子不可能有 421 秒的字幕。片名/关键词匹配是**猜**
+ * —— 片名和台词本来可以毫无字面关系，误伤比漏判更糟。
+ *
+ * 已知边界（报告人也一并说清了）：**抓不到"短但无关"那一档**。20 条 / 51 秒的
+ * 「杨幂回旋镖」短于本片，时长判据放行。这条闸只保证"明显的错字幕不再被静默采用"，
+ * 不是完整解。
+ *
+ * @param {Array<{to?:number}>} segments
+ * @param {number} duration 本片时长（秒）。`0` / 未知 → **不判断**（宁可放行，不做无根据的拒绝）
+ * @param {{tolerance?:number}} [o] 容忍倍数：片尾/标点略微超出是正常的，137s 长出 421s 不正常
+ * @returns {{ok:boolean, judged:boolean, lastTo:number|null, ratio:number|null, tolerance:number}}
+ */
+export function siteSubtitlesBelong(segments, duration, { tolerance = 1.3 } = {}) {
+  const list = Array.isArray(segments) ? segments : [];
+  const dur = Number(duration);
+  if (list.length === 0 || !(dur > 0)) {
+    return { ok: true, judged: false, lastTo: null, ratio: null, tolerance };
+  }
+  let lastTo = 0;
+  for (const s of list) {
+    const to = Number(s?.to);
+    if (Number.isFinite(to) && to > lastTo) lastTo = to;
+  }
+  if (!(lastTo > 0)) {
+    return { ok: true, judged: false, lastTo: null, ratio: null, tolerance };
+  }
+  const ratio = lastTo / dur;
+  return { ok: ratio <= tolerance, judged: true, lastTo, ratio, tolerance };
+}
+
+/**
  * 这一窗口的字从哪来（**决定，不扫图、不取帧**）。
  *
  * @returns {Promise<{transcriptInfo:object|null, textInSilence:number,
@@ -79,6 +123,8 @@ export async function resolveTranscript({
   let transcriptInfo = null;
   // 站点有字幕轨但要登录 —— 清单要说明"现在用的是 ASR，不是这视频没字幕"
   let subtitleNeedsLogin = false;
+  /** 站点字幕被判为"不是这条片子的"（issue #99）时的一句人话，进 transcriptInfo 给清单用 */
+  let siteRejectNote = null;
   let asrSeconds = null;
   let asrCached = null;
   let asrLife = null;
@@ -114,12 +160,24 @@ export async function resolveTranscript({
     const remote = (sourceInfo?.url && fetchOptions?.siteSubtitles !== false)
       ? await fetchRemoteSubtitles({ url: sourceInfo.url, cookies: fetchOptions?.cookies ?? null })
       : null;
-    const subtitle = remote?.ok
+    /**
+     * **站点字幕可能根本不是这条片子的**（issue #99）。取回来先用时长验一下：
+     * 判为不属于本片时**不采用**，退回内嵌轨 / ASR，并把这个事实带进清单 ——
+     * 否则模型会照着一份别人的台词讲这条片子，而且没有任何地方能看出不对。
+     */
+    const siteVerdict = remote?.ok ? siteSubtitlesBelong(remote.segments, info?.duration) : null;
+    const siteRejected = siteVerdict && !siteVerdict.ok ? siteVerdict : null;
+    const subtitle = (remote?.ok && !siteRejected)
       ? remote.segments
       : (info.hasSubtitle ? await extractSubtitleTrack({ input, ffmpegPath }) : null);
     if (remote && !remote.ok && remote.reason === 'needs-login') {
       // 有字幕但要登录：这个事实必须让用户看到，否则会以为"这视频没字幕"
       subtitleNeedsLogin = true;
+    }
+    if (siteRejected) {
+      // 只在进程日志里留一条：清单里由 format.js 说话（模型才需要看）
+      siteRejectNote = `站点字幕被判为不属于本片：止于 ${siteVerdict.lastTo.toFixed(1)}s `
+        + `而本片 ${Number(info?.duration ?? 0).toFixed(1)}s（${siteVerdict.ratio.toFixed(2)}x，容限 ${siteVerdict.tolerance}x）`;
     }
     /**
      * **抓字幕这一步自己坏了**（跟"这视频没字幕"是两件事）。
@@ -133,13 +191,21 @@ export async function resolveTranscript({
       transcriptInfo = {
         segments: subtitle,
         source: 'subtitle',
-        model: remote?.ok ? `site-cc${remote.lang ? `:${remote.lang}` : ''}` : 'embedded',
+        // 站点那份被判为别人的时，这里只剩内嵌轨 —— **不能写成 site-cc**
+        // （否则清单说"这份是站点 AI 字幕"，而它其实是内嵌轨，又是一次静默说谎）
+        model: (remote?.ok && !siteRejected) ? `site-cc${remote.lang ? `:${remote.lang}` : ''}` : 'embedded',
       };
     } else if (!willTranscribe()) {
       // 压根不会转写（云端没配 key）—— 跟"跑了但没听懂"是两码事。
       // 旧代码走的是 withCache → null 空壳 → asr.empty → 'asr-empty'，清单于是写
       // "ASR ran and found no speech here"，一个字都没听过却说"这片子没人说话"。
-      transcriptInfo = { segments: [], ...subtitleMissSource({ remote, willTranscribe: false }) };
+      /**
+       * 站点字幕被判为"不是这条片子的"、又没有内嵌轨 —— **这一档必须自己说话**（issue #99）。
+       * 写 `no-key` 会把人引去配 ASR，而配了也解决不了"站点给了别人字幕"这件事。
+       */
+      transcriptInfo = siteRejected
+        ? { segments: [], source: 'subtitle-mismatch', reason: 'site-subtitles-wrong-video' }
+        : { segments: [], ...subtitleMissSource({ remote, willTranscribe: false }) };
     } else {
       try {
         // 切片调用：单次请求过长会让时间码整体压早（实测 299s 压早 13s）。
@@ -243,8 +309,17 @@ export async function resolveTranscript({
     : 0;
 
   return {
-    transcriptInfo: (transcriptInfo && subtitleNeedsLogin)
-      ? { ...transcriptInfo, subtitleNeedsLogin: true }
+    transcriptInfo: transcriptInfo
+      ? {
+        ...transcriptInfo,
+        ...(subtitleNeedsLogin ? { subtitleNeedsLogin: true } : {}),
+        /**
+         * 站点字幕被拒这件事**必须跟着结果走**（issue #99）。挂在最后统一加，
+         * 是因为它同时适用于三种结局：用了内嵌轨、走了 ASR、以及什么都没拿到。
+         * 只在其中一处加，另外两条路上这个事实就会蒸发 —— 那就又回到"静默"了。
+         */
+        ...(siteRejectNote ? { siteSubtitleRejected: siteRejectNote } : {}),
+      }
       : transcriptInfo,
     textInSilence,
     asrSeconds,

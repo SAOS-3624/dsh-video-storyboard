@@ -1142,8 +1142,26 @@ export function formatManifest(result, {
       : '  → 告诉用户：yt-dlp 装了但这次执行失败了（常见是子进程写不进临时目录、或 cookie 文件读不了）。'
         + '先看上面 detail 里的原文；临时可以让它用本地文件跑，或先把 ASR 配上。');
   }
-  if (result.transcript?.source === 'no-key') {
-    lines.push(`transcript: NOT attempted — this ASR backend needs a key and none is configured, so ` +
+  /**
+   * **站点字幕被拒**（issue #99）：B 站的 AI 字幕轨有竞态，会返回**别的视频**的字幕。
+   * 采用前用时长验过，判为不属于本片的一律不采用。
+   *
+   * 这一档必须自己说话。它和"没字幕""ASR 坏了""没配 key"全都不同：其余几种让人去
+   * 修自己的环境，这一种是**站点给了错数据**，装什么都解决不了，只能换一路拿字。
+   */
+  if (result.transcript?.siteSubtitleRejected) {
+    lines.push(`transcript: ${result.transcript.siteSubtitleRejected} — REFUSED, not used.`);
+    if (result.transcript.source === 'subtitle-mismatch') {
+      lines.push('  → 告诉用户：B 站这次给的字幕轨是**别的视频**的（站点侧的竞态，不是他能修的东西），'
+        + '已经拒绝采用，所以这一段没有台词。**这不等于片子没有对白** —— '
+        + '要看画面上烧死的字幕可以用 `video_subtitles`，或给 ASR 配一个本地服务。'
+        + '不要拿别处的台词硬凑，也不要说"这片子没人说话"。');
+    } else {
+      lines.push(`  → 下面的台词来自 ${result.transcript.source === 'subtitle' ? '内嵌字幕轨' : 'ASR'}，`
+        + '不是站点那份；讲这条片子时以这里为准。');
+    }
+  }
+  if (result.transcript?.source === 'no-key') {    lines.push(`transcript: NOT attempted — this ASR backend needs a key and none is configured, so ` +
       'nothing was listened to. This is neither "no dialogue" nor a subtitle-track failure. Set the key ' +
       '(docs/SETUP.zh.md), point baseUrl at a local service (no key needed), or pass transcriptFile / use ' +
       'a video with an embedded subtitle track.');
